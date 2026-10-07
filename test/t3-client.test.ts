@@ -110,6 +110,43 @@ describe('T3 client', () => {
   });
 });
 
+describe('T3 session sharing', () => {
+  async function until(condition: () => boolean): Promise<void> {
+    for (let i = 0; i < 200 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.ok(condition(), 'condition reached');
+  }
+
+  test('a timeout on one call leaves the other calls on the session running', async (t) => {
+    const { fake, client } = await setup(t);
+    await client.environmentRead();
+    fake.toolDelays.set('t3_thread_launch', 300);
+    fake.toolDelays.set('t3_environment_read', 600);
+    const launch = client.launchThread(LAUNCH);
+    // A health probe that times out while the launch is in flight.
+    await assert.rejects(client.environmentRead({ timeoutMs: 100 }), rejectsWith('t3_timeout'));
+    const launched = await launch;
+    assert.equal(launched.threadId, [...fake.threads.keys()][0], 'the launch response arrives');
+    fake.toolDelays.clear();
+    assert.ok(await client.environmentRead(), 'the session is still usable');
+  });
+
+  test('a failure on an old connection never closes the newer one', async (t) => {
+    const { fake, client, setToken } = await setup(t);
+    await client.environmentRead();
+    fake.toolDelays.set('t3_thread_launch', 300);
+    const first = client.launchThread(LAUNCH);
+    await until(() => fake.calls.includes('t3_thread_launch'));
+    // A renewed credential replaces the connection while the first launch is still in flight on the old one.
+    const renewed = fake.mintPairingCode();
+    fake.validTokens.add(renewed);
+    setToken(renewed);
+    const second = client.launchThread({ ...LAUNCH, title: 'Second synthetic job [job:def456]' });
+    await assert.rejects(first, (error: unknown) => error instanceof T3TransportError && error.delivery === 'unknown');
+    const launched = await second;
+    assert.equal(fake.threads.get(launched.threadId)?.title, 'Second synthetic job [job:def456]');
+  });
+});
+
 describe('T3 thread tools', () => {
   test('launch, read incrementally, list by marker, search, send and interrupt', async (t) => {
     const { fake, client } = await setup(t);

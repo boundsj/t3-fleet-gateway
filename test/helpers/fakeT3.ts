@@ -157,6 +157,8 @@ export class FakeT3 {
   rejectDecisions = false;
   /** Delay before answering tool calls, milliseconds. */
   toolDelayMs = 0;
+  /** Per-tool delay before answering, milliseconds; overrides toolDelayMs for that tool. */
+  readonly toolDelays = new Map<string, number>();
   /** Tools whose next call runs but whose HTTP response is then dropped (connection destroyed). */
   readonly dropResponseOnce = new Set<string>();
   /** Tools whose next call is answered with this bare HTTP status instead of running. */
@@ -442,7 +444,8 @@ export class FakeT3 {
     const server = new McpServer({ name: 'T3 Code', version: this.serverVersion });
     const run = async (tool: string, produce: () => Record<string, unknown>) => {
       this.calls.push(tool);
-      if (this.toolDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.toolDelayMs));
+      const delay = this.toolDelays.get(tool) ?? this.toolDelayMs;
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
       const failure = this.failures.get(tool);
       const fail = (value: { code: string; message: string }) => ({
         isError: true,

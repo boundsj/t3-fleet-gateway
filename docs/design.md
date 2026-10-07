@@ -240,7 +240,7 @@ Per host, the gateway obtains a T3 MCP credential with T3's documented pairing-c
 
 T3 issues no refresh tokens; credentials last 30 days. The renewal job re-enrolls when fewer than `renewWhenDaysLeft` days remain (or the credential has expired), keeps the old credential until the new one is verified, and alerts in logs and `fleet_status` if renewal fails. It does not enroll hosts that were never enrolled; `serve` logs `host.not_enrolled` for those.
 
-The T3 client keeps one MCP session per host and reconnects after failures or a credential change. A `404` (T3 forgot the session, so it never handled the call) is retried once on a new session. Other transport failures are retried once only for read-only tools; for state-changing tools a lost response is ambiguous, and the job layer must record it as `unknown` rather than retry. Old T3 sessions expire on their own; the operator can revoke them in T3's Settings → Connections.
+The T3 client keeps one MCP session per host, shared by every call to that host (watcher, dispatcher, health probes, agent actions). It replaces the session only after a session-level failure (a connection error or closed transport, a failure while connecting, `404` session lost, `401`/`403` or another `4xx`) or a credential change. A request timeout or a `5xx` answer fails only that call: closing the session would also fail every other call in flight on it, for example a launch whose response would then be lost. Each connection has a generation number, so a failure observed on an older connection never closes a newer one. A `404` (T3 forgot the session, so it never handled the call) is retried once on a new session. Other transport failures are retried once only for read-only tools; for state-changing tools a lost response is ambiguous, and the job layer must record it as `unknown` rather than retry. Old T3 sessions expire on their own; the operator can revoke them in T3's Settings → Connections.
 
 CLI: `hosts enroll <id>`, `hosts status`.
 
@@ -281,6 +281,7 @@ This automates T3's consent step using the operator's own machine access (the sa
 - The package is not published to npm: Node does not strip types under `node_modules`, so it runs from a checkout (or `npm link`).
 - T3 `isError` on a launch is a definite rejection (`failed`); only transport failures can make a launch `unknown`. Unknown launches are reconciled by the title marker, never relaunched.
 - Transport failures carry a delivery verdict in the T3 client rather than in the job layer, so every state-changing call (launch, send, interrupt, respond) can tell "nothing happened" from "may have happened".
+- The shared T3 session is replaced only on session-level failures, never on a timeout, and resets are tied to the connection generation that failed: one slow call (such as a `fleet_status` health probe) must not lose the response of a launch in flight on the same session.
 - A read-only call precedes launches so a dead keep-alive connection is discovered by a retryable read.
 - `idle` frees a concurrency slot: a finished turn should not block the queue while it waits for review.
 - Permission approvals stay in T3: T3's MCP tools cannot answer them, so `work_respond` handles questions and `work_status` flags `waitingForApproval`.

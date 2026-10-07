@@ -88,15 +88,36 @@ function causeCode(error: unknown): string | undefined {
 }
 
 /**
+ * Whether a failed call means the MCP session itself is unusable, so the connection must be
+ * replaced. A request timeout or a 5xx answer is a failure of that one request: the session stays,
+ * and so do the other calls in flight on it.
+ */
+function sessionFailed(error: unknown, sent: boolean): boolean {
+  if (!sent) return true;
+  if (error instanceof SdkError && error.code === SdkErrorCode.RequestTimeout) return false;
+  const status = httpStatus(error);
+  return status === undefined || status < 500;
+}
+
+interface Connection {
+  client: Promise<Client>;
+  token: string;
+  /** Increases with every new connection, so a late failure on an old one cannot close a newer one. */
+  generation: number;
+}
+
+/**
  * MCP client for one T3 Code server. Connects lazily, keeps the session, and reconnects after
- * transport failures or a credential change. Failures surface as GatewayError with stable codes.
+ * session-level failures (connection errors, a forgotten session, a rejected credential) or a
+ * credential change. Failures surface as GatewayError with stable codes.
  */
 export class T3Client {
   readonly hostId: string;
   readonly #url: URL;
   readonly #token: () => string | undefined;
   readonly #timeoutMs: number;
-  #connection: { client: Promise<Client>; token: string } | undefined;
+  #connection: Connection | undefined;
+  #generation = 0;
 
   constructor(options: T3ClientOptions) {
     this.hostId = options.hostId;
@@ -110,19 +131,22 @@ export class T3Client {
    * a new session. Other transport failures are retried once only for calls marked `readOnly`:
    * for anything that changes state, a lost response is ambiguous and the caller must decide.
    * Transport failures are thrown as T3TransportError, whose `delivery` tells the two cases apart.
+   * Only session-level failures replace the connection; a timeout leaves other calls on it running.
    */
   async callTool<T>(name: string, args: Record<string, unknown>, schema: z.ZodType<T>, options: CallOptions = {}): Promise<T> {
     const timeout = options.timeoutMs ?? this.#timeoutMs;
     for (let attempt = 0; ; attempt++) {
       let sent = false;
+      let connection: Connection | undefined;
       try {
-        const client = await this.#client(timeout);
+        connection = this.#connect(timeout);
+        const client = await connection.client;
         sent = true;
         const result = await client.callTool({ name, arguments: args }, { timeout });
         return parseToolResult(name, result, schema);
       } catch (error) {
         if (error instanceof GatewayError) throw error;
-        await this.#reset();
+        if (connection && sessionFailed(error, sent)) await this.#reset(connection.generation);
         const translated = this.#translate(error, sent);
         const retryable =
           httpStatus(error) === 404 || (options.readOnly === true && (translated.code === 'host_unreachable' || translated.code === 't3_response_lost'));
@@ -200,25 +224,26 @@ export class T3Client {
     await this.#reset();
   }
 
-  #client(timeout: number): Promise<Client> {
+  #connect(timeout: number): Connection {
     const token = this.#token();
     if (!token) {
-      return Promise.reject(new GatewayError('host_not_enrolled', `Host ${this.hostId} has no T3 credential. Run: t3-fleet-gateway hosts enroll ${this.hostId}`));
+      throw new GatewayError('host_not_enrolled', `Host ${this.hostId} has no T3 credential. Run: t3-fleet-gateway hosts enroll ${this.hostId}`);
     }
-    if (this.#connection && this.#connection.token !== token) void this.#reset();
+    if (this.#connection && this.#connection.token !== token) void this.#reset(this.#connection.generation);
     if (!this.#connection) {
       const client = new Client({ name: GATEWAY_NAME, version: GATEWAY_VERSION });
       const transport = new StreamableHTTPClientTransport(this.#url, { authProvider: { token: async () => token } });
       const connecting = client.connect(transport, { timeout }).then(() => client);
-      this.#connection = { client: connecting, token };
+      this.#connection = { client: connecting, token, generation: ++this.#generation };
     }
-    return this.#connection.client;
+    return this.#connection;
   }
 
-  async #reset(): Promise<void> {
+  /** Close the connection of the given generation, or the current one; a newer connection is left alone. */
+  async #reset(generation?: number): Promise<void> {
     const connection = this.#connection;
+    if (!connection || (generation !== undefined && connection.generation !== generation)) return;
     this.#connection = undefined;
-    if (!connection) return;
     try {
       await (await connection.client).close();
     } catch {
