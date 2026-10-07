@@ -1,0 +1,28 @@
+{
+  "publicUrl": "https://gateway.example.ts.net",
+  "listen": { "host": "127.0.0.1", "port": 3790 },
+  "hosts": [
+    {
+      "id": "main",
+      "label": "Always-on workstation",
+      "t3Url": "http://127.0.0.1:3773",
+      "mintPairingCode": ["t3", "auth", "pairing", "create", "--ttl", "5m", "--label", "t3-fleet-gateway", "--json"],
+      "access": "auto",
+      "maxConcurrentJobs": 2
+    }
+  ],
+  "projects": [
+    {
+      "alias": "pilot",
+      "description": "Scratch repository for trying the gateway",
+      "host": "main",
+      "t3ProjectTitle": "pilot",
+      "baseRef": "main",
+      "branchPrefix": "fleet/",
+      "runtimeMode": "approval-required"
+    }
+  ],
+  "tokens": { "accessTtlSeconds": 43200, "refreshIdleTtlDays": 90 },
+  "renewal": { "renewWhenDaysLeft": 5, "checkEveryMinutes": 60 },
+  "watcher": { "pollSeconds": 10 }
+}
