@@ -177,6 +177,7 @@ export class FakeT3 {
   readonly #deferredInterrupts = new Set<string>();
   #server: Server | undefined;
   #port = 0;
+  #offline = false;
   readonly #pairingCodes = new Set<string>();
   readonly #authCodes = new Map<string, { clientId: string; redirectUri: string; challenge: string; access: string }>();
   readonly #sessions = new Map<string, Session>();
@@ -311,25 +312,43 @@ export class FakeT3 {
     this.#deferredInterrupts.clear();
   }
 
-  async start(port = 0): Promise<this> {
-    this.#server = createServer((req, res) => {
+  /**
+   * Listen on a loopback port the first time; after stop(), come back on the same port. The port is
+   * held until close(), so no other test process can take it while this host is "down".
+   */
+  async start(): Promise<this> {
+    this.#offline = false;
+    if (this.#server) return this;
+    const server = createServer((req, res) => {
       this.#handle(req, res).catch(() => {
         if (!res.headersSent) res.writeHead(500).end();
       });
     });
-    await new Promise<void>((resolve) => this.#server?.listen(port, '127.0.0.1', resolve));
-    this.#port = (this.#server.address() as AddressInfo).port;
+    server.on('connection', (socket) => {
+      if (this.#offline) socket.resetAndDestroy();
+    });
+    this.#server = server;
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    this.#port = (server.address() as AddressInfo).port;
     return this;
   }
 
-  /** Simulate the host going away, keeping the port for a later restart. */
+  /**
+   * Simulate the host going away: drop every connection and session, and reset new connections
+   * before any request is read, until start() is called again. Nothing reaches the tools meanwhile.
+   */
   async stop(): Promise<void> {
+    this.#offline = true;
     await this.forgetSessions();
+    this.#server?.closeAllConnections();
+  }
+
+  /** Release the port for good. */
+  async close(): Promise<void> {
+    await this.stop();
     const server = this.#server;
     this.#server = undefined;
-    if (!server) return;
-    server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 
   /** Drop every MCP session, as T3 does when it restarts, while keeping connections open. */

@@ -10,40 +10,49 @@ import { ApprovalCodes, MAX_FAILURES_PER_HOUR } from '../src/oauth/approvalCodes
 import { ClientStore, MAX_REGISTRATIONS_PER_HOUR } from '../src/oauth/clients.ts';
 import { systemClock } from '../src/time.ts';
 import { startFakeT3, type FakeT3 } from './helpers/fakeT3.ts';
-import { freePort } from './helpers/gateway.ts';
+import { openFrontDoor, type FrontDoor } from './helpers/frontDoor.ts';
 import { tempDir } from './helpers/tmp.ts';
 
 interface Env {
   dir: string;
   configPath: string;
   dataDir: string;
-  port: number;
+  /** The public URL's port; `serve` listens on a port of its own behind it. */
+  door: FrontDoor;
 }
 
 async function environment(t: TestContext, fake?: FakeT3, extra: Record<string, unknown> = {}): Promise<Env> {
   const dir = tempDir(t);
-  const port = await freePort();
+  const door = await openFrontDoor(t);
   const configPath = join(dir, 'config.json');
   writeFileSync(
     configPath,
     JSON.stringify({
-      publicUrl: `http://127.0.0.1:${port}`,
-      listen: { host: '127.0.0.1', port },
+      publicUrl: door.url,
+      listen: { host: '127.0.0.1', port: door.port },
       hosts: [{ id: 'main', t3Url: fake?.url ?? 'http://127.0.0.1:9', mintPairingCode: fake?.mintCommand() ?? ['false'] }],
       ...extra,
     }),
   );
-  return { dir, configPath, dataDir: join(dir, 'data'), port };
+  return { dir, configPath, dataDir: join(dir, 'data'), door };
 }
 
 async function run(env: Env, args: string[], waitForShutdown?: () => Promise<void>) {
+  const serving = waitForShutdown && {
+    listenPort: 0,
+    waitForShutdown: async (gateway: { port: number }) => {
+      env.door.target = gateway.port;
+      await waitForShutdown();
+      env.door.target = undefined;
+    },
+  };
   const out: string[] = [];
   const err: string[] = [];
   const code = await runCli(args, {
     env: { T3FG_CONFIG: env.configPath, T3FG_DATA_DIR: env.dataDir },
     out: (text) => out.push(text),
     err: (text) => err.push(text),
-    ...(waitForShutdown ? { waitForShutdown } : {}),
+    ...serving,
   });
   return { code, out: out.join('\n'), err: err.join('\n') };
 }
@@ -128,7 +137,7 @@ describe('cli', () => {
 
   test('hosts enroll and hosts status, without printing credentials', async (t) => {
     const fake = await startFakeT3({ serverVersion: '9.9.9' });
-    t.after(() => fake.stop());
+    t.after(() => fake.close());
     const env = await environment(t, fake);
     const before = await run(env, ['hosts', 'status']);
     assert.match(before.out, /credential: missing/);
@@ -156,7 +165,7 @@ describe('cli', () => {
 
   test('doctor fails until the host is enrolled and the gateway is serving, then passes', async (t) => {
     const fake = await startFakeT3();
-    t.after(() => fake.stop());
+    t.after(() => fake.close());
     const env = await environment(t, fake, {
       projects: [{ alias: 'pilot', host: 'main', t3ProjectTitle: 'Synthetic project 1', description: 'Scratch' }],
     });

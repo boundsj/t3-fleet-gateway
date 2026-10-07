@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { MINUTE } from '../src/time.ts';
-import { freePort } from './helpers/gateway.ts';
 import { assertNotLogged, jobState, startJob, startJobHarness, type JobHarness } from './helpers/jobs.ts';
 import { tempDir } from './helpers/tmp.ts';
 
@@ -126,7 +125,6 @@ describe('watcher', () => {
     const { fake, agent, tick, tickAfter } = await startJobHarness(t);
     const job = await startJob(agent);
     await tick();
-    const port = Number(new URL(fake.url).port);
     await fake.stop();
     await tick();
     await tickAfter(10 * MINUTE);
@@ -136,7 +134,7 @@ describe('watcher', () => {
     const fleet = await agent.call<{ hosts: { reachable: boolean | null }[] }>('fleet_status');
     assert.equal(fleet.hosts[0]?.reachable, false);
 
-    await fake.start(port);
+    await fake.start();
     fake.finishTurn(fake.threadForJob(job.jobId).threadId, 'Synthetic result after the outage');
     await tickAfter(10 * MINUTE);
     const back = await agent.call<Status>('work_status', { jobId: job.jobId });
@@ -198,10 +196,9 @@ describe('reconciliation', () => {
     fake.statusOnce.set('t3_thread_launch', 502);
     await tick();
     await tickAfter(MINUTE);
-    const port = Number(new URL(fake.url).port);
     await fake.stop();
     await tickAfter(20 * MINUTE);
-    await fake.start(port);
+    await fake.start();
     await tickAfter(10 * MINUTE);
     assert.equal(await jobState(agent, job.jobId), 'unknown', 'the window restarted when the host came back');
     await tickAfter(11 * MINUTE);
@@ -219,15 +216,14 @@ async function stopGateway(harness: JobHarness): Promise<void> {
 describe('restart recovery', () => {
   test('a gateway restarted mid-job resumes watching the same job', async (t) => {
     const dataDir = join(tempDir(t), 'data');
-    const port = await freePort();
-    const first = await startJobHarness(t, { dataDir, port });
+    const first = await startJobHarness(t, { dataDir });
     const job = await startJob(first.agent, 'Synthetic restart task');
     await first.tick();
     assert.equal(await jobState(first.agent, job.jobId), 'running');
     await stopGateway(first);
 
     first.fake.finishTurn(first.fake.threadForJob(job.jobId).threadId, 'Synthetic result while the gateway was down');
-    const second = await startJobHarness(t, { dataDir, port, fake: first.fake });
+    const second = await startJobHarness(t, { dataDir, door: first.gw.door, fake: first.fake });
     await second.tick();
     const status = await second.agent.call<Status>('work_status', { jobId: job.jobId });
     assert.equal(status.state, 'idle');
@@ -237,8 +233,7 @@ describe('restart recovery', () => {
 
   test('a job left dispatching by a crash is reconciled at startup', async (t) => {
     const dataDir = join(tempDir(t), 'data');
-    const port = await freePort();
-    const first = await startJobHarness(t, { dataDir, port });
+    const first = await startJobHarness(t, { dataDir });
     const job = await startJob(first.agent);
     await stopGateway(first);
     // Simulate a crash after the launch reached T3 but before the gateway recorded the result.
@@ -252,7 +247,7 @@ describe('restart recovery', () => {
       message: 'Synthetic',
     });
 
-    const second = await startJobHarness(t, { dataDir, port, fake: first.fake });
+    const second = await startJobHarness(t, { dataDir, door: first.gw.door, fake: first.fake });
     await second.tick();
     const status = await second.agent.call<Status>('work_status', { jobId: job.jobId });
     assert.equal(status.state, 'running');

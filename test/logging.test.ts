@@ -10,7 +10,7 @@ import { tokenRequest } from './helpers/oauthFlow.ts';
 
 test('no secret value ever appears in the logs', async (t) => {
   const fake = await startFakeT3();
-  t.after(() => fake.stop());
+  t.after(() => fake.close());
   const gw = await startTestGateway(t, {
     config: { hosts: [{ id: 'main', t3Url: fake.url, mintPairingCode: fake.mintCommand() }] },
   });

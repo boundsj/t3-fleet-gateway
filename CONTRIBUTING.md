@@ -22,7 +22,7 @@ npm run check   # tsc --noEmit, then every test
 
 ## Tests
 
-Tests use `node:test` and live in `test/*.test.ts`. They never contact a real T3 server: `test/helpers/fakeT3.ts` is a fake built with the MCP SDK, with T3's pairing-code OAuth endpoints and failure injection. `test/helpers/gateway.ts` starts a full gateway on a loopback port with a controllable clock and captured logs.
+Tests use `node:test` and live in `test/*.test.ts`. They never contact a real T3 server: `test/helpers/fakeT3.ts` is a fake built with the MCP SDK, with T3's pairing-code OAuth endpoints and failure injection. `test/helpers/gateway.ts` starts a full gateway on a loopback port with a controllable clock and captured logs. Tests never release a port and bind it again; see AGENTS.md.
 
 Add a test for every bug fix and for every OAuth or authorization rule you touch.
 

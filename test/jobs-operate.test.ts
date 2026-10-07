@@ -238,11 +238,10 @@ describe('work_cancel', () => {
     const { fake, agent, tick, tickAfter } = await startJobHarness(t);
     const job = await startJob(agent);
     await tick();
-    const port = Number(new URL(fake.url).port);
     await fake.stop();
     const result = await agent.call<{ outcome: string; delivered: boolean }>('work_cancel', { jobId: job.jobId });
     assert.deepEqual([result.outcome, result.delivered], ['cancel_requested', false]);
-    await fake.start(port);
+    await fake.start();
     await tickAfter(MINUTE);
     await tick();
     assert.equal(await jobState(agent, job.jobId), 'cancelled');

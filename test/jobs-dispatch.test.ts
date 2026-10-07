@@ -111,7 +111,6 @@ describe('work_start', () => {
 describe('dispatcher', () => {
   test('keeps a job queued when the host cannot be reached, then launches it when the host is back', async (t) => {
     const { fake, gw, agent, tick, tickAfter } = await startJobHarness(t);
-    const port = Number(new URL(fake.url).port);
     await fake.stop();
     const job = await startJob(agent);
     await tick();
@@ -121,7 +120,7 @@ describe('dispatcher', () => {
     assert.equal(fake.threads.size, 0);
     assert.ok(gw.logs.some((line) => line.includes('"event":"jobs.host_unreachable"')));
 
-    await fake.start(port);
+    await fake.start();
     await tick();
     assert.equal(await jobState(agent, job.jobId), 'queued', 'backing off: no attempt before the backoff expires');
     await tickAfter(MINUTE);

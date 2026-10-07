@@ -13,7 +13,7 @@ async function setup(t: import('node:test').TestContext, options: Parameters<typ
   const client = new T3Client({ hostId: 'main', t3Url: fake.url, token: () => current, timeoutMs: 2000 });
   t.after(async () => {
     await client.close();
-    await fake.stop();
+    await fake.close();
   });
   return { fake, client, setToken: (value: string | undefined) => (current = value) };
 }
@@ -98,7 +98,7 @@ describe('T3 client', () => {
     assert.ok(await client.environmentRead());
     await fake.stop();
     await assert.rejects(client.environmentRead(), rejectsWith('host_unreachable'));
-    await fake.start(Number(new URL(fake.url).port));
+    await fake.start();
     assert.ok(await client.environmentRead());
   });
 
@@ -200,11 +200,15 @@ describe('T3 thread tools', () => {
 });
 
 describe('T3 delivery classification', () => {
-  test('a host that refuses connections means the call was not delivered', async (t) => {
+  test('a host that is down or refuses connections means the call was not delivered', async (t) => {
     const { fake, client } = await setup(t);
     await fake.stop();
     await assert.rejects(client.launchThread(LAUNCH), transportFailure('host_unreachable', 'not_delivered'));
     assert.equal(fake.threads.size, 0);
+    // Nothing listens on the discard port, so the connection is refused.
+    const refused = new T3Client({ hostId: 'main', t3Url: 'http://127.0.0.1:9', token: () => 'token-for-tests', timeoutMs: 2000 });
+    t.after(() => refused.close());
+    await assert.rejects(refused.launchThread(LAUNCH), transportFailure('host_unreachable', 'not_delivered'));
   });
 
   test('after a read finds the host gone, a launch is known not to be delivered', async (t) => {

@@ -3,6 +3,7 @@ import type { TestContext } from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import type { TestClock } from './clock.ts';
 import { startFakeT3, type FakeT3 } from './fakeT3.ts';
+import type { FrontDoor } from './frontDoor.ts';
 import { startTestGateway, type TestGateway } from './gateway.ts';
 import { signIn } from './oauthFlow.ts';
 
@@ -57,7 +58,8 @@ export interface JobHarnessOptions {
   maxConcurrentJobs?: number;
   fake?: FakeT3;
   dataDir?: string;
-  port?: number;
+  /** Reuse the first gateway's front door (restart tests). */
+  door?: FrontDoor;
   clock?: TestClock;
   watcher?: Record<string, unknown>;
   /** Run the engine on a timer instead of by hand. */
@@ -70,7 +72,7 @@ export interface JobHarnessOptions {
  */
 export async function startJobHarness(t: TestContext, options: JobHarnessOptions = {}): Promise<JobHarness> {
   const fake = options.fake ?? (await startFakeT3());
-  if (!options.fake) t.after(() => fake.stop());
+  if (!options.fake) t.after(() => fake.close());
   const gw = await startTestGateway(t, {
     config: {
       hosts: [{ id: 'main', t3Url: fake.url, mintPairingCode: fake.mintCommand(), maxConcurrentJobs: options.maxConcurrentJobs ?? 2 }],
@@ -88,7 +90,7 @@ export async function startJobHarness(t: TestContext, options: JobHarnessOptions
       ...(options.watcher ? { watcher: { pollSeconds: 10, ...options.watcher } } : {}),
     },
     ...(options.dataDir ? { dataDir: options.dataDir } : {}),
-    ...(options.port ? { port: options.port } : {}),
+    ...(options.door ? { door: options.door } : {}),
     ...(options.clock ? { clock: options.clock } : {}),
     jobEngine: options.intervalMs ? { intervalMs: options.intervalMs } : { autoStart: false },
   });

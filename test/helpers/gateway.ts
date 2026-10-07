@@ -1,4 +1,3 @@
-import { createServer } from 'node:net';
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import { parseConfig } from '../../src/config.ts';
@@ -6,15 +5,8 @@ import { startGateway, type GatewayOptions, type GatewayServices, type RunningGa
 import { createLogger } from '../../src/log.ts';
 import type { GatewayTool } from '../../src/mcp/tools.ts';
 import { testClock, type TestClock } from './clock.ts';
+import { openFrontDoor, type FrontDoor } from './frontDoor.ts';
 import { tempDir } from './tmp.ts';
-
-export async function freePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const { port } = server.address() as { port: number };
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  return port;
-}
 
 export interface TestGateway {
   baseUrl: string;
@@ -23,10 +15,15 @@ export interface TestGateway {
   clock: TestClock;
   logs: string[];
   dataDir: string;
+  /** Holds the public URL's port; pass it to a second gateway to restart on the same URL. */
+  door: FrontDoor;
   mintApprovalCode(): string;
 }
 
-/** A full gateway on a loopback port whose publicUrl is that port. Config fields can be overridden. */
+/**
+ * A full gateway behind a front door on a loopback port; publicUrl is the front door. Config fields
+ * can be overridden.
+ */
 export async function startTestGateway(
   t: TestContext,
   options: {
@@ -34,17 +31,17 @@ export async function startTestGateway(
     tools?: (services: GatewayServices) => GatewayTool[];
     /** Reuse a data directory (restart tests). */
     dataDir?: string;
-    /** Reuse a port, so publicUrl and issued tokens stay valid across a restart. */
-    port?: number;
+    /** Reuse a front door, so publicUrl and issued tokens stay valid across a restart. */
+    door?: FrontDoor;
     clock?: TestClock;
     jobEngine?: GatewayOptions['jobEngine'];
   } = {},
 ): Promise<TestGateway> {
-  const port = options.port ?? (await freePort());
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const door = options.door ?? (await openFrontDoor(t));
+  const baseUrl = door.url;
   const config = parseConfig({
     publicUrl: baseUrl,
-    listen: { host: '127.0.0.1', port },
+    listen: { host: '127.0.0.1', port: door.port },
     hosts: [{ id: 'main', t3Url: 'http://127.0.0.1:9' }],
     ...options.config,
   });
@@ -52,14 +49,24 @@ export async function startTestGateway(
   const clock = options.clock ?? testClock(Date.now());
   const logs: string[] = [];
   const logger = createLogger({ level: 'debug', sink: (line) => logs.push(line), clock });
-  const gateway = await startGateway({
+  const started = await startGateway({
     config,
     dataDir,
     logger,
     clock,
+    port: 0,
     ...(options.tools ? { tools: options.tools } : {}),
     ...(options.jobEngine ? { jobEngine: options.jobEngine } : {}),
   });
+  door.target = started.port;
+  const gateway: RunningGateway = {
+    ...started,
+    async close() {
+      // Stop forwarding first: the port this gateway releases may be taken by another process.
+      if (door.target === started.port) door.target = undefined;
+      await started.close();
+    },
+  };
   t.after(() => gateway.close());
   return {
     baseUrl,
@@ -68,6 +75,7 @@ export async function startTestGateway(
     clock,
     logs,
     dataDir,
+    door,
     mintApprovalCode: () => gateway.services.approvals.mint().code,
   };
 }

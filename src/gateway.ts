@@ -99,6 +99,8 @@ export interface GatewayOptions extends ServiceOptions {
   tools?: (services: GatewayServices) => GatewayTool[];
   /** Tests drive the job engine by hand (`autoStart: false`) or with a short interval. */
   jobEngine?: { autoStart?: boolean; intervalMs?: number };
+  /** Listen on this port instead of `config.listen.port`; 0 lets the OS pick one (tests). */
+  port?: number;
 }
 
 /** Start the HTTP server (OAuth + MCP), the job engine and the credential renewal loop. */
@@ -116,7 +118,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   const router = createRouter([...oauthRoutes({ ...services, publicUrl: config.publicUrl }), mcp.route], logger);
   let server;
   try {
-    server = await listen(router, config.listen.host, config.listen.port);
+    server = await listen(router, config.listen.host, options.port ?? config.listen.port);
   } catch (error) {
     await services.close();
     throw error;

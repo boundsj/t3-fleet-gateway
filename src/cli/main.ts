@@ -15,8 +15,10 @@ export interface CliIo {
   env: NodeJS.ProcessEnv;
   out: (text: string) => void;
   err: (text: string) => void;
-  /** Resolves when the process is asked to stop (serve only). */
-  waitForShutdown?: () => Promise<void>;
+  /** Resolves when the process is asked to stop (serve only). Receives the port the gateway listens on. */
+  waitForShutdown?: (gateway: { port: number }) => Promise<void>;
+  /** Listen on this port instead of the configured one; 0 lets the OS pick (tests). */
+  listenPort?: number;
 }
 
 const USAGE = `Usage: ${GATEWAY_NAME} <command> [options]
@@ -55,8 +57,8 @@ function withServices<T>(paths: Paths, logger: Logger, fn: (services: GatewaySer
 async function serve(paths: Paths, io: CliIo): Promise<number> {
   const logger = logLevelLogger(io.env, (line) => io.out(line), 'info');
   const config = loadConfig(paths.configPath);
-  const gateway = await startGateway({ config, dataDir: paths.dataDir, logger });
-  await (io.waitForShutdown ?? waitForSignal)();
+  const gateway = await startGateway({ config, dataDir: paths.dataDir, logger, ...(io.listenPort === undefined ? {} : { port: io.listenPort }) });
+  await (io.waitForShutdown ?? waitForSignal)(gateway);
   await gateway.close();
   return 0;
 }

@@ -25,8 +25,8 @@ test('fleet_status reports hosts, credentials, job counts and projects', async (
   const up = await startFakeT3({ serverVersion: '1.2.3' });
   const down = await startFakeT3({ tokenLifetimeSeconds: 2 * 86400 });
   t.after(async () => {
-    await up.stop();
-    await down.stop();
+    await up.close();
+    await down.close();
   });
   const gw = await startTestGateway(t, {
     config: {
@@ -91,7 +91,7 @@ test('fleet_status reports hosts, credentials, job counts and projects', async (
 
 test('fleet_status reports a host that rejects the credential as reachable with a rejected credential', async (t) => {
   const fake = await startFakeT3({ serverVersion: '1.2.3' });
-  t.after(() => fake.stop());
+  t.after(() => fake.close());
   const gw = await startTestGateway(t, { config: { hosts: [{ id: 'alpha', t3Url: fake.url, mintPairingCode: fake.mintCommand() }] } });
   await gw.services.registry.enroll('alpha');
   fake.revokeAllTokens();

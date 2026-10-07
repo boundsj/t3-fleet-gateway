@@ -14,7 +14,7 @@ import { tempDir } from './helpers/tmp.ts';
 
 async function setup(t: TestContext, options: { tokenLifetimeSeconds?: number; access?: string; mint?: (fake: FakeT3) => string[] } = {}) {
   const fake = await startFakeT3(options.tokenLifetimeSeconds ? { tokenLifetimeSeconds: options.tokenLifetimeSeconds } : {});
-  t.after(() => fake.stop());
+  t.after(() => fake.close());
   const access = options.access ?? 'auto';
   const config = parseConfig({
     publicUrl: 'https://gateway.example.ts.net',
