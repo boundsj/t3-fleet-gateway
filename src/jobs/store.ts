@@ -179,6 +179,19 @@ function columnValue(key: keyof JobChanges, value: JobChanges[keyof JobChanges])
   return (value ?? null) as string | number | null;
 }
 
+export interface FeedEvent extends JobEvent {
+  projectAlias: string;
+  title: string;
+}
+
+export interface IdempotencyKey {
+  tool: string;
+  inputHash: string;
+  jobId: string;
+  /** The stored result, or null while the outcome of the first attempt is unknown. */
+  response: string | null;
+}
+
 export interface NewJob {
   id: string;
   clientId: string;
@@ -367,6 +380,57 @@ export class JobStore {
       .prepare('SELECT * FROM (SELECT * FROM job_events WHERE job_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id')
       .all(jobId, limit) as unknown as EventRow[];
     return rows.map(toEvent);
+  }
+
+  /** Events after `cursor` (exclusive), oldest first, with their job's project and title. */
+  eventsAfter(cursor: number, limit: number, clientId?: string): FeedEvent[] {
+    const mine = clientId === undefined ? '' : 'AND jobs.client_id = ?';
+    const rows = this.#db
+      .prepare(
+        `SELECT job_events.*, jobs.project_alias, jobs.title FROM job_events JOIN jobs ON jobs.id = job_events.job_id
+          WHERE job_events.id > ? ${mine} ORDER BY job_events.id LIMIT ?`,
+      )
+      .all(...(clientId === undefined ? [cursor, limit] : [cursor, clientId, limit])) as unknown as (EventRow & { project_alias: string; title: string })[];
+    return rows.map((row) => ({ ...toEvent(row), projectAlias: row.project_alias, title: row.title }));
+  }
+
+  /**
+   * Jobs that want the agent's attention, most recently changed first: blocked or unconfirmed
+   * jobs at any age, and jobs that went idle or failed within `recentMs`.
+   */
+  attention(now: number, recentMs: number, limit: number, clientId?: string): Job[] {
+    const mine = clientId === undefined ? '' : 'AND client_id = ?';
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM jobs
+          WHERE (state IN ('needs_input', 'unknown') OR (state IN ('idle', 'failed') AND updated_at >= ?)) ${mine}
+          ORDER BY updated_at DESC, rowid DESC LIMIT ?`,
+      )
+      .all(...(clientId === undefined ? [now - recentMs, limit] : [now - recentMs, clientId, limit])) as unknown as JobRow[];
+    return rows.map(toJob);
+  }
+
+  idempotencyKey(clientId: string, requestId: string): IdempotencyKey | undefined {
+    const row = this.#db
+      .prepare('SELECT tool, input_hash, job_id, response FROM idempotency_keys WHERE client_id = ? AND request_id = ?')
+      .get(clientId, requestId) as { tool: string; input_hash: string; job_id: string; response: string | null } | undefined;
+    return row && { tool: row.tool, inputHash: row.input_hash, jobId: row.job_id, response: row.response };
+  }
+
+  /** Claim a request id for a tool before calling T3, so a retry can tell an earlier attempt happened. */
+  claimIdempotencyKey(clientId: string, requestId: string, key: Omit<IdempotencyKey, 'response'>): void {
+    this.#db
+      .prepare('INSERT INTO idempotency_keys (client_id, request_id, tool, input_hash, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(clientId, requestId, key.tool, key.inputHash, key.jobId, this.#clock());
+  }
+
+  completeIdempotencyKey(clientId: string, requestId: string, response: string): void {
+    this.#db.prepare('UPDATE idempotency_keys SET response = ? WHERE client_id = ? AND request_id = ?').run(response, clientId, requestId);
+  }
+
+  /** Release a request id whose call definitely did not happen, so the agent may retry with it. */
+  releaseIdempotencyKey(clientId: string, requestId: string): void {
+    this.#db.prepare('DELETE FROM idempotency_keys WHERE client_id = ? AND request_id = ? AND response IS NULL').run(clientId, requestId);
   }
 
   #write(id: string, changes: JobChanges, now: number, state?: JobState): void {

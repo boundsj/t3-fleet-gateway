@@ -1,9 +1,17 @@
 import * as z from 'zod';
-import { MAX_TASK_CHARS, MAX_TITLE_CHARS, REQUEST_ID_PATTERN, type JobService } from '../jobs/service.ts';
+import {
+  ATTENTION_RECENT_MS,
+  MAX_ANSWERS_CHARS,
+  MAX_MESSAGE_CHARS,
+  MAX_TASK_CHARS,
+  MAX_TITLE_CHARS,
+  REQUEST_ID_PATTERN,
+  type JobService,
+} from '../jobs/service.ts';
 import { JOB_STATES, STATE_MEANINGS } from '../jobs/states.ts';
 import type { Job, JobEvent } from '../jobs/store.ts';
 import { OPERATE_SCOPE, READ_SCOPE } from '../oauth/scopes.ts';
-import { isoTime } from '../time.ts';
+import { HOUR, isoTime } from '../time.ts';
 import { defineTool, type GatewayTool, type ToolContext } from './tools.ts';
 
 const MAX_LIST_LIMIT = 100;
@@ -12,6 +20,13 @@ const STATE_GUIDE = JOB_STATES.map((state) => `${state}: ${STATE_MEANINGS[state]
 
 const time = z.string().describe('ISO 8601');
 const nullableTime = time.nullable();
+
+const MAX_FEED_LIMIT = 200;
+
+const requestIdInput = z
+  .string()
+  .regex(REQUEST_ID_PATTERN, 'use 1-128 letters, digits, dots, underscores, colons or hyphens')
+  .describe('Your unique id for this request, for safe retries (for example a UUID)');
 
 const jobIdInput = z.string().regex(/^[0-9a-z]{6,32}$/, 'a job id as returned by work_start').describe('The jobId returned by work_start');
 
@@ -116,10 +131,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     inputSchema: z.object({
       project: z.string().min(1).max(64).describe('Project alias from fleet_status'),
       task: z.string().min(1).max(MAX_TASK_CHARS).describe('What the worker should do, as a complete instruction'),
-      requestId: z
-        .string()
-        .regex(REQUEST_ID_PATTERN, 'use 1-128 letters, digits, dots, underscores, colons or hyphens')
-        .describe('Your unique id for this request, for safe retries (for example a UUID)'),
+      requestId: requestIdInput,
       title: z.string().min(1).max(MAX_TITLE_CHARS).optional().describe('Short thread title; defaults to the first line of the task'),
     }),
     outputSchema: z.object({ job: jobSchema, created: z.boolean().describe('false when this requestId was already used: the existing job') }),
@@ -190,5 +202,152 @@ export function workTools(jobs: JobService): GatewayTool[] {
     },
   });
 
-  return [workStart, workList, workStatus];
+  const workFeed = defineTool({
+    name: 'work_feed',
+    title: 'Job feed',
+    description:
+      'What changed since you last looked, plus the jobs that need you now. Designed for a scheduled routine: call it with ' +
+      'the nextCursor from your previous call (omit cursor the first time), handle the events, store the new nextCursor, ' +
+      'and call again with it while hasMore is true. The cursor is exclusive, so no event is returned twice. Events: ' +
+      'created, state_changed (fromState to toState, with a reason), followup_sent, input_answered, turn_finished. ' +
+      '"attention" lists jobs in needs_input (answer with work_respond, or the operator must approve in T3) or unknown ' +
+      `(the gateway is confirming the launch) at any age, and jobs that went idle (turn finished: review with work_status, ` +
+      `then work_continue or work_cancel) or failed within the last ${ATTENTION_RECENT_MS / HOUR} hours. ` +
+      'An idle job is ready for review, not proof the task succeeded. Read-only.',
+    scope: READ_SCOPE,
+    readOnly: true,
+    inputSchema: z.object({
+      cursor: z
+        .union([z.string().regex(/^\d{1,15}$/), z.int().min(0)])
+        .optional()
+        .describe('nextCursor from your previous work_feed call; omit to start from the beginning'),
+      limit: z.int().min(1).max(MAX_FEED_LIMIT).optional().describe(`Events per page, default 50, at most ${MAX_FEED_LIMIT}`),
+      mine: z.boolean().optional().describe('Only events and jobs from work this agent started'),
+    }),
+    outputSchema: z.object({
+      events: z.array(eventSchema.extend({ project: z.string(), title: z.string() })),
+      nextCursor: z.string().describe('Pass this as cursor next time'),
+      hasMore: z.boolean().describe('More events are waiting: call again with nextCursor'),
+      attention: z.array(jobSchema.extend({ why: z.string() })),
+    }),
+    async run(input, context) {
+      const feed = jobs.feed({ cursor: Number(input.cursor ?? 0), limit: input.limit ?? 50, mine: input.mine ?? false }, context);
+      const events = feed.events.map((event) => ({ ...eventView(event), project: event.projectAlias, title: event.title }));
+      const attention = feed.attention.map((job) => ({ ...jobView(job, context), why: attentionReason(job.state, job.pendingRequestIds.length) }));
+      const lines = [
+        `${events.length} event(s)${feed.hasMore ? ', more waiting' : ''}; nextCursor ${feed.nextCursor}.`,
+        ...events.map((event) => `#${event.cursor} ${event.jobId} ${event.type}${event.toState ? ` -> ${event.toState}` : ''}${event.reason ? ` (${event.reason})` : ''}`),
+        attention.length === 0 ? 'Nothing needs attention.' : 'Needs attention:',
+        ...attention.map((job) => `${job.jobId} [${job.state}] ${job.title}: ${job.why}`),
+      ];
+      return { structured: { events, nextCursor: String(feed.nextCursor), hasMore: feed.hasMore, attention }, summary: lines.join('\n') };
+    },
+  });
+
+  const workContinue = defineTool({
+    name: 'work_continue',
+    title: 'Continue a job',
+    description:
+      "Send a follow-up instruction to a job's T3 thread: review feedback, the next step, or a correction. Use it when the " +
+      'job is idle (its turn finished; this starts a new turn and the job goes back to running). On a running or needs_input ' +
+      'job T3 steers the active turn or queues the message behind it. Idempotent: pass a unique requestId per message; ' +
+      'repeating a requestId returns the first result without sending again, and if a call fails with an uncertain outcome, ' +
+      'repeating it with the same requestId is safe. Not for answering a pending question: use work_respond.',
+    scope: OPERATE_SCOPE,
+    readOnly: false,
+    inputSchema: z.object({
+      jobId: jobIdInput,
+      message: z.string().min(1).max(MAX_MESSAGE_CHARS).describe('The instruction for the worker'),
+      requestId: requestIdInput,
+    }),
+    outputSchema: z.object({
+      job: jobSchema,
+      delivery: z.string().describe('started (new turn), steered (into the active turn) or queued (behind it)'),
+      replayed: z.boolean().describe('true when this requestId was already delivered; nothing was sent again'),
+    }),
+    async run(input, context) {
+      const result = await jobs.continue(context, input);
+      const view = jobView(result.job, context);
+      const summary = `${result.replayed ? 'Already sent (same requestId)' : 'Sent'}: ${result.delivery}. ${describeJob(view)}`;
+      return { structured: { job: view, delivery: result.delivery, replayed: result.replayed }, summary };
+    },
+  });
+
+  const workRespond = defineTool({
+    name: 'work_respond',
+    title: 'Answer a question',
+    description:
+      'Answer a question the worker asked: the job is needs_input and work_status lists it under pendingRequests with its ' +
+      'questions. Pass that requestId and an answers object keyed by question id; each value is the chosen option ' +
+      "(its value, or its label when it has no value), an array of them for multiSelect questions, or your own text when " +
+      'custom answers are allowed. Only requests pending on this job are accepted. Permission approvals cannot be answered ' +
+      'here: when work_status shows waitingForApproval, the operator must approve in T3.',
+    scope: OPERATE_SCOPE,
+    readOnly: false,
+    inputSchema: z.object({
+      jobId: jobIdInput,
+      requestId: z.string().min(1).max(200).describe('A pendingRequests[].requestId from work_status'),
+      answers: z
+        .record(z.string().max(200), z.unknown())
+        .refine((answers) => Object.keys(answers).length <= 50 && JSON.stringify(answers).length <= MAX_ANSWERS_CHARS, {
+          message: `at most 50 answers and ${MAX_ANSWERS_CHARS} characters`,
+        })
+        .describe('Answers keyed by question id'),
+    }),
+    outputSchema: z.object({ job: jobSchema }),
+    async run(input, context) {
+      const job = await jobs.respond(input);
+      const view = jobView(job, context);
+      return { structured: { job: view }, summary: `Answered ${input.requestId}. ${describeJob(view)}` };
+    },
+  });
+
+  const workCancel = defineTool({
+    name: 'work_cancel',
+    title: 'Cancel a job',
+    description:
+      "Stop a job. A queued job is cancelled at once without touching T3. Otherwise the gateway asks T3 to interrupt the " +
+      'thread: outcome "cancelled" means it is confirmed stopped; "cancel_requested" means the interrupt is requested ' +
+      '(delivered=true) or will be delivered when the host is reachable or the launch is confirmed (delivered=false), and ' +
+      'the job moves to cancelled when the watcher sees the thread stop. Cancelled is terminal; the T3 thread and its ' +
+      'worktree stay for the operator. Safe to repeat.',
+    scope: OPERATE_SCOPE,
+    readOnly: false,
+    inputSchema: z.object({ jobId: jobIdInput }),
+    outputSchema: z.object({
+      job: jobSchema,
+      outcome: z.enum(['cancelled', 'cancel_requested', 'already_finished']),
+      confirmed: z.boolean().describe('The job is stopped'),
+      delivered: z.boolean().describe('T3 has the interrupt request, or none was needed'),
+    }),
+    async run(input, context) {
+      const result = await jobs.cancel(input);
+      const view = jobView(result.job, context);
+      const confirmed = view.state === 'cancelled' || view.state === 'failed';
+      const summary =
+        result.outcome === 'cancel_requested'
+          ? `Cancel requested${result.delivered ? '' : ' (will be delivered when possible)'}; waiting for T3 to confirm. ${describeJob(view)}`
+          : `${result.outcome === 'cancelled' ? 'Cancelled' : 'Already finished'}. ${describeJob(view)}`;
+      return { structured: { job: view, outcome: result.outcome, confirmed, delivered: result.delivered }, summary };
+    },
+  });
+
+  return [workStart, workContinue, workRespond, workCancel, workStatus, workList, workFeed];
+}
+
+function attentionReason(state: string, pendingQuestions: number): string {
+  switch (state) {
+    case 'needs_input':
+      return pendingQuestions > 0
+        ? 'The worker asked a question: read it with work_status and answer with work_respond.'
+        : 'The worker waits for a permission approval that only the operator can give in T3.';
+    case 'unknown':
+      return 'The launch outcome is unconfirmed; the gateway is checking T3. Do not start a duplicate yet.';
+    case 'idle':
+      return 'Turn finished: review with work_status, then work_continue or work_cancel.';
+    case 'failed':
+      return 'Failed: see lastError in work_status. Start a new job to retry.';
+    default:
+      return STATE_MEANINGS[state as keyof typeof STATE_MEANINGS] ?? state;
+  }
 }

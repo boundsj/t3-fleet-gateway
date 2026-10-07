@@ -75,7 +75,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
     approvals: new ApprovalCodes(db, key, clock),
     tokens: new TokenService(db, clock, { resource: mcpResource(config), ...config.tokens }, logTokenEvent(logger)),
     registry,
-    jobs: new JobService({ config, store: new JobStore(db, clock, logger) }),
+    jobs: new JobService({ config, store: new JobStore(db, clock, logger), registry, clock, logger }),
     async close() {
       await registry.close();
       db.close();

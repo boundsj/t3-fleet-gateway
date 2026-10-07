@@ -5,9 +5,10 @@ import { resolveProjectId } from '../hosts/projects.ts';
 import type { Logger } from '../log.ts';
 import { T3TransportError } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
-import type { ThreadRead } from '../t3/schemas.ts';
+import type { LaunchResult, ThreadRead } from '../t3/schemas.ts';
 import { MINUTE, SECOND, type Clock } from '../time.ts';
 import { EXCERPT_CHARS, observe } from './derive.ts';
+import { deliverInterrupt } from './interrupt.ts';
 import { jobMarker } from './service.ts';
 import type { Job, JobChanges, JobStore } from './store.ts';
 
@@ -173,8 +174,9 @@ export class JobEngine {
   async #launch(job: Job, project: ProjectConfig, projectId: string): Promise<void> {
     const { store, registry } = this.#options;
     this.#inFlight.add(job.id);
+    let launched: LaunchResult;
     try {
-      const launched = await registry.client(job.hostId).launchThread(
+      launched = await registry.client(job.hostId).launchThread(
         {
           projectId,
           title: job.title,
@@ -185,21 +187,19 @@ export class JobEngine {
         },
         { timeoutMs: LAUNCH_TIMEOUT_MS },
       );
-      this.#attach(job.id, { threadId: launched.threadId, threadTitle: job.title, lastRunId: launched.runId }, 'launched');
     } catch (error) {
+      this.#inFlight.delete(job.id);
       if (error instanceof T3ToolError) {
         // T3 answered and refused: nothing was created.
         if (/project/.test(error.t3Code)) this.#projectIds.delete(project.alias);
-        store.transition(job.id, {
-          from: ['dispatching'],
-          to: 'failed',
-          changes: { lastErrorCode: error.t3Code, lastErrorMessage: error.message },
-          detail: { reason: 'launch_rejected', code: error.t3Code },
-        });
+        const failure = { lastErrorCode: error.t3Code, lastErrorMessage: error.message };
+        store.transition(job.id, { from: ['dispatching'], to: 'failed', changes: failure, detail: { reason: 'launch_rejected', code: error.t3Code } });
+        store.transition(job.id, { from: ['cancel_requested'], to: 'cancelled', changes: failure, detail: { reason: 'launch_rejected', code: error.t3Code } });
         return;
       }
       if (error instanceof T3TransportError && error.delivery === 'not_delivered') {
         store.transition(job.id, { from: ['dispatching'], to: 'queued', changes: { dispatchStartedAt: null }, detail: { reason: 'host_unreachable', code: error.code } });
+        store.transition(job.id, { from: ['cancel_requested'], to: 'cancelled', detail: { reason: 'cancelled_before_launch' } });
         throw error;
       }
       const described = describeError(error);
@@ -210,9 +210,10 @@ export class JobEngine {
         detail: { reason: 'launch_outcome_unknown', code: described.code },
       });
       if (isHostFailure(error)) throw error;
-    } finally {
-      this.#inFlight.delete(job.id);
+      return;
     }
+    this.#inFlight.delete(job.id);
+    await this.#attach(job.id, { threadId: launched.threadId, threadTitle: job.title, lastRunId: launched.runId }, 'launched');
   }
 
   /**
@@ -227,27 +228,26 @@ export class JobEngine {
       store.transition(job.id, { from: ['dispatching'], to: 'unknown', detail: { reason: 'dispatch_interrupted' } });
     }
     const windowMs = config.watcher.reconcileWindowMinutes * MINUTE;
-    for (const job of store.onHost(host.id, ['unknown'])) {
-      if (job.threadId !== null || job.t3ProjectId === null) continue;
+    // cancel_requested jobs without a thread were cancelled while launching or unconfirmed.
+    for (const job of store.onHost(host.id, ['unknown', 'cancel_requested'])) {
+      if (job.threadId !== null || job.t3ProjectId === null || this.#inFlight.has(job.id)) continue;
       const found = await this.#findThread(job.hostId, job.t3ProjectId, job.id);
       if (found) {
         this.#unconfirmedSince.delete(job.id);
-        this.#attach(job.id, { threadId: found.threadId, threadTitle: found.title, lastRunId: found.latestRunId }, 'reconciled');
+        await this.#attach(job.id, { threadId: found.threadId, threadTitle: found.title, lastRunId: found.latestRunId }, 'reconciled');
         continue;
       }
       const since = this.#unconfirmedSince.get(job.id)?.since ?? clock();
       this.#unconfirmedSince.set(job.id, { hostId: host.id, since });
       if (clock() - since < windowMs) continue;
       this.#unconfirmedSince.delete(job.id);
-      store.transition(job.id, {
-        from: ['unknown'],
-        to: 'failed',
-        changes: {
-          lastErrorCode: 'launch_not_confirmed',
-          lastErrorMessage: `No T3 thread titled with ${jobMarker(job.id)} appeared within ${config.watcher.reconcileWindowMinutes} minutes, so the launch did not happen. Start a new job if the work is still needed.`,
-        },
-        detail: { reason: 'launch_not_confirmed', code: 'launch_not_confirmed' },
-      });
+      const changes = {
+        lastErrorCode: 'launch_not_confirmed',
+        lastErrorMessage: `No T3 thread titled with ${jobMarker(job.id)} appeared within ${config.watcher.reconcileWindowMinutes} minutes, so the launch did not happen. Start a new job if the work is still needed.`,
+      };
+      const detail = { reason: 'launch_not_confirmed', code: 'launch_not_confirmed' };
+      store.transition(job.id, { from: ['unknown'], to: 'failed', changes, detail });
+      store.transition(job.id, { from: ['cancel_requested'], to: 'cancelled', changes, detail });
     }
   }
 
@@ -309,9 +309,13 @@ export class JobEngine {
       ...(seen.excerpt === undefined ? {} : { latestMessageExcerpt: seen.excerpt }),
       ...(seen.errorCode ? { lastErrorCode: seen.errorCode, lastErrorMessage: 'The T3 run failed. Open the thread in T3 for details.' } : {}),
     };
+    // Both writes are guarded by the state the observation started from: an agent action that
+    // landed while T3 was being read (a follow-up, an answer, a cancel) wins over this observation.
     if (seen.state === job.state) {
-      store.update(job.id, changes);
+      if (!store.transition(job.id, { from: [job.state], to: job.state, changes })) return;
       if (seen.anotherTurnFinished) store.appendEvent(job.id, 'turn_finished', 'idle', { reason: seen.reason });
+      // Still running after a cancel: the interrupt may never have arrived, so send it again.
+      if (job.state === 'cancel_requested') await this.#interrupt(job.id, job.hostId, threadId, registry);
       return;
     }
     store.transition(job.id, {
@@ -338,14 +342,28 @@ export class JobEngine {
     return { ...read, items, nextPosition: read.nextPosition ?? afterPosition };
   }
 
-  /** Record the job's thread and move it to running. */
-  #attach(jobId: string, thread: { threadId: string; threadTitle: string; lastRunId: string | null }, via: 'launched' | 'reconciled'): void {
-    this.#options.store.transition(jobId, {
-      from: ['dispatching', 'unknown'],
-      to: 'running',
-      changes: { ...thread, lastErrorCode: null, lastErrorMessage: null },
-      detail: { reason: via },
-    });
+  /**
+   * Record the job's thread and move it to running. A job cancelled while its launch was in flight
+   * or unconfirmed keeps cancel_requested, and its thread is interrupted now.
+   */
+  async #attach(jobId: string, thread: { threadId: string; threadTitle: string; lastRunId: string | null }, via: 'launched' | 'reconciled'): Promise<void> {
+    const { store, registry } = this.#options;
+    const changes = { ...thread, lastErrorCode: null, lastErrorMessage: null };
+    if (store.transition(jobId, { from: ['dispatching', 'unknown'], to: 'running', changes, detail: { reason: via } })) return;
+    const job = store.get(jobId);
+    if (job?.state !== 'cancel_requested') return;
+    store.update(jobId, changes);
+    await this.#interrupt(jobId, job.hostId, thread.threadId, registry);
+  }
+
+  /** Deliver (or re-deliver) a cancel_requested job's interrupt. T3 deduplicates repeats. */
+  async #interrupt(jobId: string, hostId: string, threadId: string, registry: HostRegistry): Promise<void> {
+    try {
+      await deliverInterrupt(this.#options.store, registry.client(hostId), jobId, threadId);
+    } catch (error) {
+      if (!(error instanceof T3ToolError)) throw error;
+      this.#options.logger.warn('jobs.interrupt_failed', { jobId, hostId, t3Code: error.t3Code });
+    }
   }
 
   async #projectId(project: ProjectConfig): Promise<string> {
