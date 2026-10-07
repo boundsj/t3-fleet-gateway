@@ -195,6 +195,13 @@ CREATE TABLE idempotency_keys (
     // The state CHECK can only change by rebuilding the table; every row is copied (see rebuildJobsV2).
     run: rebuildJobsV2,
   },
+  {
+    version: 3,
+    name: 'delegated work',
+    // The subagent items (work delegated to other threads) a job's thread is still waiting on, as a
+    // JSON array of { itemId, position, title }.
+    sql: `ALTER TABLE jobs ADD COLUMN delegated_work TEXT NOT NULL DEFAULT '[]';`,
+  },
 ];
 
 const JOBS_V2_TABLE = `

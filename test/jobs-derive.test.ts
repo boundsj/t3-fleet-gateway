@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { isWorkerMessage, observe, threadLinkTarget } from '../src/jobs/derive.ts';
+import { isWorkerMessage, observe, threadLinkTarget, trackDelegated, type DelegatedTask } from '../src/jobs/derive.ts';
 import type { Job } from '../src/jobs/store.ts';
 import type { ThreadItem, ThreadRead } from '../src/t3/schemas.ts';
 
@@ -36,6 +36,7 @@ function job(overrides: Partial<Job> = {}): Job {
     dispatchStartedAt: 0,
     finishedAt: null,
     standing: false,
+    delegatedWork: [],
     ...overrides,
   };
 }
@@ -138,6 +139,39 @@ describe('state derivation', () => {
   });
 });
 
+describe('delegated work', () => {
+  const subagent = (position: number, status: string, title = `Synthetic task ${position}`) =>
+    item(position, { type: 'subagent', createdBy: null, creationSource: null, status, text: status === 'completed' ? 'Synthetic summary' : '', title });
+  const task = (position: number): DelegatedTask => ({ itemId: `item-${position}`, position, title: `Synthetic task ${position}` });
+
+  test('a turn that ends with delegated work running is idle, waiting on it', () => {
+    const turnEnded = read({ status: 'completed' }, [{ runId: 'run-1', status: 'completed' }], [subagent(3, 'running'), item(4)]);
+    const seen = observe(job(), turnEnded, []);
+    assert.deepEqual([seen.state, seen.reason, seen.delegatedWork], ['idle', 'waiting_on_delegated_work', [task(3)]]);
+    const done = observe(job(), read({ status: 'completed' }, [{ runId: 'run-1', status: 'completed' }], [subagent(3, 'completed'), item(4)]), []);
+    assert.deepEqual([done.reason, done.delegatedWork], ['completed', []], 'a subagent item T3 shows completed is not waited on');
+  });
+
+  test('an idle job running again by itself reports turn_started', () => {
+    const resumed = read({ status: 'running', activeRunId: 'run-2' }, [{ runId: 'run-2', status: 'running' }, { runId: 'run-1', status: 'completed' }]);
+    const seen = observe(job({ state: 'idle', delegatedWork: [task(3)] }), resumed, []);
+    assert.deepEqual([seen.state, seen.reason, seen.delegatedWork], ['running', 'turn_started', [task(3)]], 'kept until its item is read settled');
+  });
+
+  test('follows tasks by item id until T3 shows them settled or gone', () => {
+    const previous = [task(3), task(8), task(9)];
+    const refreshed = new Map([
+      ['item-3', subagent(3, 'completed')],
+      ['item-8', null],
+    ]);
+    assert.deepEqual(trackDelegated(previous, [subagent(12, 'pending'), subagent(13, 'completed')], refreshed), [task(9), task(12)]);
+    assert.deepEqual(trackDelegated([task(3)], [subagent(3, 'running', '  Renamed\n task ')]), [{ ...task(3), title: 'Renamed task' }]);
+    assert.deepEqual(trackDelegated([], [item(2, { type: 'subagent', status: 'running', title: null })]), [{ itemId: 'item-2', position: 2, title: 'Untitled delegated task' }]);
+    const many = Array.from({ length: 30 }, (_, index) => subagent(index, 'running'));
+    assert.equal(trackDelegated([], many).length, 20, 'bounded');
+  });
+});
+
 describe('thread links', () => {
   test('takes the URL out of the markdown link T3 returns', () => {
     assert.equal(threadLinkTarget('[Fix (the) parser [job:abc]](t3-thread://v1/env-synthetic/thread-1)'), 't3-thread://v1/env-synthetic/thread-1');
@@ -165,12 +199,24 @@ describe('timeline reading', () => {
     assert.equal(seen.readPosition, 2);
   });
 
-  test('stops before an item that may still change', () => {
-    const items = [item(4), item(5, { status: 'running', text: 'partial' }), item(6)];
+  test('stops before a worker message that may still change, and never takes it as the excerpt', () => {
+    const items = [item(4), item(5, { status: 'running', text: 'partial' })];
     const seen = observe(job({ readPosition: 3 }), read({ status: 'running', activeRunId: 'run-1' }, [], items), []);
     assert.equal(seen.excerpt, 'message 4');
     assert.equal(seen.readPosition, 4);
+    const later = observe(job({ readPosition: 3 }), read({ status: 'running', activeRunId: 'run-1' }, [], [...items, item(6)]), []);
+    assert.deepEqual([later.excerpt, later.readPosition], ['message 6', 4], 'a settled message after it is still the excerpt');
     assert.equal(observe(job(), read({ status: 'running' }, [], [item(0, { status: 'running' })]), []).readPosition, null);
+  });
+
+  test('other unsettled items never hold the position: a long-lived one cannot hide later replies', () => {
+    const items = [
+      item(4, { type: 'command_execution', status: 'running', text: 'synthetic output' }),
+      item(5, { type: 'subagent', createdBy: null, creationSource: null, status: 'running', text: '', title: 'Synthetic child task' }),
+      item(6, { text: 'Synthetic: delegated the refactor' }),
+    ];
+    const seen = observe(job({ readPosition: 3 }), read({ status: 'completed' }, [{ runId: 'run-1', status: 'completed' }], items), []);
+    assert.deepEqual([seen.excerpt, seen.readPosition], ['Synthetic: delegated the refactor', 6]);
   });
 
   test('keeps the position and excerpt when nothing is new', () => {
@@ -187,6 +233,18 @@ describe('timeline reading', () => {
     assert.equal(isWorkerMessage(item(0, { type: 'message', createdBy: 'user', creationSource: 'web' })), false);
     assert.equal(isWorkerMessage(item(0, { type: 'command_execution', creationSource: 'provider' })), false);
     assert.equal(isWorkerMessage(item(0, { type: 'checkpoint', creationSource: 'provider' })), false);
+  });
+
+  test('subagent and notification items are never the excerpt', () => {
+    // Observed from T3: a coordinator's delegated work is one subagent item (no creator, the child's
+    // summary as text once done), and T3 appends a notification item (no creator) when the child finishes.
+    const items = [
+      item(0, { text: 'Synthetic: delegating the refactor' }),
+      item(1, { type: 'subagent', createdBy: null, creationSource: null, text: 'Synthetic child summary', title: 'Synthetic child task' }),
+      item(2, { type: 'notification', createdBy: null, creationSource: null, runId: null, text: 'Synthetic: subagent finished' }),
+    ];
+    assert.deepEqual(items.map(isWorkerMessage), [true, false, false]);
+    assert.equal(observe(job(), read({ status: 'running', activeRunId: 'run-2' }, [], items), []).excerpt, 'Synthetic: delegating the refactor');
   });
 
   test('a finished turn as a real T3 activity read shows it', () => {

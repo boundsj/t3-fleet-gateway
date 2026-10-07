@@ -9,13 +9,77 @@ const LINK_SCHEMES = new Set(['t3-thread:', 'https:', 'http:']);
 
 /** Timeline item statuses that mean the item may still change (for example a message being streamed). */
 const UNSETTLED_ITEM_STATUSES = new Set(['pending', 'running', 'waiting']);
+/** Statuses of a `subagent` item whose delegated work is still going. */
+const DELEGATED_ACTIVE_STATUSES = new Set([...UNSETTLED_ITEM_STATUSES, ...ACTIVE_RUN_STATUSES]);
+
+/** Delegated tasks followed per job, at most; and the characters of each title kept. */
+export const MAX_DELEGATED_TASKS = 20;
+const MAX_DELEGATED_TITLE_CHARS = 200;
 
 export function isUnsettled(item: ThreadItem): boolean {
   return UNSETTLED_ITEM_STATUSES.has(item.status);
 }
 
+/**
+ * Whether the read position must stop before this item: a worker message that may still change (being
+ * streamed) is read again once settled, for the excerpt. Other unsettled items, such as a command still
+ * running or delegated work (followed by item id instead, see trackDelegated), never hold it back, so a
+ * long-lived one cannot hide the replies that come after it.
+ */
+export function holdsReadPosition(item: ThreadItem): boolean {
+  return isUnsettled(item) && isWorkerMessage(item);
+}
+
+/**
+ * A task the thread delegated to another thread (a T3 subagent), followed until it finishes. T3 shows
+ * delegated work in the parent's timeline as one `subagent` item (no creator, title = the child's task
+ * title, text = the child's final summary once it is done); the child's own messages never appear there.
+ */
+export interface DelegatedTask {
+  itemId: string;
+  position: number;
+  title: string;
+}
+
+export function isDelegatedWork(item: ThreadItem): boolean {
+  return /subagent/i.test(item.type);
+}
+
+/** A `subagent` item whose work is still going. */
+export function isDelegatedWorkActive(item: ThreadItem): boolean {
+  return isDelegatedWork(item) && DELEGATED_ACTIVE_STATUSES.has(item.status);
+}
+
+function delegatedTask(item: ThreadItem): DelegatedTask {
+  const title = typeof item.title === 'string' ? item.title.replaceAll(/\s+/g, ' ').trim().slice(0, MAX_DELEGATED_TITLE_CHARS) : '';
+  return { itemId: item.itemId, position: item.position, title: title || 'Untitled delegated task' };
+}
+
+/**
+ * The delegated tasks still running after this read. `items` are the items read now; `refreshed` holds
+ * the latest version of followed tasks that were not among them (null: T3 no longer has the item). A
+ * followed task stays until T3 shows its item settled or gone; a task not read again is kept as it was.
+ */
+export function trackDelegated(
+  previous: readonly DelegatedTask[],
+  items: readonly ThreadItem[],
+  refreshed: ReadonlyMap<string, ThreadItem | null> = new Map(),
+): DelegatedTask[] {
+  const latest = new Map<string, ThreadItem | null>(refreshed);
+  for (const item of items) if (isDelegatedWork(item)) latest.set(item.itemId, item);
+  const tasks = new Map<string, DelegatedTask>();
+  for (const task of previous) {
+    const item = latest.get(task.itemId);
+    if (item === undefined) tasks.set(task.itemId, task);
+    else if (item !== null && isDelegatedWorkActive(item)) tasks.set(task.itemId, delegatedTask(item));
+    latest.delete(task.itemId);
+  }
+  for (const item of latest.values()) if (item !== null && isDelegatedWorkActive(item)) tasks.set(item.itemId, delegatedTask(item));
+  return [...tasks.values()].sort((a, b) => a.position - b.position).slice(0, MAX_DELEGATED_TASKS);
+}
+
 /** What `observe` needs to know about the job. */
-export type ObservedJob = Pick<Job, 'state' | 'lastRunId' | 'readPosition' | 'threadLink' | 'latestActivityAt' | 'standing'>;
+export type ObservedJob = Pick<Job, 'state' | 'lastRunId' | 'readPosition' | 'threadLink' | 'latestActivityAt' | 'standing' | 'delegatedWork'>;
 
 /** States the watcher can derive from a thread. */
 export type ObservedState = Extract<JobState, 'running' | 'needs_input' | 'idle' | 'failed' | 'cancel_requested' | 'cancelled'>;
@@ -38,6 +102,8 @@ export interface Observation {
   anotherTurnFinished: boolean;
   /** The thread's app link, when the job has none yet. */
   link?: string;
+  /** Work the thread delegated to other threads that is still running. */
+  delegatedWork: DelegatedTask[];
 }
 
 /**
@@ -94,9 +160,18 @@ function parseTime(value: string | undefined): number | null {
  *    long-lived thread that takes the next instruction after a failed run too, so it becomes `idle`
  *    instead, with the same error code.
  * 5. Otherwise `idle`: the turn is over (completed, interrupted, cancelled, rolled back, or a thread
- *    with no run) and the thread is waiting for its next instruction.
+ *    with no run) and the thread is waiting for its next instruction, or (reason
+ *    `waiting_on_delegated_work`) for work it delegated, after which T3 starts its next turn by itself.
+ *
+ * An idle job that is running again was not continued by the gateway (that moves it to running
+ * itself): the reason is `turn_started`. `refreshed` is passed to trackDelegated.
  */
-export function observe(job: ObservedJob, read: ThreadRead, pendingQuestionIds: readonly string[]): Observation {
+export function observe(
+  job: ObservedJob,
+  read: ThreadRead,
+  pendingQuestionIds: readonly string[],
+  refreshed?: ReadonlyMap<string, ThreadItem | null>,
+): Observation {
   const { thread, recentRuns } = read;
   const followed = job.lastRunId === null ? undefined : recentRuns.find((run) => run.runId === job.lastRunId);
   const latest = recentRuns.find((run) => run.runId === thread.latestRunId) ?? recentRuns[0];
@@ -115,6 +190,7 @@ export function observe(job: ObservedJob, read: ThreadRead, pendingQuestionIds: 
     reason = pendingQuestionIds.length > 0 ? 'question' : 'approval';
   } else if (active) {
     state = 'running';
+    if (job.state === 'idle') reason = 'turn_started';
   } else if ((latest?.status ?? thread.status) === 'failed' || thread.status === 'failed') {
     state = job.standing ? 'idle' : 'failed';
     reason = 'run_failed';
@@ -125,12 +201,13 @@ export function observe(job: ObservedJob, read: ThreadRead, pendingQuestionIds: 
   }
 
   const items = [...read.items].sort((a, b) => a.position - b.position);
-  const unsettled = items.find(isUnsettled);
-  const settled = unsettled ? items.filter((item) => item.position < unsettled.position) : items;
-  const message = settled.findLast((item) => isWorkerMessage(item) && item.text !== null && item.text.trim().length > 0);
-  // Items come back with positions after the stored one, so stopping before an unsettled item never goes backwards.
+  const delegatedWork = trackDelegated(job.delegatedWork, items, refreshed);
+  if (state === 'idle' && reason !== 'run_failed' && delegatedWork.length > 0) reason = 'waiting_on_delegated_work';
+  const message = items.findLast((item) => isWorkerMessage(item) && !isUnsettled(item) && item.text !== null && item.text.trim().length > 0);
+  // Items come back with positions after the stored one, so stopping before a held item never goes backwards.
+  const held = items.find(holdsReadPosition);
   let readPosition: number | null;
-  if (unsettled) readPosition = unsettled.position > 0 ? unsettled.position - 1 : null;
+  if (held) readPosition = held.position > 0 ? held.position - 1 : null;
   else readPosition = read.nextPosition ?? items.at(-1)?.position ?? job.readPosition;
 
   const times = [parseTime(thread.updatedAt), ...items.map((item) => parseTime(item.updatedAt))].filter((value): value is number => value !== null);
@@ -149,5 +226,6 @@ export function observe(job: ObservedJob, read: ThreadRead, pendingQuestionIds: 
     readPosition,
     anotherTurnFinished: job.state === 'idle' && state === 'idle' && lastRunId !== job.lastRunId,
     ...(link ? { link } : {}),
+    delegatedWork,
   };
 }

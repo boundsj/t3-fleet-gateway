@@ -38,12 +38,15 @@ export interface FakeItem {
   itemId: string;
   runId: string | null;
   messageId: string | null;
-  createdBy: 'user' | 'agent' | 'system';
-  creationSource: 'mcp' | 'provider' | 'web';
+  /** null on items T3 itself adds, such as `subagent` and `notification`. */
+  createdBy: 'user' | 'agent' | 'system' | null;
+  creationSource: 'mcp' | 'provider' | 'web' | null;
   type: string;
   status: string;
   text: string;
   updatedAt: string;
+  /** A `subagent` item's title: the delegated task's. */
+  title?: string | null;
 }
 
 export interface FakeThread {
@@ -187,6 +190,8 @@ export class FakeT3 {
   readonly #sendResults = new Map<string, Record<string, unknown>>();
   readonly #interruptResults = new Map<string, Record<string, unknown>>();
   readonly #deferredInterrupts = new Set<string>();
+  /** Child thread id to the parent's thread and the position of its `subagent` item there. */
+  readonly #delegations = new Map<string, { parentThreadId: string; position: number }>();
   readonly #held: { tool: string; release: () => void }[] = [];
   readonly #holdWaiters: { tool: string; resolve: () => void }[] = [];
   #server: Server | undefined;
@@ -305,6 +310,36 @@ export class FakeT3 {
     if (run) this.#endRun(run, 'failed');
     thread.status = 'failed';
     this.#touch(thread);
+  }
+
+  /**
+   * The worker delegates a task to a child thread, as a T3 coordinator does (observed live): the parent's
+   * timeline gets one `subagent` item with no creator, titled with the child's task, whose text stays
+   * empty until the child is done; the child's own messages never appear in the parent. `itemStatus` is
+   * the item's status while the child works. The parent's run then ends with its own turn (finishTurn).
+   */
+  delegate(threadId: string, title: string, itemStatus = 'running'): { childThreadId: string; item: FakeItem } {
+    const thread = this.#thread(threadId);
+    const { threadId: childThreadId } = this.launchDirect({ projectId: thread.projectId, title, message: `Synthetic delegated task: ${title}` });
+    const item = this.#addItem(thread, { runId: this.#activeRun(thread)?.runId ?? null, createdBy: null, creationSource: null, type: 'subagent', status: itemStatus, text: '', title });
+    this.#delegations.set(childThreadId, { parentThreadId: threadId, position: item.position });
+    return { childThreadId, item };
+  }
+
+  /**
+   * A delegated child finishes with `summary` (observed live): its `subagent` item in the parent completes
+   * with the summary as text, T3 appends a `notification` item with no creator to the parent, and a new
+   * run starts on the parent by itself.
+   */
+  finishDelegated(childThreadId: string, summary: string): void {
+    const delegation = this.#delegations.get(childThreadId);
+    if (!delegation) throw new Error(`no delegation for ${childThreadId}`);
+    this.finishTurn(childThreadId, summary);
+    const parent = this.#thread(delegation.parentThreadId);
+    const item = parent.items[delegation.position];
+    if (item) Object.assign(item, { status: 'completed', text: summary, updatedAt: new Date().toISOString() });
+    this.#addItem(parent, { runId: null, createdBy: null, creationSource: null, type: 'notification', text: `Synthetic: subagent "${item?.title ?? ''}" finished` });
+    this.#startRun(parent);
   }
 
   /** Create a thread as t3_thread_launch would, outside MCP: a launch the gateway never heard back from. */
@@ -809,7 +844,7 @@ export class FakeT3 {
         ...item,
         visibility: 'local',
         sourceThreadId: thread.threadId,
-        title: null,
+        title: item.title ?? null,
         text: item.text.slice(0, maxChars),
         textTruncated: item.text.length > maxChars,
         nextTextOffset: item.text.length > maxChars ? maxChars : null,

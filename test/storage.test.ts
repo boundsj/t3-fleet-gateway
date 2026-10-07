@@ -113,14 +113,14 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 2);
+    assert.equal(SCHEMA_VERSION, 3);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
-      after.map(({ standing, ...rest }) => rest),
+      after.map(({ standing, delegated_work, ...rest }) => rest),
       before,
       'every row and column is copied as it was',
     );
-    assert.deepEqual(after.map((row) => row.standing), [0, 0]);
+    assert.deepEqual(after.map((row) => [row.standing, row.delegated_work]), [[0, '[]'], [0, '[]']]);
     assert.deepEqual(db.prepare('SELECT * FROM job_events ORDER BY id').all(), eventsBefore);
     assert.equal((db.prepare('SELECT COUNT(*) AS n FROM idempotency_keys').get() as { n: number }).n, 1);
     assert.equal(db.prepare('PRAGMA foreign_keys').get()?.foreign_keys, 1, 'foreign keys are enforced again');
@@ -293,7 +293,7 @@ describe('job store', () => {
     const standing = {
       projectAlias: 'pilot', hostId: 'main', t3ProjectId: 'project-1', state: 'idle' as const, title: 'Synthetic coordinator', branch: '', runtimeMode: '',
       threadId: 'thread-1', threadTitle: 'Synthetic coordinator', threadLink: null, lastRunId: null, pendingRequestIds: [], latestMessageExcerpt: null,
-      latestActivityAt: null, readPosition: 3, lastErrorCode: null, lastErrorMessage: null,
+      latestActivityAt: null, readPosition: 3, lastErrorCode: null, lastErrorMessage: null, delegatedWork: [],
     };
     const first = store.adopt({ id: 'job1', ...standing });
     assert.deepEqual([first.created, first.job.standing, first.job.clientId, first.job.readPosition], [true, true, 'operator', 3]);

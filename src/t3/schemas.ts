@@ -107,6 +107,8 @@ export const threadItemSchema = z.looseObject({
   text: z.string().nullable(),
   textTruncated: z.boolean(),
   updatedAt: z.string(),
+  /** Set on some item types: a `subagent` item's title is the delegated task's title. */
+  title: z.string().nullable().optional(),
 });
 export type ThreadItem = z.infer<typeof threadItemSchema>;
 

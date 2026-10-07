@@ -37,8 +37,11 @@ export const STATE_MEANINGS: Record<JobState, string> = {
   needs_input:
     'The worker is blocked: it asked a question (answer with work_respond) or needs a permission approval that only the operator can give in T3 (projects with runtimeMode approval-required).',
   idle:
-    'The worker finished its turn and is waiting: ready for review or the next instruction (work_continue). Not proof the task succeeded. ' +
-    'A standing job is idle between instructions.',
+    "Nothing is running on the thread: the worker's turn is over. Read its latest reply (work_status); idle is not proof the task succeeded. " +
+    'A worker that delegated work to other threads (a coordinator usually does) goes idle while that work runs and starts its next turn ' +
+    'by itself when it is done: if waitingOnDelegatedWork is true, or its reply says it delegated or is waiting, do not send new ' +
+    'instructions; wait for its next turn in work_feed. Otherwise send the next instruction with work_continue when the reply asks ' +
+    'for input or the work is done.',
   cancel_requested: 'An interrupt was requested; waiting for T3 to confirm the thread stopped.',
   cancelled: 'Stopped by work_cancel. Terminal.',
   released:

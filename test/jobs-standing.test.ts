@@ -12,6 +12,8 @@ interface JobView {
   jobId: string;
   state: string;
   standing: boolean;
+  waitingOnDelegatedWork: boolean;
+  delegatedTasks: string[];
   title: string;
   link: string | null;
   startedByYou: boolean;
@@ -25,7 +27,7 @@ interface Status extends JobView {
 }
 
 interface FeedPage {
-  events: { jobId: string; type: string; toState: string | null; reason: string | null }[];
+  events: { jobId: string; type: string; fromState: string | null; toState: string | null; reason: string | null }[];
   nextCursor: string;
   attention: (JobView & { why: string })[];
 }
@@ -117,7 +119,10 @@ describe('standing jobs: adopt', () => {
         ['state_changed', 'idle', 'completed'],
       ],
     );
-    assert.match(later.attention.find((entry) => entry.jobId === job.id)?.why ?? '', /send the next instruction with work_continue/);
+    assert.match(
+      later.attention.find((entry) => entry.jobId === job.id)?.why ?? '',
+      /read its reply with work_status\. If it says it delegated work or is waiting, send nothing: it resumes by itself/,
+    );
   });
 
   test('a thread running or waiting on a question is adopted as running or needs_input', async (t) => {
@@ -217,14 +222,13 @@ describe('standing jobs: driving them', () => {
     assert.equal((await status(agent, job.id)).lastError, null);
   });
 
-  test('follows a long turn while the coordinator works with delegated child threads', async (t) => {
+  test('follows a long turn whose timeline grows past what one tick reads', async (t) => {
     const harness = await startJobHarness(t);
     const { fake, gw, agent, tick } = harness;
     const threadId = coordinatorThread(fake);
     const { job } = await adopt(harness, threadId);
-    await agent.call('work_continue', { jobId: job.id, message: 'Synthetic: delegate the refactor', requestId: 'cos-delegate' });
-    // The coordinator's run stays active while child threads of its own work; its timeline grows past
-    // what one tick reads (5 pages of 100).
+    await agent.call('work_continue', { jobId: job.id, message: 'Synthetic: a long investigation', requestId: 'cos-long' });
+    // The timeline grows past what one tick reads (5 pages of 100), and another thread in the project finishes meanwhile.
     const child = fake.launchDirect({ projectId: 'project-1', title: 'Synthetic delegated child', message: 'Synthetic child task' });
     const thread = fake.threads.get(threadId);
     assert.ok(thread);
@@ -240,12 +244,127 @@ describe('standing jobs: driving them', () => {
     assert.equal(gw.services.jobs.store.require(job.id).readPosition, thread.items.length - 1, 'caught up over several ticks');
     fake.finishTurn(child.threadId, 'Synthetic child done');
     await tick();
-    assert.equal(await jobState(agent, job.id), 'running', "a child's finish is not the coordinator's");
+    assert.equal(await jobState(agent, job.id), 'running', "another thread's finish is not the coordinator's");
     fake.finishTurn(threadId, 'Synthetic: the refactor is merged');
     await tick();
     const done = await status(agent, job.id);
     assert.deepEqual([done.state, done.latestMessageExcerpt], ['idle', 'Synthetic: the refactor is merged']);
     assert.equal(gw.services.jobs.store.openJobForThread(child.threadId), undefined, 'child threads are not jobs');
+  });
+});
+
+describe('standing jobs: a coordinator that delegates', () => {
+  // Observed live: when a T3 coordinator delegates, its own run completes while the child thread works;
+  // the child appears in the parent only as one subagent item; when the child finishes, T3 appends a
+  // notification item and starts a new run on the parent by itself.
+  test('goes idle while its delegated work runs, then resumes and finishes with no agent action', async (t) => {
+    const harness = await startJobHarness(t);
+    const { fake, gw, agent, tick } = harness;
+    const threadId = coordinatorThread(fake);
+    const { job } = await adopt(harness, threadId);
+    const start = await agent.call<FeedPage>('work_feed', {});
+    await agent.call('work_continue', { jobId: job.id, message: 'Synthetic: get the refactor done', requestId: 'cos-delegate' });
+    const { childThreadId } = fake.delegate(threadId, 'Synthetic refactor task');
+    fake.finishTurn(threadId, 'Synthetic: delegated the refactor; waiting for it');
+    await tick();
+    const waiting = await status(agent, job.id);
+    assert.deepEqual(
+      [waiting.state, waiting.waitingOnDelegatedWork, waiting.delegatedTasks, waiting.latestMessageExcerpt],
+      ['idle', true, ['Synthetic refactor task'], 'Synthetic: delegated the refactor; waiting for it'],
+    );
+    const feed = await agent.call<FeedPage>('work_feed', { cursor: start.nextCursor });
+    const entry = feed.attention.find((candidate) => candidate.jobId === job.id);
+    assert.equal(entry?.waitingOnDelegatedWork, true);
+    assert.match(entry?.why ?? '', /^Waiting on work it delegated \("Synthetic refactor task"\)\. It resumes by itself when that is done: do not send new instructions/);
+
+    // A person asks for news in T3 while the child works: the reply comes after the pending subagent item.
+    const thread = fake.threads.get(threadId);
+    assert.ok(thread);
+    fake.userTurn(threadId, 'Synthetic: any news?');
+    fake.finishTurn(threadId, 'Synthetic: still waiting on the refactor');
+    gw.clock.advance(2 * MINUTE);
+    await tick();
+    const asked = await status(agent, job.id);
+    assert.deepEqual([asked.state, asked.waitingOnDelegatedWork, asked.latestMessageExcerpt], ['idle', true, 'Synthetic: still waiting on the refactor']);
+    assert.equal(gw.services.jobs.store.require(job.id).readPosition, thread.items.length - 1, 'the pending subagent item does not hold the read position');
+
+    fake.finishDelegated(childThreadId, 'Synthetic child summary: refactor merged');
+    gw.clock.advance(2 * MINUTE);
+    await tick();
+    const resumed = await status(agent, job.id);
+    assert.deepEqual(
+      [resumed.state, resumed.waitingOnDelegatedWork, resumed.delegatedTasks, resumed.latestMessageExcerpt],
+      ['running', false, [], 'Synthetic: still waiting on the refactor'],
+      'neither the child summary nor the notification is the excerpt',
+    );
+    fake.finishTurn(threadId, 'Synthetic: the refactor is merged; ready for the next step');
+    await tick();
+    const done = await status(agent, job.id);
+    assert.deepEqual([done.state, done.latestMessageExcerpt], ['idle', 'Synthetic: the refactor is merged; ready for the next step']);
+
+    const events = (await agent.call<FeedPage>('work_feed', { cursor: start.nextCursor })).events;
+    assert.deepEqual(
+      events.map((event) => [event.type, event.fromState, event.toState, event.reason]),
+      [
+        ['state_changed', 'idle', 'running', 'followup'],
+        ['state_changed', 'running', 'idle', 'waiting_on_delegated_work'],
+        ['turn_finished', 'idle', 'idle', 'waiting_on_delegated_work'],
+        ['state_changed', 'idle', 'running', 'turn_started'],
+        ['state_changed', 'running', 'idle', 'completed'],
+      ],
+    );
+    assert.equal(fake.sends.length, 1, 'the agent sent only the first instruction');
+    assertNotLogged(gw, ['Synthetic refactor task', 'Synthetic child summary', 'still waiting on the refactor']);
+  });
+
+  test('a resumed turn that starts and ends between two checks is reported as turn_finished', async (t) => {
+    const harness = await startJobHarness(t);
+    const { fake, gw, agent, tick } = harness;
+    const threadId = coordinatorThread(fake);
+    const { job } = await adopt(harness, threadId);
+    await agent.call('work_continue', { jobId: job.id, message: 'Synthetic: publish the docs', requestId: 'cos-docs' });
+    // A T3 that shows the subagent item completed at once: only the reply says the coordinator waits.
+    const { childThreadId } = fake.delegate(threadId, 'Synthetic docs task', 'completed');
+    fake.finishTurn(threadId, 'Synthetic: delegated the docs');
+    await tick();
+    const delegated = await status(agent, job.id);
+    assert.deepEqual([delegated.state, delegated.waitingOnDelegatedWork], ['idle', false]);
+    const before = await agent.call<FeedPage>('work_feed', {});
+    assert.match(before.attention.find((entry) => entry.jobId === job.id)?.why ?? '', /If it says it delegated work or is waiting, send nothing/);
+
+    fake.finishDelegated(childThreadId, 'Synthetic docs summary');
+    fake.finishTurn(threadId, 'Synthetic: the docs are published');
+    gw.clock.advance(2 * MINUTE);
+    await tick();
+    const done = await status(agent, job.id);
+    assert.deepEqual([done.state, done.latestMessageExcerpt], ['idle', 'Synthetic: the docs are published']);
+    const after = await agent.call<FeedPage>('work_feed', { cursor: before.nextCursor });
+    assert.deepEqual(
+      after.events.map((event) => [event.type, event.fromState, event.toState, event.reason]),
+      [['turn_finished', 'idle', 'idle', 'completed']],
+    );
+  });
+
+  test('adopting a coordinator that waits on delegated work follows that work', async (t) => {
+    const harness = await startJobHarness(t);
+    const { fake, gw, agent, tick } = harness;
+    const threadId = coordinatorThread(fake);
+    fake.userTurn(threadId, 'Synthetic: start the migration');
+    const { childThreadId } = fake.delegate(threadId, 'Synthetic migration task');
+    fake.finishTurn(threadId, 'Synthetic: delegated the migration');
+    for (let i = 0; i < 150; i++) {
+      fake.userTurn(threadId, `Synthetic question ${i}`);
+      fake.finishTurn(threadId, `Synthetic answer ${i}`);
+    }
+    const { job } = await adopt(harness, threadId);
+    assert.deepEqual([job.state, job.delegatedWork.map((task) => task.title)], ['idle', ['Synthetic migration task']], 'found on an earlier page');
+    assert.equal(job.latestMessageExcerpt, 'Synthetic answer 149');
+
+    fake.finishDelegated(childThreadId, 'Synthetic migration summary');
+    gw.clock.advance(2 * MINUTE);
+    await tick();
+    const resumed = await status(agent, job.id);
+    assert.deepEqual([resumed.state, resumed.waitingOnDelegatedWork], ['running', false]);
   });
 });
 

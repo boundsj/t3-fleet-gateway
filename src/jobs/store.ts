@@ -2,6 +2,7 @@ import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
 import type { Logger } from '../log.ts';
 import type { Clock } from '../time.ts';
+import type { DelegatedTask } from './derive.ts';
 import { isTerminal, RUNNING_STATES, TERMINAL_STATES, type JobState } from './states.ts';
 
 export interface Job {
@@ -41,6 +42,11 @@ export interface Job {
    * launched or reconciled, holds no concurrency slot, and stays open until the operator releases it.
    */
   standing: boolean;
+  /**
+   * Work the thread delegated to other threads (T3 subagents) that is still running, from its timeline.
+   * A coordinator is idle while it waits for such work, and T3 starts its next turn when the work is done.
+   */
+  delegatedWork: DelegatedTask[];
 }
 
 /** The client id recorded on standing jobs: the operator adopted them, no agent started them. Real client ids are longer. */
@@ -80,6 +86,7 @@ export type JobChanges = Partial<
     | 'lastErrorCode'
     | 'lastErrorMessage'
     | 'dispatchStartedAt'
+    | 'delegatedWork'
   >
 >;
 
@@ -97,6 +104,7 @@ const COLUMNS: Record<keyof JobChanges, string> = {
   lastErrorCode: 'last_error_code',
   lastErrorMessage: 'last_error_message',
   dispatchStartedAt: 'dispatch_started_at',
+  delegatedWork: 'delegated_work',
 };
 
 interface JobRow {
@@ -128,6 +136,7 @@ interface JobRow {
   dispatch_started_at: number | null;
   finished_at: number | null;
   standing: number;
+  delegated_work: string;
 }
 
 interface EventRow {
@@ -147,6 +156,19 @@ function parseIds(text: string): string[] {
   try {
     const value: unknown = JSON.parse(text);
     return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseDelegated(text: string): DelegatedTask[] {
+  try {
+    const value: unknown = JSON.parse(text);
+    if (!Array.isArray(value)) return [];
+    return value.filter(
+      (task): task is DelegatedTask =>
+        typeof task === 'object' && task !== null && typeof task.itemId === 'string' && Number.isInteger(task.position) && typeof task.title === 'string',
+    );
   } catch {
     return [];
   }
@@ -182,6 +204,7 @@ function toJob(row: JobRow): Job {
     dispatchStartedAt: row.dispatch_started_at,
     finishedAt: row.finished_at,
     standing: row.standing === 1,
+    delegatedWork: parseDelegated(row.delegated_work),
   };
 }
 
@@ -198,7 +221,7 @@ function toEvent(row: EventRow): JobEvent {
 }
 
 function columnValue(key: keyof JobChanges, value: JobChanges[keyof JobChanges]): string | number | null {
-  if (key === 'pendingRequestIds') return JSON.stringify(value ?? []);
+  if (key === 'pendingRequestIds' || key === 'delegatedWork') return JSON.stringify(value ?? []);
   // T3 positions are integers; the STRICT INTEGER column refuses anything else.
   return (value ?? null) as string | number | null;
 }
@@ -251,6 +274,7 @@ export interface NewStandingJob {
   readPosition: number | null;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
+  delegatedWork: DelegatedTask[];
 }
 
 export interface TransitionOptions {
@@ -413,8 +437,8 @@ export class JobStore {
         .prepare(
           `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, t3_project_id, state, task, title, branch, runtime_mode,
              t3_thread_id, t3_thread_title, t3_thread_link, last_run_id, pending_request_ids, latest_message_excerpt, latest_activity_at,
-             read_position, last_error_code, last_error_message, created_at, updated_at, state_changed_at, finished_at, standing)
-           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+             read_position, last_error_code, last_error_message, created_at, updated_at, state_changed_at, finished_at, standing, delegated_work)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
         )
         .run(
           job.id,
@@ -441,6 +465,7 @@ export class JobStore {
           now,
           now,
           isTerminal(job.state) ? now : null,
+          JSON.stringify(job.delegatedWork),
         );
       this.#insertEvent(job.id, 'created', null, job.state, { reason: 'adopted' }, now);
       this.#logger.info('job.adopted', { jobId: job.id, project: job.projectAlias, hostId: job.hostId, state: job.state });

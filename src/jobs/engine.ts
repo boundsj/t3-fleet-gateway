@@ -5,7 +5,7 @@ import { resolveProjectId } from '../hosts/projects.ts';
 import type { Logger } from '../log.ts';
 import { T3TransportError } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
-import type { LaunchResult, ThreadRead } from '../t3/schemas.ts';
+import type { LaunchResult, ThreadItem, ThreadRead } from '../t3/schemas.ts';
 import { MINUTE, SECOND, type Clock } from '../time.ts';
 import { EXCERPT_CHARS, isActiveStatus, observe, threadLinkTarget } from './derive.ts';
 import { deliverInterrupt } from './interrupt.ts';
@@ -412,9 +412,11 @@ export class JobEngine {
     const client = registry.client(job.hostId);
     let read: ThreadRead;
     let questions: string[];
+    let refreshed: Map<string, ThreadItem | null>;
     try {
       read = await this.#readNew(job, threadId);
       questions = await client.listPendingRequests(threadId);
+      refreshed = await this.#readDelegated(job, threadId, read.items);
     } catch (error) {
       if (!(error instanceof T3ToolError)) throw error;
       logger.warn('jobs.watch_failed', { jobId: job.id, hostId: job.hostId, errorCode: error.t3Code });
@@ -430,9 +432,10 @@ export class JobEngine {
       }
       return;
     }
-    const seen = observe(job, read, questions);
+    const seen = observe(job, read, questions, refreshed);
     const changes: JobChanges = {
       pendingRequestIds: seen.pendingRequestIds,
+      delegatedWork: seen.delegatedWork,
       readPosition: seen.readPosition,
       latestActivityAt: seen.activityAt,
       lastRunId: seen.lastRunId,
@@ -479,6 +482,34 @@ export class JobEngine {
     }
     if (!read) throw new GatewayError('internal_error', 'No thread read');
     return { ...read, items, nextPosition: read.nextPosition ?? afterPosition };
+  }
+
+  /**
+   * The current version of each delegated task the job follows that this tick's read did not return
+   * (the read position has moved past it), or null when T3 no longer has it. Read from the earliest
+   * such item on, so tasks near each other cost one read; at most MAX_READ_PAGES reads.
+   */
+  async #readDelegated(job: Job, threadId: string, read: readonly ThreadItem[]): Promise<Map<string, ThreadItem | null>> {
+    const found = new Map<string, ThreadItem | null>();
+    const seen = new Set(read.map((item) => item.itemId));
+    let wanted = job.delegatedWork.filter((task) => !seen.has(task.itemId)).sort((a, b) => a.position - b.position);
+    const client = this.#options.registry.client(job.hostId);
+    for (let page = 0; page < MAX_READ_PAGES && wanted[0] !== undefined; page++) {
+      const first = wanted[0];
+      const result = await client.readThread({
+        threadId,
+        afterPosition: first.position > 0 ? first.position - 1 : null,
+        limit: READ_PAGE_SIZE,
+        runLimit: 1,
+        maxCharsPerItem: 1,
+      });
+      for (const item of result.items) if (wanted.some((task) => task.itemId === item.itemId)) found.set(item.itemId, item);
+      // A task the page covered without returning its item is gone. The page always covers the first.
+      const last = result.items.at(-1)?.position ?? first.position;
+      for (const task of wanted) if (!found.has(task.itemId) && (task.position <= last || !result.hasMore)) found.set(task.itemId, null);
+      wanted = wanted.filter((task) => !found.has(task.itemId));
+    }
+    return found;
   }
 
   /**

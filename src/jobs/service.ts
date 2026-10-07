@@ -8,7 +8,7 @@ import { T3TransportError, type T3Client } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
 import type { ThreadItem, ThreadRead } from '../t3/schemas.ts';
 import { HOUR, SECOND, type Clock } from '../time.ts';
-import { EXCERPT_CHARS, isActiveStatus, isUnsettled, observe, threadLinkTarget } from './derive.ts';
+import { EXCERPT_CHARS, holdsReadPosition, isActiveStatus, isDelegatedWorkActive, observe, threadLinkTarget } from './derive.ts';
 import { newJobId } from './ids.ts';
 import { cancelRequestId } from './interrupt.ts';
 import { isTerminal, OPEN_STATES, type JobState } from './states.ts';
@@ -276,7 +276,11 @@ export class JobService {
       );
     }
     const lastRunId = thread.activeRunId ?? thread.latestRunId;
-    const seen = observe({ state: 'idle', lastRunId, readPosition: null, threadLink: null, latestActivityAt: null, standing: true }, read, questions);
+    const seen = observe(
+      { state: 'idle', lastRunId, readPosition: null, threadLink: null, latestActivityAt: null, standing: true, delegatedWork: [] },
+      read,
+      questions,
+    );
     const runtimeMode = (thread as { runtimeMode?: unknown }).runtimeMode;
     return this.store.adopt({
       id: newJobId(),
@@ -297,6 +301,7 @@ export class JobService {
       readPosition: seen.readPosition,
       lastErrorCode: seen.errorCode ?? null,
       lastErrorMessage: seen.errorCode ? 'The latest T3 run failed. Open the thread in T3 for details.' : null,
+      delegatedWork: seen.delegatedWork,
     });
   }
 
@@ -505,19 +510,22 @@ export class JobService {
 
 /**
  * Read a thread to the end of its timeline, for adoption: the last page (or everything from the first
- * item that may still change, so a message being streamed is read again once settled) with the
- * thread's state. Bounded by MAX_ADOPT_PAGES; a longer thread is caught up by the watcher.
+ * message that may still change, so a message being streamed is read again once settled) with the
+ * thread's state, plus any earlier delegated work that is still running. Bounded by MAX_ADOPT_PAGES;
+ * a longer thread is caught up by the watcher.
  */
 async function readToEnd(client: T3Client, threadId: string): Promise<ThreadRead> {
   let afterPosition: number | null = null;
   let read: ThreadRead | undefined;
   let kept: ThreadItem[] = [];
+  const delegated: ThreadItem[] = [];
   for (let page = 0; page < MAX_ADOPT_PAGES; page++) {
     read = await client.readThread({ threadId, afterPosition, limit: 100, runLimit: 5, maxCharsPerItem: EXCERPT_CHARS });
-    kept = kept.some(isUnsettled) ? [...kept, ...read.items] : read.items;
+    if (!kept.some(holdsReadPosition)) delegated.push(...kept.filter(isDelegatedWorkActive));
+    kept = kept.some(holdsReadPosition) ? [...kept, ...read.items] : read.items;
     if (!read.hasMore || read.nextPosition === null || read.nextPosition === afterPosition) break;
     afterPosition = read.nextPosition;
   }
   if (!read) throw new GatewayError('internal_error', 'No thread read');
-  return { ...read, items: kept, nextPosition: read.nextPosition ?? afterPosition };
+  return { ...read, items: [...delegated, ...kept], nextPosition: read.nextPosition ?? afterPosition };
 }
