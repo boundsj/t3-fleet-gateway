@@ -140,6 +140,90 @@ describe('database', () => {
     assert.deepEqual(schema(db), schema(fresh), 'a migrated database has the schema of a new one');
   });
 
+  test('migration 2 copies a version 1 jobs table from an earlier build of migration 1', (t) => {
+    // Before migration 1 reached main it was corrected in place: databases created by earlier builds
+    // have no state_changed_at or t3_thread_link, and store read_position as text.
+    const path = join(openDataDir(join(tempDir(t), 'data')).databasePath);
+    const v1 = new DatabaseSync(path);
+    migrate(v1, MIGRATIONS.slice(0, 1));
+    v1.exec(`
+DROP TABLE jobs;
+CREATE TABLE jobs (
+  id TEXT PRIMARY KEY, client_id TEXT NOT NULL, request_id TEXT NOT NULL, project_alias TEXT NOT NULL, host_id TEXT NOT NULL,
+  t3_project_id TEXT, state TEXT NOT NULL, task TEXT NOT NULL, title TEXT NOT NULL, branch TEXT NOT NULL, runtime_mode TEXT NOT NULL,
+  t3_thread_id TEXT, t3_thread_title TEXT, last_run_id TEXT, pending_request_ids TEXT NOT NULL DEFAULT '[]', latest_message_excerpt TEXT,
+  latest_activity_at INTEGER, read_position TEXT, host_unreachable_since INTEGER, last_error_code TEXT, last_error_message TEXT,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, dispatch_started_at INTEGER, finished_at INTEGER
+) STRICT;`);
+    const insert = v1.prepare(
+      `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode, t3_thread_id, read_position, created_at, updated_at)
+       VALUES (?, 'client-a', ?, 'pilot', 'main', 'idle', 'synthetic task', 'Synthetic', 'fleet/x', 'auto', 'thread-1', ?, 1, ?)`,
+    );
+    insert.run('jobolder001', 'req-1', '42', 20);
+    insert.run('jobolder002', 'req-2', 'not a position', 30);
+    insert.run('jobolder003', 'req-3', null, 40);
+    insert.run('jobolder004', 'req-4', ' 7 ', 50);
+    v1.prepare("INSERT INTO job_events (job_id, type, to_state, created_at) VALUES ('jobolder001', 'created', 'queued', 1)").run();
+    v1.close();
+
+    const db = openDatabase(path);
+    t.after(() => db.close());
+    assert.equal(schemaVersion(db), SCHEMA_VERSION);
+    const rows = db.prepare('SELECT id, read_position, typeof(read_position) AS type, state_changed_at, t3_thread_link, standing FROM jobs ORDER BY rowid').all();
+    assert.deepEqual(
+      rows.map((row) => ({ ...row })),
+      [
+        { id: 'jobolder001', read_position: 42, type: 'integer', state_changed_at: 20, t3_thread_link: null, standing: 0 },
+        { id: 'jobolder002', read_position: null, type: 'null', state_changed_at: 30, t3_thread_link: null, standing: 0 },
+        { id: 'jobolder003', read_position: null, type: 'null', state_changed_at: 40, t3_thread_link: null, standing: 0 },
+        { id: 'jobolder004', read_position: 7, type: 'integer', state_changed_at: 50, t3_thread_link: null, standing: 0 },
+      ],
+    );
+    assert.equal(new JobStore(db, () => 1_000, silentLogger).require('jobolder001').readPosition, 42);
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM job_events').get() as { n: number }).n, 1);
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+    const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
+    t.after(() => fresh.close());
+    const schema = (target: typeof db) => target.prepare("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'jobs' ORDER BY name").all();
+    assert.deepEqual(schema(db), schema(fresh), 'the same schema as a new database');
+  });
+
+  test('migration 2 names a missing column it cannot fill and leaves the database at version 1', (t) => {
+    const path = join(tempDir(t), 'test.db');
+    const v1 = new DatabaseSync(path);
+    migrate(v1, MIGRATIONS.slice(0, 1));
+    v1.exec('PRAGMA foreign_keys = OFF; DROP TABLE jobs; CREATE TABLE jobs (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL) STRICT;');
+    assert.throws(() => migrate(v1), { code: 'database_error', message: /^Migration 2 \(standing jobs\): table jobs has no column client_id/ });
+    assert.equal(schemaVersion(v1), 1);
+    v1.close();
+  });
+
+  test('a migration that fails in SQLite is a database_error naming it; a busy database says so', (t) => {
+    const path = join(tempDir(t), 'test.db');
+    const db = new DatabaseSync(path);
+    t.after(() => db.close());
+    migrate(db);
+    const broken = { version: SCHEMA_VERSION + 1, name: 'synthetic broken', sql: 'ALTER TABLE no_such_table ADD COLUMN x TEXT;' };
+    assert.throws(() => migrate(db, [...MIGRATIONS, broken]), {
+      code: 'database_error',
+      message: new RegExp(`^Migration ${SCHEMA_VERSION + 1} \\(synthetic broken\\) failed: no such table: no_such_table\\. It was rolled back; the schema is still at version ${SCHEMA_VERSION}\\.`),
+    });
+    assert.equal(schemaVersion(db), SCHEMA_VERSION);
+
+    const other = new DatabaseSync(path);
+    t.after(() => other.close());
+    other.exec('BEGIN IMMEDIATE');
+    db.exec('PRAGMA busy_timeout = 0');
+    const next = { version: SCHEMA_VERSION + 1, name: 'synthetic next', sql: 'CREATE TABLE synthetic_next (x TEXT) STRICT;' };
+    assert.throws(() => migrate(db, [...MIGRATIONS, next]), {
+      code: 'database_error',
+      message: new RegExp(`^Migration ${SCHEMA_VERSION + 1} \\(synthetic next\\) could not run: another process is using the database \\(SQLITE_BUSY\\)`),
+    });
+    other.exec('ROLLBACK');
+    migrate(db, [...MIGRATIONS, next]);
+    assert.equal(schemaVersion(db), SCHEMA_VERSION + 1);
+  });
+
   test('a table rebuild that breaks a foreign key is rolled back', (t) => {
     const db = openDatabase(join(tempDir(t), 'test.db'));
     t.after(() => db.close());

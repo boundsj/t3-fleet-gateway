@@ -203,7 +203,7 @@ sqlite3 ~/.local/share/t3-fleet-gateway/gateway.db ".backup '/path/to/backup/gat
 cp -p ~/.local/share/t3-fleet-gateway/gateway.key /path/to/backup/
 ```
 
-Back up before updating the service to a version whose CHANGELOG lists a schema migration: the first start applies it, and an older version refuses the migrated database.
+Back up before updating the service to a version whose CHANGELOG lists a schema migration: the first start applies it, and an older version refuses the migrated database. Each migration runs in one transaction: if it fails, `serve` (or the command) stops with `database_error` naming the migration, and the database stays at the version before it. `could not run: another process is using the database (SQLITE_BUSY)` means another gateway process or CLI command held the database for more than the 5-second busy timeout: stop the service (and any other command using the data directory), then start again.
 
 Treat backups as secrets: they contain T3 credentials. To restore, stop the gateway, put both files back in the data directory with mode `0600`, and start it. Without `gateway.key`, existing agent connections keep working but unused approval codes become invalid.
 

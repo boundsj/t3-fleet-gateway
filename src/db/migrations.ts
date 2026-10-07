@@ -1,7 +1,12 @@
+import type { DatabaseSync } from 'node:sqlite';
+import { GatewayError } from '../errors.ts';
+
 export interface Migration {
   version: number;
   name: string;
-  sql: string;
+  /** The migration's statements; or `run`, for a migration that must look at the database first. */
+  sql?: string;
+  run?: (db: DatabaseSync) => void;
   /**
    * The migration rebuilds a table that others reference (SQLite cannot alter a CHECK constraint):
    * it runs with foreign key enforcement off and must leave no violations (SQLite's documented
@@ -9,12 +14,6 @@ export interface Migration {
    */
   rebuildsTables?: boolean;
 }
-
-/** Every column of `jobs` as created by migration 1, in order. */
-const JOBS_V1_COLUMNS = `id, client_id, request_id, project_alias, host_id, t3_project_id, state, task, title, branch, runtime_mode,
-  t3_thread_id, t3_thread_title, t3_thread_link, last_run_id, pending_request_ids, latest_message_excerpt, latest_activity_at,
-  read_position, host_unreachable_since, last_error_code, last_error_message, created_at, updated_at, state_changed_at,
-  dispatch_started_at, finished_at`;
 
 /**
  * Append-only list. Never edit a migration once it is in a commit on main: databases in use have
@@ -193,8 +192,12 @@ CREATE TABLE idempotency_keys (
     rebuildsTables: true,
     // jobs gains `standing` (an existing T3 thread the operator adopted, rather than one the gateway
     // launched) and the terminal state `released` (the operator stopped tracking a standing job).
-    // The state CHECK can only change by rebuilding the table; every row is copied as it is.
-    sql: `
+    // The state CHECK can only change by rebuilding the table; every row is copied (see rebuildJobsV2).
+    run: rebuildJobsV2,
+  },
+];
+
+const JOBS_V2_TABLE = `
 CREATE TABLE jobs_v2 (
   id TEXT PRIMARY KEY,
   client_id TEXT NOT NULL,
@@ -227,14 +230,52 @@ CREATE TABLE jobs_v2 (
   dispatch_started_at INTEGER,
   finished_at INTEGER,
   standing INTEGER NOT NULL DEFAULT 0 CHECK (standing IN (0, 1))
-) STRICT;
-INSERT INTO jobs_v2 (${JOBS_V1_COLUMNS}) SELECT ${JOBS_V1_COLUMNS} FROM jobs ORDER BY rowid;
+) STRICT`;
+
+/** A T3 read position as an integer: kept if it is one, converted from digits in text, else NULL. */
+const READ_POSITION_AS_INTEGER = `CASE
+    WHEN typeof(read_position) = 'integer' THEN read_position
+    WHEN typeof(read_position) = 'real' AND read_position = CAST(read_position AS INTEGER) THEN CAST(read_position AS INTEGER)
+    WHEN typeof(read_position) = 'text' AND trim(read_position) <> '' AND trim(read_position) NOT GLOB '*[^0-9]*'
+      AND length(trim(read_position)) <= 15 THEN CAST(trim(read_position) AS INTEGER)
+    ELSE NULL
+  END`;
+
+/**
+ * Migration 2: rebuild `jobs` with the `released` state and the `standing` column. The columns to copy
+ * come from the table as it is, not as migration 1 reads today: migration 1 was corrected in place
+ * before it reached main, so a database created by an earlier build may lack `state_changed_at`
+ * (filled from `updated_at`) or `t3_thread_link` (left NULL), or store `read_position` as text
+ * (converted to an integer, NULL when it is not one). A missing column that has no such fallback
+ * and cannot be NULL stops the migration with an error naming it.
+ */
+function rebuildJobsV2(db: DatabaseSync): void {
+  const columnsOf = (table: string) => db.prepare(`PRAGMA table_info(${table})`).all() as { name: string; notnull: number; dflt_value: unknown }[];
+  const present = new Set(columnsOf('jobs').map((column) => column.name));
+  db.exec(JOBS_V2_TABLE);
+  const fallbacks: Record<string, string> = { state_changed_at: 'updated_at' };
+  const names: string[] = [];
+  const values: string[] = [];
+  for (const column of columnsOf('jobs_v2')) {
+    const fallback = fallbacks[column.name];
+    let value: string | undefined;
+    if (present.has(column.name)) value = column.name === 'read_position' ? READ_POSITION_AS_INTEGER : column.name;
+    else if (fallback !== undefined && present.has(fallback)) value = fallback;
+    else if (column.notnull === 1 && column.dflt_value === null) {
+      throw new GatewayError('database_error', `Migration 2 (standing jobs): table jobs has no column ${column.name}, and it cannot be filled in.`);
+    }
+    // Otherwise the column takes its default (NULL, or standing = 0).
+    if (value === undefined) continue;
+    names.push(column.name);
+    values.push(value);
+  }
+  db.exec(`
+INSERT INTO jobs_v2 (${names.join(', ')}) SELECT ${values.join(', ')} FROM jobs ORDER BY rowid;
 DROP TABLE jobs;
 ALTER TABLE jobs_v2 RENAME TO jobs;
 CREATE INDEX jobs_state ON jobs(state);
 CREATE INDEX jobs_host_state ON jobs(host_id, state);
 CREATE INDEX jobs_project_created ON jobs(project_alias, created_at DESC);
 CREATE INDEX jobs_thread ON jobs(t3_thread_id);
-`,
-  },
-];
+`);
+}
