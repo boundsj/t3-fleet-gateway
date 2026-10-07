@@ -25,4 +25,6 @@ All notable changes are recorded here. The project follows [Semantic Versioning]
 ### Known limitations
 
 - Permission approvals cannot be answered through T3's MCP tools; jobs waiting on one show `needs_input` with `waitingForApproval`, and the operator approves in T3. Projects that should run unattended need `runtimeMode` `auto` or `full-access`.
-- The state derivation and worker-message detection follow T3's published tool schemas and have not yet been confirmed against a live T3 server.
+- The state derivation and worker-message detection follow T3's published tool schemas. A live run confirmed finished turns, worker replies and follow-ups; questions, approvals, failed runs and interrupting a running job are not yet confirmed against a real T3.
+- An `unknown` job whose marker lookups keep failing with T3 errors stays `unknown`, holding its slot, until a lookup succeeds: a failed lookup is not evidence that the launch did not happen. Its `lastError` shows the failure.
+- A superseded sibling token pair's access token stays valid until it expires (see docs/security.md, "A refresh token is stolen").
