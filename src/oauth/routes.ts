@@ -105,7 +105,7 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
       logger.warn('oauth.approval_throttled', { clientId, limit: throttle === 'global_locked' ? 'global' : 'request' });
       const message =
         throttle === 'global_locked'
-          ? 'Too many failed approval attempts. Approvals are paused for up to an hour.'
+          ? 'Too many failed approval attempts. Approvals are paused for up to an hour, or until a new code is minted with t3-fleet-gateway pair.'
           : 'Too many failed attempts for this request. Start the connection again from your agent.';
       sendHtml(res, 429, renderErrorPage(message));
       return;
@@ -146,7 +146,8 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
       );
     } catch (error) {
       if (!(error instanceof OAuthError)) throw error;
-      logger.info('oauth.registration_rejected', { errorCode: error.error });
+      if (error.status === 429) logger.warn('oauth.registration_throttled');
+      else logger.info('oauth.registration_rejected', { errorCode: error.error });
       sendJson(res, error.status, error.toJSON(), NO_STORE);
     }
   };

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { MAX_REGISTRATIONS_PER_HOUR } from '../src/oauth/clients.ts';
+import { MAX_REGISTRATIONS_PER_HOUR, PENDING_REGISTRATION_WINDOW } from '../src/oauth/clients.ts';
 import { DAY, HOUR } from '../src/time.ts';
 import { startOAuthHarness } from './helpers/oauthHarness.ts';
-import { register } from './helpers/oauthFlow.ts';
+import { register, signIn } from './helpers/oauthFlow.ts';
 
 async function rejected(baseUrl: string, metadata: Record<string, unknown>, error: string): Promise<void> {
   const response = await register(baseUrl, metadata);
@@ -97,5 +97,22 @@ describe('dynamic client registration', () => {
     clock.advance(DAY);
     assert.equal((await register(baseUrl)).status, 201);
     assert.equal(clients.get(first), undefined, 'unapproved client older than a day was pruned');
+  });
+
+  test('registrations nobody approves stop counting after ten minutes, and the operator can reset the limit', async (t) => {
+    const h = await startOAuthHarness(t);
+    await signIn(h.baseUrl, () => h.approvals.mint().code);
+    await signIn(h.baseUrl, () => h.approvals.mint().code);
+    for (let i = 2; i < MAX_REGISTRATIONS_PER_HOUR; i++) assert.equal((await register(h.baseUrl)).status, 201);
+    assert.equal((await register(h.baseUrl)).status, 429);
+    assert.ok(h.logs.some((line) => line.includes('"event":"oauth.registration_throttled"')));
+    h.clock.advance(PENDING_REGISTRATION_WINDOW + 1);
+    assert.equal(h.clients.registrationsCounted(), 2, 'approved clients still count for the hour');
+    assert.equal((await register(h.baseUrl)).status, 201, 'unapproved registrations no longer block new ones');
+    for (let i = 3; i < MAX_REGISTRATIONS_PER_HOUR; i++) assert.equal((await register(h.baseUrl)).status, 201);
+    assert.equal((await register(h.baseUrl)).status, 429);
+    h.clients.resetRegistrationLimit();
+    assert.equal(h.clients.registrationsCounted(), 0);
+    assert.equal((await register(h.baseUrl)).status, 201);
   });
 });

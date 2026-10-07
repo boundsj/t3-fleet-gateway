@@ -3,8 +3,8 @@ import { loadConfig, resolvePaths, type GatewayConfig, type Paths } from '../con
 import { describeError, GatewayError, isGatewayError } from '../errors.ts';
 import { openServices, openStorage, startGateway, type GatewayServices } from '../gateway.ts';
 import { createLogger, isLogLevel, silentLogger, type Logger } from '../log.ts';
-import { ApprovalCodes, DEFAULT_APPROVAL_CODE_TTL, MAX_APPROVAL_CODE_TTL } from '../oauth/approvalCodes.ts';
-import { ClientStore } from '../oauth/clients.ts';
+import { ApprovalCodes, DEFAULT_APPROVAL_CODE_TTL, MAX_APPROVAL_CODE_TTL, MAX_FAILURES_PER_HOUR } from '../oauth/approvalCodes.ts';
+import { ClientStore, MAX_REGISTRATIONS_PER_HOUR } from '../oauth/clients.ts';
 import { OPERATE_SCOPE, READ_SCOPE } from '../oauth/scopes.ts';
 import { MINUTE, parseDuration, systemClock } from '../time.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
@@ -28,6 +28,8 @@ Commands:
   clients revoke <id>       Revoke a client and every token issued to it
   hosts enroll <id>         Obtain a T3 credential for a host via pairing-code approval
   hosts status              Show each host's credential and reachability
+  throttle status           Show failed approvals and registrations counting toward their limits
+  throttle reset            Clear the approval and registration throttles
   doctor                    Check config, permissions, database, hosts and public URL
 
 Options:
@@ -71,7 +73,10 @@ function pair(paths: Paths, io: CliIo, ttlText: string | undefined): number {
   if (ttl === undefined || ttl < MINUTE || ttl > MAX_APPROVAL_CODE_TTL) throw new UsageError('--ttl must be a duration from 1m to 24h, for example 15m');
   const storage = openStorage(paths.dataDir);
   try {
-    const { code, expiresAt } = new ApprovalCodes(storage.db, storage.key, systemClock).mint(ttl);
+    const { code, expiresAt, clearedLock } = new ApprovalCodes(storage.db, storage.key, systemClock).mint(ttl);
+    if (clearedLock) {
+      io.out(`Approvals were paused after ${MAX_FAILURES_PER_HOUR} failed attempts within an hour; minting this code lifted the pause.`);
+    }
     io.out(`Approval code: ${code}`);
     io.out(`Expires ${shortTime(expiresAt)} (${relative(expiresAt - Date.now())}). It works once.`);
     io.out('Enter it on the approval page your agent opens, then choose Read or Operate.');
@@ -108,6 +113,31 @@ function clients(paths: Paths, io: CliIo, action: string | undefined, id: string
       return 0;
     }
     throw new UsageError('Use: clients list | clients revoke <id>');
+  } finally {
+    storage.db.close();
+  }
+}
+
+function throttle(paths: Paths, io: CliIo, action: string | undefined): number {
+  const storage = openStorage(paths.dataDir);
+  try {
+    const approvals = new ApprovalCodes(storage.db, storage.key, systemClock);
+    const store = new ClientStore(storage.db, systemClock);
+    if (action === 'status') {
+      const failures = approvals.globalFailures();
+      const registrations = store.registrationsCounted();
+      const state = (count: number, limit: number) => (count >= limit ? 'LIMIT REACHED' : 'ok');
+      io.out(`approvals:     ${failures}/${MAX_FAILURES_PER_HOUR} failed attempts in the last hour (${state(failures, MAX_FAILURES_PER_HOUR)})`);
+      io.out(`registrations: ${registrations}/${MAX_REGISTRATIONS_PER_HOUR} counted in the last hour (${state(registrations, MAX_REGISTRATIONS_PER_HOUR)})`);
+      return 0;
+    }
+    if (action === 'reset') {
+      approvals.resetThrottles();
+      store.resetRegistrationLimit();
+      io.out('Cleared the failed approval attempts (locked approval pages included) and the registration limit.');
+      return 0;
+    }
+    throw new UsageError('Use: throttle status | throttle reset');
   } finally {
     storage.db.close();
   }
@@ -201,6 +231,9 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         return clients(paths, io, action, id);
       case 'hosts':
         return await hosts(paths, io, action, id);
+      case 'throttle':
+        if (id !== undefined) throw new UsageError(`Unexpected arguments: ${id}`);
+        return throttle(paths, io, action);
       case 'doctor':
         return await doctor(paths, io);
       default:

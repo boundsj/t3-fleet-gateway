@@ -69,7 +69,7 @@ The package runs its TypeScript sources directly with Node's type stripping, so 
 4. Ask Grok Bot to call `fleet_status`. It should list your hosts and project aliases.
 5. Ask it to start a small task with `work_start` in one of those projects, then to check `work_feed` on a schedule. Each job is a T3 thread titled with `[job:<id>]` in a fresh worktree on its own branch, so you can open it in T3 at any time.
 
-`t3-fleet-gateway clients list` shows connected agents; `clients revoke <id>` disconnects one.
+`t3-fleet-gateway clients list` shows connected agents; `clients revoke <id>` disconnects one. If approvals or registrations are throttled (someone probing your URL), `pair` lifts an approval pause and `throttle reset` clears both limits; see [docs/operations.md](docs/operations.md#throttles).
 
 ## Security model, in short
 

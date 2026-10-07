@@ -36,7 +36,24 @@ For each host: reachability and T3 version (checked live), credential state (`mi
 
 3. Enter the code, choose **Read** or **Operate**, approve.
 
-Codes work once. Five wrong codes lock that approval page (start again from the agent); twenty failures in an hour pause all approvals until the hour clears.
+Codes work once. Five wrong codes lock that approval page (start again from the agent); twenty failures in an hour pause all approvals until the hour clears. Minting a new code with `pair` lifts that pause at once, and `pair` says so when it does.
+
+## Throttles
+
+Registration and approval are open to anyone who can reach the public URL, so both are rate-limited, and you can clear both:
+
+| Limit | Value | Recovery |
+| --- | --- | --- |
+| Wrong approval codes per approval page | 5 | Start the connection again from the agent (a new page), or `throttle reset` |
+| Wrong approval codes across all pages | 20 per rolling hour | Mint a code with `pair` (lifts the pause), wait for the hour, or `throttle reset` |
+| Client registrations | 30 per hour; a client that has not completed an approval stops counting after 10 minutes | Wait 10 minutes, or `throttle reset` |
+
+```sh
+t3-fleet-gateway throttle status   # failed approvals and registrations counting toward the limits
+t3-fleet-gateway throttle reset    # clear both, locked approval pages included
+```
+
+Throttling is logged as `oauth.approval_throttled` and `oauth.registration_throttled` (warn). Repeated throttling without you connecting an agent means someone is probing the URL: see [security.md](security.md#threats-and-mitigations).
 
 ## List and revoke agents
 
@@ -95,7 +112,7 @@ On `SIGINT` or `SIGTERM` the gateway stops accepting connections, finishes in-fl
 | --- | --- |
 | `gateway.started`, `gateway.stopped` | Lifecycle |
 | `oauth.client_registered`, `oauth.approval_granted`, `oauth.approval_denied` | Agent onboarding |
-| `oauth.approval_failed`, `oauth.approval_throttled` (warn) | Wrong codes; throttling engaged |
+| `oauth.approval_failed`, `oauth.approval_throttled`, `oauth.registration_throttled` (warn) | Wrong codes; throttling engaged (see Throttles) |
 | `oauth.token_issued`, `oauth.refresh_retry_accepted` | Token issue and rotation |
 | `oauth.token_family_revoked` (warn) | Refresh token or code replay: a grant was revoked |
 | `mcp.tool_call` | Tool name, client id, outcome, error code, duration |

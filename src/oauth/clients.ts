@@ -7,6 +7,11 @@ import { MAX_REDIRECT_URIS, redirectUriProblem } from './redirectUris.ts';
 export const MAX_CLIENT_NAME_LENGTH = 80;
 /** Registration is unauthenticated, so bound how fast clients can be created. */
 export const MAX_REGISTRATIONS_PER_HOUR = 30;
+/**
+ * A client without a completed authorization stops counting toward the registration limit after
+ * this long, so registrations nobody approves cannot hold the limit for a whole hour.
+ */
+export const PENDING_REGISTRATION_WINDOW = 10 * MINUTE;
 /** Clients that never completed an approval are removed after this long. */
 const UNAPPROVED_CLIENT_TTL = DAY;
 
@@ -112,10 +117,7 @@ export class ClientStore {
              AND NOT EXISTS (SELECT 1 FROM token_families f WHERE f.client_id = oauth_clients.id)`,
         )
         .run(now - UNAPPROVED_CLIENT_TTL);
-      const recent = this.#db.prepare('SELECT COUNT(*) AS n FROM oauth_clients WHERE created_at > ?').get(now - HOUR) as {
-        n: number;
-      };
-      if (recent.n >= MAX_REGISTRATIONS_PER_HOUR) {
+      if (this.registrationsCounted() >= MAX_REGISTRATIONS_PER_HOUR) {
         throw new OAuthError('temporarily_unavailable', 'Too many client registrations; try again later', 429);
       }
       const client: OAuthClient = { id: randomId(12), name, redirectUris, createdAt: now, lastUsedAt: null, revokedAt: null };
@@ -124,6 +126,26 @@ export class ClientStore {
         .run(client.id, client.name, JSON.stringify(client.redirectUris), client.createdAt);
       return client;
     });
+  }
+
+  /**
+   * Registrations that count toward the hourly limit: clients created in the last hour, and not
+   * since cleared by the operator, that completed an authorization or are younger than the pending window.
+   */
+  registrationsCounted(): number {
+    const now = this.#clock();
+    const row = this.#db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM oauth_clients c WHERE c.counts_toward_limit = 1 AND c.created_at > ?
+           AND (c.created_at > ? OR EXISTS (SELECT 1 FROM token_families f WHERE f.client_id = c.id))`,
+      )
+      .get(now - HOUR, now - PENDING_REGISTRATION_WINDOW) as { n: number };
+    return row.n;
+  }
+
+  /** Stop counting every existing registration toward the limit (operator command). */
+  resetRegistrationLimit(): void {
+    this.#db.prepare('UPDATE oauth_clients SET counts_toward_limit = 0 WHERE counts_toward_limit = 1').run();
   }
 
   get(id: string): OAuthClient | undefined {

@@ -6,7 +6,8 @@ import { promisify } from 'node:util';
 import { describe, test, type TestContext } from 'node:test';
 import { runCli } from '../src/cli/main.ts';
 import { openStorage } from '../src/gateway.ts';
-import { ClientStore } from '../src/oauth/clients.ts';
+import { ApprovalCodes, MAX_FAILURES_PER_HOUR } from '../src/oauth/approvalCodes.ts';
+import { ClientStore, MAX_REGISTRATIONS_PER_HOUR } from '../src/oauth/clients.ts';
 import { systemClock } from '../src/time.ts';
 import { startFakeT3, type FakeT3 } from './helpers/fakeT3.ts';
 import { freePort } from './helpers/gateway.ts';
@@ -75,6 +76,36 @@ describe('cli', () => {
     assert.match(result.out, /in 29m|in 30m/);
     assert.equal((await run(env, ['pair', '--ttl', '2d'])).code, 2);
     assert.equal((await run(env, ['pair', '--ttl', 'soon'])).code, 2);
+  });
+
+  test('throttle status and reset; pair reports a lifted approval pause', async (t) => {
+    const env = await environment(t);
+    const fail = (count: number) => {
+      const storage = openStorage(env.dataDir);
+      const approvals = new ApprovalCodes(storage.db, storage.key, systemClock);
+      for (let i = 0; i < count; i++) approvals.redeem('WRONG-CODE0', `request-${i % 4}`, 'client');
+      storage.db.close();
+    };
+    assert.match((await run(env, ['throttle', 'status'])).out, /approvals: +0\/20 .*\(ok\)\nregistrations: +0\/30 .*\(ok\)/);
+    fail(MAX_FAILURES_PER_HOUR);
+    assert.match((await run(env, ['throttle', 'status'])).out, /approvals: +20\/20 failed attempts in the last hour \(LIMIT REACHED\)/);
+    const paired = await run(env, ['pair']);
+    assert.match(paired.out, /^Approvals were paused after 20 failed attempts within an hour; minting this code lifted the pause\.$/m);
+    assert.match((await run(env, ['throttle', 'status'])).out, /approvals: +0\/20/);
+    assert.doesNotMatch((await run(env, ['pair'])).out, /paused/);
+
+    fail(3);
+    const storage = openStorage(env.dataDir);
+    const store = new ClientStore(storage.db, systemClock);
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_HOUR; i++) store.register({ redirect_uris: ['https://agent.example.com/cb'] });
+    storage.db.close();
+    assert.match((await run(env, ['throttle', 'status'])).out, /registrations: +30\/30 counted in the last hour \(LIMIT REACHED\)/);
+    const reset = await run(env, ['throttle', 'reset']);
+    assert.equal(reset.code, 0);
+    assert.match(reset.out, /^Cleared the failed approval attempts/);
+    assert.match((await run(env, ['throttle', 'status'])).out, /approvals: +0\/20 .*\nregistrations: +0\/30/);
+    assert.equal((await run(env, ['throttle'])).code, 2);
+    assert.equal((await run(env, ['throttle', 'reset', 'extra'])).code, 2);
   });
 
   test('clients list and revoke', async (t) => {

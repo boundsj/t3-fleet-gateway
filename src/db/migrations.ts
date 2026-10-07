@@ -20,7 +20,8 @@ CREATE TABLE oauth_clients (
   redirect_uris TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   last_used_at INTEGER,
-  revoked_at INTEGER
+  revoked_at INTEGER,
+  counts_toward_limit INTEGER NOT NULL DEFAULT 1
 ) STRICT;
 CREATE INDEX oauth_clients_created ON oauth_clients(created_at);
 
@@ -36,7 +37,8 @@ CREATE TABLE approval_codes (
 CREATE TABLE approval_failures (
   id INTEGER PRIMARY KEY,
   request_key TEXT NOT NULL,
-  failed_at INTEGER NOT NULL
+  failed_at INTEGER NOT NULL,
+  counts_globally INTEGER NOT NULL DEFAULT 1
 ) STRICT;
 CREATE INDEX approval_failures_request ON approval_failures(request_key);
 CREATE INDEX approval_failures_time ON approval_failures(failed_at);

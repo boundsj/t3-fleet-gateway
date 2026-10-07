@@ -163,22 +163,48 @@ describe('authorization endpoint', () => {
     assert.ok(h.logs.some((line) => line.includes('"event":"oauth.approval_throttled"') && line.includes('"limit":"request"')));
   });
 
-  test('pauses all approvals after too many failures in an hour, then recovers', async (t) => {
-    const h = await startOAuthHarness(t);
-    let failures = 0;
-    while (failures < MAX_FAILURES_PER_HOUR) {
+  async function exhaustGlobalLimit(h: OAuthHarness): Promise<void> {
+    while (h.approvals.globalFailures() < MAX_FAILURES_PER_HOUR) {
       const { page } = await openPage(h);
-      for (let i = 0; i < MAX_FAILURES_PER_REQUEST - 1 && failures < MAX_FAILURES_PER_HOUR; i++, failures++) {
+      for (let i = 0; i < MAX_FAILURES_PER_REQUEST - 1 && h.approvals.globalFailures() < MAX_FAILURES_PER_HOUR; i++) {
         assert.equal((await submitApproval(h.baseUrl, page.fields, { approval_code: 'WRONG-CODE0' })).status, 400);
       }
     }
+  }
+
+  test('pauses all approvals after too many failures in an hour, then recovers', async (t) => {
+    const h = await startOAuthHarness(t);
     const { code } = h.approvals.mint(2 * HOUR);
+    await exhaustGlobalLimit(h);
     const blocked = await openPage(h);
     assert.equal((await submitApproval(h.baseUrl, blocked.page.fields, { approval_code: code })).status, 429);
     assert.ok(h.logs.some((line) => line.includes('"event":"oauth.approval_throttled"') && line.includes('"limit":"global"')));
     h.clock.advance(HOUR);
     const later = await openPage(h);
     redirectParams(await submitApproval(h.baseUrl, later.page.fields, { approval_code: code }));
+  });
+
+  test('minting a code lifts a global pause; locks on single requests stay until a throttle reset', async (t) => {
+    const h = await startOAuthHarness(t);
+    const locked = await openPage(h);
+    for (let i = 0; i < MAX_FAILURES_PER_REQUEST; i++) {
+      assert.equal((await submitApproval(h.baseUrl, locked.page.fields, { approval_code: 'WRONG-CODE0' })).status, 400);
+    }
+    await exhaustGlobalLimit(h);
+    const blocked = await openPage(h);
+    const paused = await submitApproval(h.baseUrl, blocked.page.fields, { approval_code: 'WRONG-CODE0' });
+    assert.equal(paused.status, 429);
+    assert.match(await paused.text(), /until a new code is minted/);
+
+    const minted = h.approvals.mint();
+    assert.equal(minted.clearedLock, true, 'pair reports that it lifted the pause');
+    assert.equal(h.approvals.mint().clearedLock, false);
+    redirectParams(await submitApproval(h.baseUrl, blocked.page.fields, { approval_code: minted.code }));
+    const code = h.approvals.mint().code;
+    assert.equal((await submitApproval(h.baseUrl, locked.page.fields, { approval_code: code })).status, 429, 'the locked request stays locked');
+
+    h.approvals.resetThrottles();
+    redirectParams(await submitApproval(h.baseUrl, locked.page.fields, { approval_code: code }));
   });
 
   test('a revoked client cannot complete an approval', async (t) => {
