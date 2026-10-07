@@ -6,6 +6,7 @@ import { createLogger, isLogLevel, silentLogger, type Logger } from '../log.ts';
 import { ApprovalCodes, DEFAULT_APPROVAL_CODE_TTL, MAX_APPROVAL_CODE_TTL, MAX_FAILURES_PER_HOUR } from '../oauth/approvalCodes.ts';
 import { ClientStore, MAX_REGISTRATIONS_PER_HOUR } from '../oauth/clients.ts';
 import { OPERATE_SCOPE, READ_SCOPE } from '../oauth/scopes.ts';
+import { FATAL_SHUTDOWN_MS, guardProcess } from '../processErrors.ts';
 import { MINUTE, parseDuration, systemClock } from '../time.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
 import { runDoctor } from './doctor.ts';
@@ -57,10 +58,24 @@ function withServices<T>(paths: Paths, logger: Logger, fn: (services: GatewaySer
 async function serve(paths: Paths, io: CliIo): Promise<number> {
   const logger = logLevelLogger(io.env, (line) => io.out(line), 'info');
   const config = loadConfig(paths.configPath);
-  const gateway = await startGateway({ config, dataDir: paths.dataDir, logger, ...(io.listenPort === undefined ? {} : { port: io.listenPort }) });
-  await (io.waitForShutdown ?? waitForSignal)(gateway);
-  await gateway.close();
-  return 0;
+  const guard = guardProcess(logger);
+  try {
+    const gateway = await startGateway({ config, dataDir: paths.dataDir, logger, ...(io.listenPort === undefined ? {} : { port: io.listenPort }) });
+    const fatal = await Promise.race([(io.waitForShutdown ?? waitForSignal)(gateway).then(() => false), guard.fatal.then(() => true)]);
+    if (!fatal) {
+      await gateway.close();
+      return 0;
+    }
+    // The process may be in a broken state: try to stop cleanly, but not for long. Job state is in the database.
+    const timer = Promise.withResolvers<boolean>();
+    const timeout = setTimeout(() => timer.resolve(false), FATAL_SHUTDOWN_MS);
+    const closed = await Promise.race([gateway.close().then(() => true), timer.promise]);
+    clearTimeout(timeout);
+    if (!closed) logger.error('gateway.shutdown_timeout');
+    return 1;
+  } finally {
+    guard.remove();
+  }
 }
 
 function waitForSignal(): Promise<void> {

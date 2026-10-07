@@ -245,6 +245,25 @@ describe('T3 delivery classification', () => {
     await assert.rejects(client.launchThread(LAUNCH), transportFailure('host_unreachable', 'not_delivered'));
   });
 
+  test("Node 26.0's setTypeOfService EINVAL, directly or as the cause, means the launch was not delivered", async (t) => {
+    const { fake, client } = await setup(t);
+    await client.environmentRead();
+    // Synthetic: undici throws this before writing the request when the connection was just reset.
+    const race = () => Object.assign(new Error('setTypeOfService EINVAL'), { errno: -22, code: 'EINVAL', syscall: 'setTypeOfService' });
+    const fetch = t.mock.method(globalThis, 'fetch', async () => {
+      throw race();
+    });
+    await assert.rejects(client.launchThread(LAUNCH), transportFailure('host_unreachable', 'not_delivered'));
+    fetch.mock.mockImplementation(async () => {
+      throw new TypeError('fetch failed', { cause: race() });
+    });
+    await assert.rejects(client.launchThread(LAUNCH), transportFailure('host_unreachable', 'not_delivered'));
+    fetch.mock.restore();
+    assert.equal(fake.threads.size, 0);
+    await client.launchThread(LAUNCH);
+    assert.equal(fake.threads.size, 1, 'the session survives and the next launch goes through');
+  });
+
   test('read-only calls retry once after a lost response', async (t) => {
     const { fake, client } = await setup(t);
     const { threadId } = await client.launchThread(LAUNCH);

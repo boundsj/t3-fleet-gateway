@@ -22,6 +22,7 @@ No build step: Node 24+ runs `.ts` directly. There is no linter or formatter con
 | --- | --- |
 | `bin/t3-fleet-gateway.js` | Launcher; imports `src/cli.ts` |
 | `src/cli/main.ts` | `runCli(argv, io)`: every command; returns the exit code |
+| `src/processErrors.ts` | `guardProcess` (uncaught errors in `serve`: Node 26.0's `setTypeOfService` race is logged and ignored, anything else shuts down and exits 1), `isTypeOfServiceRace` |
 | `src/gateway.ts` | `openServices` (shared by CLI and server), `startGateway`, `gatewayTools` (the tool list) |
 | `src/oauth/` | Authorization server: `routes.ts` (HTTP), `tokens.ts` (codes, rotation, replay), `clients.ts`, `approvalCodes.ts`, `approvalPage.ts` |
 | `src/mcp/` | `endpoint.ts` (bearer gate, Origin check, era routing), `tools.ts` (registry and scope checks), `fleetStatus.ts` |
@@ -30,7 +31,7 @@ No build step: Node 24+ runs `.ts` directly. There is no linter or formatter con
 | `src/mcp/workTools.ts` | The `work_*` tool definitions and descriptions |
 | `src/hosts/` | `registry.ts` (clients, health cache, enroll and renew), `credentials.ts`, `renewal.ts`, `projects.ts` (project resolution and the model check used by `doctor` and at startup) |
 | `src/db/migrations.ts` | Schema, including `jobs`, `job_events`, `idempotency_keys` for the job layer |
-| `test/helpers/` | `fakeT3.ts` (fake T3: OAuth, an in-memory thread model driven by tests, failure injection, including held answers and launches that start no run; `stop()`/`start()` take the host down and back on the same port, `close()` releases it), `gateway.ts` (full gateway harness), `frontDoor.ts` (holds a test's public URL port in front of the gateway), `jobs.ts` (gateway + fake T3 + Operate agent; `tick()` drives the engine), `oauthFlow.ts`, `agent.ts` (SDK OAuth provider) |
+| `test/helpers/` | `fakeT3.ts` (fake T3: OAuth, an in-memory thread model driven by tests, failure injection, including held answers and launches that start no run; `stop()`/`start()` take the host down and back on the same port, `close()` releases it), `gateway.ts` (full gateway harness), `frontDoor.ts` (holds a test's public URL port in front of the gateway), `serveChild.ts` (runs `serve` in a child process that raises synthetic process errors), `jobs.ts` (gateway + fake T3 + Operate agent; `tick()` drives the engine), `oauthFlow.ts`, `agent.ts` (SDK OAuth provider) |
 | `scripts/e2e-live.ts` | Live end-to-end check, run by hand only |
 
 ## Adding a tool

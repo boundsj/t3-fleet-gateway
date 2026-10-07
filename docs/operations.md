@@ -90,6 +90,8 @@ Checks, in order: the config, data directory permissions, database integrity and
 
 ## Run as a service
 
+Requirements: Node.js 24 or newer; the latest Node 24 or 26 release is recommended. Node 26.0 can raise a spurious `setTypeOfService EINVAL` when T3 resets a new connection (see below).
+
 macOS (launchd, per-user agent with KeepAlive):
 
 ```sh
@@ -103,6 +105,8 @@ The installer fills in absolute paths and puts the directories of `node` and `t3
 Linux (systemd user unit): see the comments at the top of [`deploy/systemd/t3-fleet-gateway.service`](../deploy/systemd/t3-fleet-gateway.service).
 
 On `SIGINT` or `SIGTERM` the gateway stops accepting connections, finishes in-flight requests (up to 10 seconds), lets the job engine finish its current tick, stops the renewal loop and closes the database. Job state is written as it changes, so nothing is lost; a launch interrupted by a crash is reconciled at the next start.
+
+An uncaught exception or unhandled rejection in `serve` is logged as `process.fatal` (error name and code only), followed by the same graceful shutdown (bounded to 10 seconds), and the process exits `1` so the supervisor restarts it. One exception is ignored: Node 26.0's bundled HTTP client can throw `setTypeOfService EINVAL` outside the request when T3 resets a connection just as it is opened (T3 restarting, on macOS). That request fails like any other reset, and the gateway logs `process.transient_socket_error` and keeps running.
 
 ## Logs
 
@@ -124,6 +128,8 @@ On `SIGINT` or `SIGTERM` the gateway stops accepting connections, finishes in-fl
 | `jobs.reconcile_failed`, `jobs.watch_failed`, `jobs.interrupt_failed`, `jobs.interrupt_deferred` (warn) | A T3 call for one job failed (job id, error code); the error is on the job and the call is retried next tick |
 | `jobs.tick_failed`, `jobs.host_tick_failed` (error) | Unexpected engine errors (with an error code and, per host, the step); the next step still runs |
 | `http.request` | Method, path (no query), status, duration |
+| `process.transient_socket_error` (warn) | Node 26.0's `setTypeOfService EINVAL` after T3 reset a new connection; harmless (see Run as a service) |
+| `process.fatal` (error) | An uncaught error (name and code): `serve` shuts down and exits `1`; `gateway.shutdown_timeout` if that took over 10 seconds |
 
 Logs never contain tokens, codes, authorization headers, task text or message content.
 

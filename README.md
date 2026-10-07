@@ -35,7 +35,7 @@ T3 Code server(s)
 
 ## Quickstart
 
-Requirements: Node.js 24 or newer, a T3 Code server, and the `t3` CLI on the machine that can mint pairing codes for it.
+Requirements: Node.js 24 or newer (the latest Node 24 or 26 release is recommended), a T3 Code server, and the `t3` CLI on the machine that can mint pairing codes for it.
 
 ```sh
 git clone https://github.com/<you>/t3-fleet-gateway.git

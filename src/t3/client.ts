@@ -8,6 +8,7 @@ import {
 } from '@modelcontextprotocol/client';
 import type * as z from 'zod';
 import { GatewayError, type ErrorCode } from '../errors.ts';
+import { isTypeOfServiceRace } from '../processErrors.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
 import { parseToolResult } from './results.ts';
 import {
@@ -82,6 +83,8 @@ function causeCode(error: unknown): string | undefined {
   for (let depth = 0; depth < 4 && typeof current === 'object' && current !== null; depth++) {
     const code = (current as { code?: unknown }).code;
     if (typeof code === 'string' && CONNECT_FAILURES.has(code)) return code;
+    // Thrown before the request was written to a connection the peer had already reset.
+    if (isTypeOfServiceRace(current)) return 'EINVAL';
     current = (current as { cause?: unknown }).cause;
   }
   return undefined;
