@@ -20,12 +20,12 @@ All notable changes are recorded here. The project follows [Semantic Versioning]
 - Error codes `job_state_conflict` and `request_id_conflict`.
 - Config: `watcher.reconcileWindowMinutes`; `hosts[].defaultModelSelection`, the model for projects on that host that set no `modelSelection` (T3 refuses launches without a model when the T3 project has no default). `doctor` fails a project that would have no model, `serve` logs `project.model_missing` at startup (in the background: shutdown does not wait for it, and a host that fails is not asked again for its other projects), and `fleet_status` shows each project's `runtimeMode` and `modelConfigured`.
 - `config.example.json` enrolls its host with `access: "full-access"`: the host's access is only a ceiling, and each project's `runtimeMode` (default `approval-required`) is what limits a job.
-- `scripts/e2e-live.ts`: a live end-to-end check against a running gateway and a real T3 host (`npm run e2e:live`), outside the test suite.
+- `scripts/e2e-live.ts`: a live end-to-end check against a running gateway and a real T3 host (`npm run e2e:live`), outside the test suite. If the job it cancels has already finished, it starts one replacement and cancels that.
 - `doctor`'s public URL check requires this gateway's own metadata (`resource_name` `t3-fleet-gateway`), so another server's metadata for the same resource fails it.
 
 ### Known limitations
 
 - Permission approvals cannot be answered through T3's MCP tools; jobs waiting on one show `needs_input` with `waitingForApproval`, and the operator approves in T3. Projects that should run unattended need `runtimeMode` `auto` or `full-access`.
-- The state derivation and worker-message detection follow T3's published tool schemas. A live run confirmed finished turns, worker replies and follow-ups; questions, approvals, failed runs and interrupting a running job are not yet confirmed against a real T3.
+- The state derivation and worker-message detection follow T3's published tool schemas. A live run confirmed finished turns, worker replies, follow-ups and interrupting a running job; questions, approvals and failed runs are not yet confirmed against a real T3.
 - An `unknown` job whose marker lookups keep failing with T3 errors stays `unknown`, holding its slot, until a lookup succeeds: a failed lookup is not evidence that the launch did not happen. Its `lastError` shows the failure.
 - A superseded sibling token pair's access token stays valid until it expires (see docs/security.md, "A refresh token is stolen").

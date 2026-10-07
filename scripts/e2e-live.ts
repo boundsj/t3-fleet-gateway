@@ -249,30 +249,47 @@ async function main(): Promise<void> {
       return { value: reached.cursor, detail: 'excerpt mentions DONE' };
     });
 
-    const second = await step('work_start (job B)', async () => {
-      const result = await call<{ job: { jobId: string; state: string } }>('work_start', {
-        project: projectAlias,
-        task: LONG_HARMLESS_TASK,
-        title: 't3-fleet-gateway live e2e (cancel)',
-        requestId: randomUUID(),
+    /** Start a job that should still be running when it is cancelled, and wait until it runs. */
+    const startLongJob = async (label: string): Promise<string> => {
+      const jobId = await step(`work_start (${label})`, async () => {
+        const result = await call<{ job: { jobId: string; state: string } }>('work_start', {
+          project: projectAlias,
+          task: LONG_HARMLESS_TASK,
+          title: 't3-fleet-gateway live e2e (cancel)',
+          requestId: randomUUID(),
+        });
+        return { value: result.job.jobId, detail: `${result.job.jobId} ${result.job.state}` };
       });
-      return { value: result.job.jobId, detail: `${result.job.jobId} ${result.job.state}` };
-    });
+      await step(`${label} starts running`, async () => {
+        const reached = await waitFor(call, jobId, cursor, ['running'], ['idle', 'failed', 'cancelled']);
+        cursor = reached.cursor;
+        return { value: undefined, detail: reached.state };
+      });
+      return jobId;
+    };
+    const cancel = (label: string, jobId: string) =>
+      step(`work_cancel (${label})`, async () => {
+        const result = await call<{ outcome: string; delivered: boolean; job: { state: string } }>('work_cancel', { jobId });
+        return { value: result, detail: `outcome ${result.outcome}, delivered ${result.delivered}` };
+      });
 
-    await step('job B starts running', async () => {
-      const reached = await waitFor(call, second, cursor, ['running'], ['idle', 'failed', 'cancelled']);
-      cursor = reached.cursor;
-      return { value: undefined, detail: reached.state };
-    });
+    let second = await startLongJob('job B');
+    let cancelled = await cancel('job B', second);
+    if (cancelled.outcome !== 'cancel_requested') {
+      // The worker can finish before the cancel arrives; one fresh job tells a fast worker from a broken interrupt.
+      const state = cancelled.job.state;
+      line('INFO', 'work_cancel (job B)', `job B had already finished (state ${state}); starting one replacement and cancelling again`);
+      second = await startLongJob('replacement job B');
+      cancelled = await cancel('replacement job B', second);
+    }
 
-    await step('work_cancel (job B) while it runs', async () => {
-      const result = await call<{ outcome: string; confirmed: boolean; delivered: boolean; job: { state: string } }>('work_cancel', { jobId: second });
+    await step('the cancel reached a running job', async () => {
       // Only an interrupt of a run that is still going shows that T3 stops the worker and the watcher sees it.
       ensure(
-        result.outcome === 'cancel_requested',
-        `outcome ${result.outcome} (state ${result.job.state}): the job was not running when cancelled, so the interrupt was not exercised`,
+        cancelled.outcome === 'cancel_requested',
+        `outcome ${cancelled.outcome} (state ${cancelled.job.state}): the job was not running when cancelled, so the interrupt was not exercised`,
       );
-      return { value: undefined, detail: `outcome ${result.outcome}, delivered ${result.delivered}` };
+      return { value: undefined };
     });
 
     await step('watcher confirms job B cancelled', async () => {
