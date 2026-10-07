@@ -47,7 +47,7 @@ Each entry is a machine running a T3 Code server.
 | `t3Url` | required | T3 server origin. `http` only for loopback; `https` for remote hosts. |
 | `mintPairingCode` | `["t3","auth","pairing","create","--ttl","5m","--json"]` | Command (argv, no shell) that prints a T3 pairing code as JSON with a `credential` field. For a remote host use something like `["ssh","other-host","t3","auth","pairing","create","--ttl","5m","--json"]`. Adding `--label t3-fleet-gateway` makes the pairing easy to spot in T3. |
 | `access` | `"auto"` | The T3 approval level the gateway requests: `read-only`, `approval-required`, `auto-accept-edits`, `auto` or `full-access`. T3 also treats it as the ceiling for the runtime mode of threads the gateway starts. |
-| `maxConcurrentJobs` | `2` | Jobs running at once on this host (used by the planned job layer). |
+| `maxConcurrentJobs` | `2` (1 to 32) | Jobs holding a slot at once on this host: `dispatching`, `running`, `needs_input`, `cancel_requested` and `unknown` count; `idle` does not. Further jobs wait as `queued`, first in, first out. |
 
 ### `projects`
 

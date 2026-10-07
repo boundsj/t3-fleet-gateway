@@ -4,7 +4,7 @@ This document covers the threat model, what the gateway stores and where, and ho
 
 ## What the gateway protects
 
-The gateway can make T3 Code start and steer coding agents on your machines. A stolen agent token with the `fleet:operate` scope (once the job tools ship) is roughly equivalent to being able to type instructions into T3 at the gateway host's configured `access` level. The design keeps that power behind a human approval and narrow, revocable credentials.
+The gateway can make T3 Code start and steer coding agents on your machines. A stolen agent token with the `fleet:operate` scope is roughly equivalent to being able to type instructions into T3 at the gateway host's configured `access` level. The design keeps that power behind a human approval and narrow, revocable credentials.
 
 ## Trust boundaries
 
@@ -30,7 +30,9 @@ The gateway can make T3 Code start and steer coding agents on your machines. A s
 
 **DNS rebinding or a browser on the gateway machine.** Everything listens on loopback. `/mcp` rejects requests whose `Origin` header is present and not `publicUrl` (or listed in `allowedOrigins`); clients that send no `Origin` (server-to-server agents) are unaffected. Every `/mcp` request needs a bearer token, which a browser page cannot obtain. The gateway does not validate the `Host` header, because tunnels differ in what they forward and no endpoint grants anything based on network position alone.
 
-**Oversized or malformed input.** Request bodies are bounded (16 KiB for OAuth endpoints, 1 MiB for `/mcp`), strings in registration are length-limited, and tool inputs are validated against schemas.
+**Oversized or malformed input.** Request bodies are bounded (16 KiB for OAuth endpoints, 1 MiB for `/mcp`), strings in registration are length-limited, and tool inputs are validated against schemas: tasks and follow-ups at most 20,000 characters, answers at most 16,000 characters of JSON, list and feed pages at most 100 and 200 items.
+
+**An Operate agent misbehaves.** It can start and steer work only in the configured projects, each job in its own worktree and branch, at the project's `runtimeMode` (capped by the host's `access`), and at most `maxConcurrentJobs` per host at once; more jobs wait in the queue, which you can see with `work_list` or in `fleet_status`. Every job is an ordinary T3 thread you can read and stop. Revoke the client to cut it off.
 
 ## What is stored, and where
 
@@ -43,13 +45,15 @@ All state is in the data directory (default `~/.local/share/t3-fleet-gateway/`, 
 | Authorization codes, access tokens, refresh tokens | `gateway.db` | SHA-256 hashes |
 | T3 credentials, one per host | `gateway.db` `host_credentials` | **plain bearer tokens** (the gateway must present them) |
 | HMAC key | `gateway.key` | 32 random bytes |
-| Jobs, job events (planned job layer): task text, worker message excerpts | `gateway.db` | plain, never logged |
+| Jobs: task text, thread titles, the latest worker message excerpt (at most 2,000 characters), pending question ids | `gateway.db` `jobs` | plain, never logged |
+| Job events (state changes with gateway-generated reasons and codes; no content) | `gateway.db` `job_events` | plain, append-only |
+| Request ids of `work_start` and `work_continue` with an input hash | `gateway.db` `idempotency_keys` | SHA-256 of the input |
 
 Back up the data directory as a secret. Anyone who can read it can call T3 with the stored credentials until they expire or you revoke them in T3.
 
 ## Logs
 
-Logs are JSON lines on standard output. They contain event names, ids (client ids, token family ids, host ids, job ids), states, tool names, HTTP methods, paths without query strings, status codes and durations. They never contain tokens, approval or pairing codes, authorization headers, task text or worker message content. The logger also replaces values under secret-bearing keys (`token`, `code`, `authorization`, `credential`, `task`, `message` and similar) as a backstop, and an automated test drives a full OAuth flow, MCP calls and an enrollment and asserts no secret value appears in the captured logs.
+Logs are JSON lines on standard output. They contain event names, ids (client ids, token family ids, host ids, job ids), states, tool names, HTTP methods, paths without query strings, status codes and durations. They never contain tokens, approval or pairing codes, authorization headers, task text or worker message content. The logger also replaces values under secret-bearing keys (`token`, `code`, `authorization`, `credential`, `task`, `message` and similar) as a backstop, and automated tests drive a full OAuth flow, MCP calls and an enrollment, and every job tool with distinctive task, follow-up, question, answer and worker text, and assert that none of it appears in the captured logs.
 
 ## The automated T3 consent step
 

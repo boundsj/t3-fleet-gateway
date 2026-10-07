@@ -88,7 +88,7 @@ Config fields (validate on load with clear errors):
   ],
   "tokens": { "accessTtlSeconds": 43200, "refreshIdleTtlDays": 90 },
   "renewal": { "renewWhenDaysLeft": 5, "checkEveryMinutes": 60 },
-  "watcher": { "pollSeconds": 10 }
+  "watcher": { "pollSeconds": 10, "reconcileWindowMinutes": 10 }
 }
 ```
 
@@ -139,10 +139,12 @@ Scopes: **read** = `fleet:read`, **operate** = `fleet:operate`.
 | `work_feed` | read | Events since a cursor (state changes, needs input, finished turns, failures) plus the list of jobs currently needing attention. Returns the next cursor. Designed for an agent's scheduled routine. |
 | `work_start` | operate | Start a job in a project from a task description. Idempotent on `requestId`. |
 | `work_continue` | operate | Send a follow-up instruction to a job's thread. Idempotent on `requestId`. |
-| `work_respond` | operate | Answer a pending T3 request on a job (approval decision or question answer). |
+| `work_respond` | operate | Answer a pending T3 question on a job. (Permission approvals cannot be answered through T3's tools; see "As built" under Jobs.) |
 | `work_cancel` | operate | Interrupt a job's thread. Reports requested versus confirmed. |
 
 Tool descriptions are written for an LLM: what the tool does, when to use it, idempotency rules, and the state meanings.
+
+As built, tools are registered in this order: `fleet_status`, `work_start`, `work_continue`, `work_respond`, `work_cancel`, `work_status`, `work_list`, `work_feed` (`src/mcp/workTools.ts`). Job errors use these stable codes besides the shared ones: `not_found` (job, project or pending request), `job_state_conflict` (the job's state does not allow the operation), `request_id_conflict` (a requestId reused with different input or for another tool), and T3 transport codes `host_unreachable`, `t3_timeout`, `t3_response_lost`.
 
 ## Jobs
 
@@ -180,6 +182,51 @@ Every transition appends to `job_events` (append-only) with a monotonically incr
 - `work_respond`: `t3_pending_request_respond` for a pending request id belonging to the job's thread only.
 - `work_cancel`: `t3_thread_interrupt`; `cancel_requested` until the watcher sees the thread stop, then `cancelled`. A queued job cancels immediately without contacting T3.
 
+### As built
+
+This section records how the job layer behaves in detail, including where it differs from or refines the plan above. Code: `src/jobs/` (store, service, engine, derive, interrupt) and `src/mcp/workTools.ts`.
+
+**Engine.** One loop (`JobEngine`) ticks every `watcher.pollSeconds`, and at once after `work_start`, `work_continue`, `work_respond` and `work_cancel`. Ticks never overlap. Per host with open jobs, a tick runs, in order: reconciliation, watching, dispatch. Hosts are processed in parallel.
+
+**Events.** Every state change appends a `state_changed` event (`fromState`, `toState`, and a `reason` such as `launched`, `reconciled`, `completed`, `question`, `approval`, `followup`, `input_answered`, `interrupted`, `launch_rejected`, `launch_not_confirmed`, `run_failed`). The first event of a job is `created`. Events that are not state changes: `followup_sent` (a follow-up steered into or queued behind an active turn), `input_answered` (with the T3 request id), `turn_finished` (an idle job finished another turn started from T3 itself). Event details hold gateway-generated reasons and codes only, never content.
+
+**Starting.** Job ids are 10 lowercase Crockford base32 characters (safe in branch names, titles and search). The thread title is the agent's `title` (optional, at most 80 characters) or the task's first non-empty line, cut to 60 characters, followed by ` [job:<id>]`. The task (at most 20,000 characters) is sent with the footer `Started through t3-fleet-gateway as job <id>, in a fresh worktree on branch <branch>.` Request ids are scoped to the calling agent (`idempotency_keys` is keyed by client and request id) and shared across `work_start` and `work_continue`, so reusing one for the other tool is a `request_id_conflict`. The input hash covers the project, task and title.
+
+**Dispatch.** Slots: `dispatching`, `running`, `needs_input`, `cancel_requested` and `unknown` hold one; `idle` does not, so a host may start its next queued job while an idle job waits for review, and `work_continue` on an idle job does not wait for a slot. Queued jobs dispatch oldest first. Before launching, the engine makes one read-only call (`t3_environment_read`): after T3 restarts, the first write on a dead keep-alive connection fails with a reset that is indistinguishable from a lost response, and a read can safely absorb it. Project titles are resolved to ids with `t3_project_list` once per process. Launch outcomes:
+
+| T3 client outcome | Job |
+| --- | --- |
+| Result | `running`, with the thread id and run id |
+| Tool error (`isError`, T3 answered and refused) | `failed`, `lastError.code` = T3's code (for example `target_required`) |
+| Transport failure, `delivery: not_delivered` | back to `queued`; the host is backed off |
+| Transport failure, `delivery: unknown`, or an unexpected result shape | `unknown`; the host is backed off if it was a transport failure |
+
+**T3 delivery classification** (`T3TransportError.delivery`, `src/t3/client.ts`). `not_delivered`: any failure while connecting or initializing the MCP session, a refused or unresolvable connection (`ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, `EHOSTUNREACH`, `ENETUNREACH`, `EADDRNOTAVAIL`, `UND_ERR_CONNECT_TIMEOUT`), `401`/`403` (`t3_unauthorized`), and other `4xx` answers (`host_unreachable`). `unknown`: a timeout after the request was sent (`t3_timeout`), a reset or closed socket, or a `5xx` answer (`t3_response_lost`). A `404` (T3 forgot the session) is retried once on a new session; read-only calls are also retried once after `host_unreachable` or `t3_response_lost`. The gateway treats every T3 `isError` result on a launch as a definite rejection: T3's tool reports a failure only when it did not create the thread. That is an assumption about T3, recorded here; the live end-to-end check is where it would show.
+
+**Reconciliation.** A `dispatching` job that this process is not launching (after a crash or restart) becomes `unknown` (reason `dispatch_interrupted`). For each `unknown` job, and each `cancel_requested` job without a thread, the engine looks for the marker with `t3_thread_list { projectId, titleContains: "[job:<id>]" }`, then with `t3_thread_search { projectId, query: <id> }` confirmed by reading each match's title. Found: the thread is attached (`running`, or interrupted if the job was cancelled meanwhile). Not found: the window starts at the first miss and counts only while the host answers; when the host becomes unreachable the window restarts. After `reconcileWindowMinutes` the job fails with `launch_not_confirmed` (a cancelled one becomes `cancelled`). The window start is kept in memory, so a restart restarts it: conservative, never sooner. Nothing is relaunched.
+
+**Watching and state derivation** (`src/jobs/derive.ts`). For each job with a thread in `running`, `needs_input` or `cancel_requested` (every tick) or `idle` (at most once a minute), the engine calls `t3_thread_read { threadId, afterPosition, limit: 100, runLimit: 5, maxCharsPerItem: 2000 }`, following `nextPosition` for up to 5 pages, then `t3_pending_request_list { threadId }`. It relies on these output fields: `thread.status`, `thread.activeRunId`, `thread.latestRunId`, `thread.pendingRequestCount`, `thread.updatedAt`, `recentRuns[].runId` and `.status`, `items[].position`, `.type`, `.createdBy`, `.creationSource`, `.status`, `.text`, `.updatedAt`, `nextPosition` and `hasMore`. The job keeps `lastRunId`: the run returned by `t3_thread_launch` or `t3_thread_send`, and the thread's `latestRunId` once a turn is over. Rules, first match wins:
+
+1. A `cancel_requested` job becomes `cancelled` when nothing is active (rule 3 does not hold); otherwise the interrupt is re-sent (same `clientRequestId`, which T3 deduplicates).
+2. `needs_input` when `t3_pending_request_list` returns ids, `thread.status` is `waiting`, the followed run is `waiting`, or a run is active and `pendingRequestCount` > 0. With no listed question ids, it is a permission approval (`waitingForApproval` in `work_status`, reason `approval`).
+3. `running` when `thread.activeRunId` is set, `thread.status` is `preparing`, `queued`, `starting`, `running` or `waiting`, or the followed run (`lastRunId` in `recentRuns`) has one of those statuses. A status this build does not know counts as active.
+4. `failed` (`lastError.code` `t3_run_failed`) when the latest run's status, or the thread's, is `failed`.
+5. Otherwise `idle`: the turn is over (`completed`, `interrupted`, `cancelled`, `rolled_back`, or `idle`). A turn stopped from T3 by a person is therefore `idle`, not `cancelled`: the thread can take the next instruction.
+
+The excerpt is the newest worker message among the items read, cut to 2,000 characters. A worker message is an item not created by a user whose `type` mentions `assistant` or `plan`, or whose `creationSource` is `provider`; messages the gateway or a person sent are excluded. The read position never moves past an item whose status is `pending`, `running` or `waiting`, so a message still being streamed is read again once settled. T3 output statuses are parsed as strings so a new T3 status does not break watching. A T3 tool error naming a missing thread (`*not_found*`) fails the job (`thread_missing`), or cancels it if a cancel was requested; other tool errors are recorded on the job and retried next tick. An observation is written only if the job is still in the state it was read in, so an agent action that lands while T3 is being read (a follow-up, an answer, a cancel) is never overwritten by stale data.
+
+**Hosts.** A transport failure on a host aborts that host's tick, marks it unreachable (`hostUnreachableSince` on all its open jobs, `jobs.host_unreachable` logged once) and backs it off: `pollSeconds` doubling per failure, at most 5 minutes. The next attempt starts with `t3_environment_read`; success clears the mark. Job states never change because a host is unreachable.
+
+**Follow-ups.** `work_continue` accepts `idle`, `running` and `needs_input` jobs. It claims the request id before calling `t3_thread_send { threadId, message, mode: "auto", clientRequestId }`, where `clientRequestId` is derived from the job, the agent and its request id. A delivered request is answered from the stored result (`replayed: true`). A failure with `delivery: unknown` keeps the claim, and the agent is told to repeat the call with the same request id: the gateway sends again with the same `clientRequestId`, which T3 deduplicates. A tool error or `not_delivered` failure releases the claim. An idle job moves to `running`; otherwise a `followup_sent` event records the delivery (`steered` or `queued`).
+
+**Responses.** `t3_pending_request_list` covers user questions only, and `t3_pending_request_respond` "cannot approve a permission request"; T3's MCP tools offer no way to answer approvals. `work_respond` therefore answers questions only: it lists the job thread's pending ids live and refuses any other id (so a request of another job's thread is refused), then passes `answers` through to T3 unchanged (an object, at most 16,000 characters of JSON). `work_status` reads each pending question (`t3_pending_request_read`, up to 5, 5-second timeout) so the agent sees the question text and options. Approvals are reported as `waitingForApproval`, and the operator gives them in T3. This is a deviation from the plan's "approval decision or question answer".
+
+**Cancel.** `queued` → `cancelled` without T3. `cancelled` and `failed` are reported as they are. Otherwise the job becomes `cancel_requested` first (so the intent is durable), then `t3_thread_interrupt { threadId, clientRequestId: "t3fg-cancel-<id>" }` is called when the job has a thread: `interrupt_requested` keeps `cancel_requested` until rule 1 confirms; any other status (`no_active_run`, `completed`, `interrupted`, …) means nothing runs, so the job is `cancelled` at once (an idle job cancels this way). If T3 cannot be reached, the request stays and the watcher delivers it. A job cancelled while its launch is in flight or unconfirmed is interrupted as soon as its thread is known, and cancelled outright if the launch is rejected, never reached T3, or is not confirmed in the window. A T3 tool error on the interrupt is returned to the agent and the state is kept.
+
+**Feed.** `work_feed` returns events with ids greater than the cursor (default 0), oldest first, `limit` default 50 and at most 200, plus `nextCursor` (the last returned id, or the given cursor) and `hasMore`. `attention` lists, newest change first and at most 50: `needs_input` and `unknown` jobs of any age, and `idle` and `failed` jobs changed within 24 hours. There is no acknowledgement state; an idle job leaves the list when it is continued, cancelled or 24 hours old. `mine: true` limits events and attention to jobs the calling agent started.
+
+**Not stored.** The thread link T3 returns is not stored (no migration was needed for the job layer); the title marker finds the thread in T3. Backoff state, the reconciliation window start and idle poll times are in memory and restart conservatively.
+
 ## Downstream T3 credentials
 
 Per host, the gateway obtains a T3 MCP credential with T3's documented pairing-code approval, with no browser:
@@ -212,14 +259,14 @@ This automates T3's consent step using the operator's own machine access (the sa
 
 - `deploy/launchd/` template and installer for macOS (KeepAlive); a `systemd` user unit example for Linux.
 - `t3-fleet-gateway doctor`: config validity, file permissions, database health, each host's reachability and credential expiry, public URL metadata.
-- Graceful shutdown: stop accepting, finish in-flight requests, persist watcher state.
+- Graceful shutdown: stop accepting, finish in-flight requests, persist watcher state. As built: the HTTP server drains (up to 10 seconds), then the job engine stops after its current tick (a launch in progress completes or times out), then renewal stops and the database closes. Every job change is written when it happens, so there is nothing else to persist; a job left `dispatching` by a crash is reconciled at the next start.
 
 ## Testing
 
 - Unit: config validation, OAuth flows (registration rules, PKCE, code reuse, refresh rotation, reuse detection and grace window, expiry, revocation, throttling), job state machine, idempotency, reconciliation decisions.
 - Integration: the gateway against a fake T3 MCP server built with the SDK that implements the T3 tools the gateway uses and supports failure injection (lost launch response, timeouts, pending requests, unreachable host). Includes restart recovery: stop the gateway mid-job, start it again, the same job continues.
 - Agent path: an SDK client that performs registration, approval with a minted code, token exchange, refresh, and tool calls, including a request without `MCP-Protocol-Version`.
-- Live end-to-end against a real T3 server: a script outside the automated suite, run against a scratch project.
+- Live end-to-end against a real T3 server: a script outside the automated suite, run against a scratch project. As built: `scripts/e2e-live.ts` (see `docs/operations.md`). The fake T3 (`test/helpers/fakeT3.ts`) implements the thread and pending-request tools from T3's published input and output schemas, with strict inputs so a misspelled field fails a test, and injects tool errors, delays, lost responses and bare HTTP statuses.
 
 ## Decisions log
 
@@ -231,3 +278,10 @@ This automates T3's consent step using the operator's own machine access (the sa
 - 2025-era requests get a per-request stateless transport with JSON responses instead of the SDK handler's SSE-only legacy fallback, matching the JSON responses T3 itself sends to the same clients.
 - Refresh grace window semantics: a retry of a rotated refresh token within two minutes succeeds and retires the pair the client never received; presenting that retired token later, or replaying a token whose successor was already used, revokes the family.
 - The package is not published to npm: Node does not strip types under `node_modules`, so it runs from a checkout (or `npm link`).
+- T3 `isError` on a launch is a definite rejection (`failed`); only transport failures can make a launch `unknown`. Unknown launches are reconciled by the title marker, never relaunched.
+- Transport failures carry a delivery verdict in the T3 client rather than in the job layer, so every state-changing call (launch, send, interrupt, respond) can tell "nothing happened" from "may have happened".
+- A read-only call precedes launches so a dead keep-alive connection is discovered by a retryable read.
+- `idle` frees a concurrency slot: a finished turn should not block the queue while it waits for review.
+- Permission approvals stay in T3: T3's MCP tools cannot answer them, so `work_respond` handles questions and `work_status` flags `waitingForApproval`.
+- Follow-ups and interrupts use T3's `clientRequestId`, so the gateway can resend after an uncertain outcome without duplicating work.
+- T3 statuses are parsed as strings and unknown ones count as active, so a T3 upgrade cannot make the watcher declare work finished.

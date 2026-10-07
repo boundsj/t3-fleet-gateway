@@ -51,6 +51,18 @@ t3-fleet-gateway clients revoke <client id>
 
 T3 credentials last 30 days. `serve` checks at startup and every `renewal.checkEveryMinutes`, and re-enrolls any host with fewer than `renewal.renewWhenDaysLeft` days left (or already expired). The old credential stays in use until the new one is verified. Failures are logged as `host.enrollment_failed`, shown by `hosts status` and `doctor`, and reported to agents in `fleet_status` as `credential.renewalError`; the next check retries. Hosts that were never enrolled are not enrolled automatically (`serve` logs `host.not_enrolled` at startup).
 
+## Jobs
+
+Agents with **Operate** start work with `work_start`; the gateway queues the job, creates a T3 thread titled `<title> [job:<id>]` in a fresh worktree on branch `<branchPrefix><id>` (from the project's `baseRef`), and follows it. What to know as the operator:
+
+- **Find a job in T3** by searching for its id or `[job:<id>]`. Every job is an ordinary thread: read it, type into it, stop it. If you stop it, the job becomes `idle` (the agent can continue it); if you type into an idle job's thread, the gateway records the extra turn.
+- **Approvals.** Threads run with the project's `runtimeMode`. With `approval-required`, permission approvals wait for you in T3; the job shows `needs_input` with `waitingForApproval` and agents cannot answer it. Worker questions (not approvals) can be answered by agents with `work_respond`.
+- **Concurrency.** At most `maxConcurrentJobs` jobs per host hold a slot (`dispatching`, `running`, `needs_input`, `cancel_requested`, `unknown`); the rest wait as `queued`. `fleet_status` shows the counts. An `idle` job holds no slot.
+- **Host down.** Jobs keep their state; `work_status` shows `hostUnreachableSince` and the gateway retries with backoff (up to every 5 minutes). Queued jobs launch when the host is back.
+- **Unknown launches.** If a launch's response is lost, the job is `unknown` and the gateway looks for `[job:<id>]` in the project's threads. Found: it continues. Not found for `watcher.reconcileWindowMinutes` (default 10) while the host answers: `failed` with `launch_not_confirmed`. The gateway never launches twice; the agent decides whether to start again.
+- **Cleanup.** Cancelled, failed and finished jobs leave their T3 thread, worktree and branch in place for you. Remove them in T3 or with git when you no longer need them.
+- **Restarts** are safe at any time: job state is in the database, and the next start resumes watching every unfinished job and reconciles any launch that was in flight.
+
 ## Doctor
 
 ```sh
@@ -73,7 +85,7 @@ The installer fills in absolute paths and puts the directories of `node` and `t3
 
 Linux (systemd user unit): see the comments at the top of [`deploy/systemd/t3-fleet-gateway.service`](../deploy/systemd/t3-fleet-gateway.service).
 
-On `SIGINT` or `SIGTERM` the gateway stops accepting connections, finishes in-flight requests (up to 10 seconds), stops the renewal loop and closes the database.
+On `SIGINT` or `SIGTERM` the gateway stops accepting connections, finishes in-flight requests (up to 10 seconds), lets the job engine finish its current tick, stops the renewal loop and closes the database. Job state is written as it changes, so nothing is lost; a launch interrupted by a crash is reconciled at the next start.
 
 ## Logs
 
@@ -89,9 +101,43 @@ On `SIGINT` or `SIGTERM` the gateway stops accepting connections, finishes in-fl
 | `mcp.tool_call` | Tool name, client id, outcome, error code, duration |
 | `mcp.unauthorized`, `mcp.origin_rejected` | Rejected `/mcp` requests |
 | `host.enrollment_succeeded`, `host.enrollment_failed`, `host.renewal_due`, `host.not_enrolled` | T3 credentials |
+| `job.created`, `job.state_changed` | Job id, project, host, client id; `from`, `to`, `reason`, `errorCode` |
+| `jobs.host_unreachable` (warn), `jobs.host_reachable` | The job engine lost or regained a host; jobs keep their state |
+| `jobs.watch_failed`, `jobs.interrupt_failed`, `jobs.interrupt_deferred` (warn) | A T3 call for one job failed; it is retried |
+| `jobs.tick_failed`, `jobs.host_tick_failed` (error) | Unexpected engine errors (with an error code) |
 | `http.request` | Method, path (no query), status, duration |
 
 Logs never contain tokens, codes, authorization headers, task text or message content.
+
+## Live end-to-end check
+
+`scripts/e2e-live.ts` checks a running gateway against a real T3 host the way an agent would. It is not part of `npm test`. It registers a client, gets approved for **Operate** with a code you mint, exchanges the code, calls `fleet_status`, then:
+
+1. starts job A in a project with a tiny harmless task (reply `READY`, no commands, no file changes) and polls `work_feed` until it is `idle`;
+2. checks `work_status` (thread, excerpt), sends a follow-up with `work_continue` (reply `DONE`) and polls until `idle` again;
+3. starts job B, waits until it runs, cancels it with `work_cancel` and waits for `cancelled`;
+4. cancels job A to leave nothing active.
+
+It prints one `PASS`/`FAIL`/`INFO` line per step with job ids, states and reasons only (never tokens, codes or worker text; excerpts are reported by length), ends with `E2E PASS` or `E2E FAIL`, and exits `0` or `1`.
+
+Use a scratch project: each run leaves two T3 threads with their worktrees and branches. With the gateway running (`serve`) and the host enrolled:
+
+```sh
+t3-fleet-gateway pair                    # mint an approval code
+T3FG_E2E_APPROVAL_CODE=XXXXX-XXXXX \
+T3FG_E2E_PROJECT=pilot \
+  node scripts/e2e-live.ts --config /path/to/config.json
+```
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `T3FG_E2E_APPROVAL_CODE` | required | A code from `pair`; it is used once and never printed |
+| `T3FG_E2E_PROJECT` | the first configured project | Project alias to run the jobs in |
+| `T3FG_E2E_URL` | `publicUrl` | Gateway base URL, for example `http://127.0.0.1:3790` to bypass the tunnel |
+| `T3FG_E2E_TIMEOUT_SECONDS` | `600` | How long to wait for each job transition |
+| `T3FG_E2E_POLL_SECONDS` | `5` | Delay between `work_feed` polls |
+
+`--config` (or `$T3FG_CONFIG`) is read for `publicUrl` and the project list only. If a job reaches `needs_input` (for example an approval under `approval-required`), the script says so and keeps waiting until the timeout, so you can approve it in T3. Each run registers a new agent client; remove old ones with `clients revoke`.
 
 ## Backup and restore
 
