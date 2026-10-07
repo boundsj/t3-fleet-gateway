@@ -172,6 +172,12 @@ export class FakeT3 {
   readonly statusOnce = new Map<string, number>();
   /** Threads whose t3_thread_read answers in a shape that does not match T3's schema. */
   readonly brokenReads = new Set<string>();
+  /** Thread id to a T3 failure returned by t3_thread_read for that thread only. */
+  readonly readFailures = new Map<string, { code: string; message: string }>();
+  /** Tools whose calls take effect but whose answer is held back until releaseHeld() or stop(). */
+  readonly holdResponses = new Set<string>();
+  /** When set, t3_thread_launch creates the thread but starts no run on it (thread `idle`, no runs). */
+  launchWithoutRun = false;
   /** When set, interrupts are accepted but take effect only on completeInterrupts(). */
   deferInterrupts = false;
   readonly threads = new Map<string, FakeThread>();
@@ -181,6 +187,8 @@ export class FakeT3 {
   readonly #sendResults = new Map<string, Record<string, unknown>>();
   readonly #interruptResults = new Map<string, Record<string, unknown>>();
   readonly #deferredInterrupts = new Set<string>();
+  readonly #held: { tool: string; release: () => void }[] = [];
+  readonly #holdWaiters: { tool: string; resolve: () => void }[] = [];
   #server: Server | undefined;
   #port = 0;
   #offline = false;
@@ -313,6 +321,17 @@ export class FakeT3 {
     item.updatedAt = new Date().toISOString();
   }
 
+  /** Resolves once a call to `tool` has taken effect and its answer is being held (see holdResponses). */
+  whenHeld(tool: string): Promise<void> {
+    if (this.#held.some((held) => held.tool === tool)) return Promise.resolve();
+    return new Promise((resolve) => this.#holdWaiters.push({ tool, resolve }));
+  }
+
+  /** Send every held answer. */
+  releaseHeld(): void {
+    for (const held of this.#held.splice(0)) held.release();
+  }
+
   /** Apply interrupts accepted while deferInterrupts was set. */
   completeInterrupts(): void {
     for (const threadId of this.#deferredInterrupts) this.#interrupt(this.#thread(threadId));
@@ -346,6 +365,7 @@ export class FakeT3 {
    */
   async stop(): Promise<void> {
     this.#offline = true;
+    this.releaseHeld();
     await this.forgetSessions();
     this.#server?.closeAllConnections();
   }
@@ -484,6 +504,7 @@ export class FakeT3 {
       try {
         const value = produce();
         const after = this.failuresAfterEffect.get(tool);
+        if (this.holdResponses.has(tool)) await this.#hold(tool);
         if (after) return fail(after);
         return { content: [{ type: 'text' as const, text: JSON.stringify(value) }], structuredContent: value };
       } catch (error) {
@@ -514,7 +535,11 @@ export class FakeT3 {
         }),
     );
     tool('t3_thread_launch', launchInput, (input) => this.#launch(input));
-    tool('t3_thread_read', readInput, (input) => (this.brokenReads.has(input.threadId) ? { thread: { threadId: input.threadId } } : this.#read(input)));
+    tool('t3_thread_read', readInput, (input) => {
+      const failure = this.readFailures.get(input.threadId);
+      if (failure) throw new FakeFailure(failure.code, failure.message);
+      return this.brokenReads.has(input.threadId) ? { thread: { threadId: input.threadId } } : this.#read(input);
+    });
     tool('t3_thread_list', listInput, (input) => {
       const projectId = this.#target(input.projectId);
       const matching = [...this.threads.values()]
@@ -595,6 +620,15 @@ export class FakeT3 {
 
   #activeRun(thread: FakeThread): FakeRun | undefined {
     return thread.runs.findLast((run) => ACTIVE.has(run.status));
+  }
+
+  #hold(tool: string): Promise<void> {
+    const held = new Promise<void>((release) => this.#held.push({ tool, release }));
+    for (const waiter of this.#holdWaiters.filter((candidate) => candidate.tool === tool)) {
+      this.#holdWaiters.splice(this.#holdWaiters.indexOf(waiter), 1);
+      waiter.resolve();
+    }
+    return held;
   }
 
   #touch(thread: FakeThread): void {
@@ -691,7 +725,7 @@ export class FakeT3 {
     };
     this.threads.set(threadId, thread);
     let run: FakeRun | undefined;
-    if (input.message) {
+    if (input.message && !this.launchWithoutRun) {
       run = this.#startRun(thread);
       this.#addItem(thread, { runId: run.runId, createdBy: 'agent', creationSource: 'mcp', type: 'user_message', text: input.message });
     }

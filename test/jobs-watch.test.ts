@@ -125,12 +125,15 @@ describe('watcher', () => {
     const { fake, agent, tick, tickAfter } = await startJobHarness(t);
     const job = await startJob(agent);
     await tick();
+    const before = await agent.call<Status & { updatedAt: string }>('work_status', { jobId: job.jobId });
     await fake.stop();
-    await tick();
-    await tickAfter(10 * MINUTE);
-    const away = await agent.call<Status>('work_status', { jobId: job.jobId });
+    await tickAfter(MINUTE);
+    const away = await agent.call<Status & { updatedAt: string }>('work_status', { jobId: job.jobId });
     assert.equal(away.state, 'running');
     assert.ok(away.hostUnreachableSince);
+    assert.equal(away.updatedAt, away.hostUnreachableSince, 'marking the job unreachable is a change');
+    assert.ok(Date.parse(away.updatedAt) > Date.parse(before.updatedAt));
+    await tickAfter(10 * MINUTE);
     const fleet = await agent.call<{ hosts: { reachable: boolean | null }[] }>('fleet_status');
     assert.equal(fleet.hosts[0]?.reachable, false);
 
@@ -194,7 +197,8 @@ describe('failures that concern one job', () => {
     const { fake, gw, agent, tick } = await startJobHarness(t, { launchTimeoutMs: 100 });
     const first = await startJob(agent);
     await tick();
-    fake.toolDelays.set('t3_thread_launch', 300);
+    // T3 creates the thread but answers only after the gateway gave up.
+    fake.holdResponses.add('t3_thread_launch');
     const slow = await startJob(agent);
     await tick();
     const status = await agent.call<Status>('work_status', { jobId: slow.jobId });
@@ -203,8 +207,8 @@ describe('failures that concern one job', () => {
     assert.equal((await agent.call<Status>('work_status', { jobId: first.jobId })).hostUnreachableSince, null);
     assert.equal(gw.logs.some((line) => line.includes('"event":"jobs.host_unreachable"')), false);
 
-    await new Promise((resolve) => setTimeout(resolve, 300)); // T3 finishes the slow launch
-    fake.toolDelays.delete('t3_thread_launch');
+    fake.holdResponses.delete('t3_thread_launch');
+    fake.releaseHeld();
     fake.finishTurn(fake.threadForJob(first.jobId).threadId, 'Synthetic done');
     await tick(); // no clock advance: a backed-off host would be skipped
     assert.equal(await jobState(agent, first.jobId), 'idle');
@@ -214,6 +218,44 @@ describe('failures that concern one job', () => {
 });
 
 describe('reconciliation', () => {
+  test('a timed-out launch whose thread never started a run fails as not started, never idle', async (t) => {
+    const { fake, agent, tick } = await startJobHarness(t, { launchTimeoutMs: 100 });
+    fake.launchWithoutRun = true;
+    fake.holdResponses.add('t3_thread_launch');
+    const job = await startJob(agent);
+    await tick();
+    assert.equal(await jobState(agent, job.jobId), 'unknown');
+    fake.releaseHeld();
+    await tick();
+    const thread = fake.threadForJob(job.jobId);
+    const status = await agent.call<Status & { link: string | null }>('work_status', { jobId: job.jobId });
+    assert.equal(status.state, 'failed');
+    assert.equal(status.lastError?.code, 'launch_not_started');
+    assert.match(status.lastError?.message ?? '', /\(the launch answered t3_timeout\)/);
+    assert.equal(status.threadId, thread.threadId);
+    assert.ok(status.link);
+    assert.deepEqual(status.recentEvents.at(-1)?.reason, 'launch_not_started');
+    assert.equal(fake.launches.length, 1);
+  });
+
+  test('a search match T3 refuses to read is skipped, so the window still runs out', async (t) => {
+    const { fake, agent, tick, tickAfter } = await startJobHarness(t, { watcher: { reconcileWindowMinutes: 10 } });
+    const job = await startJob(agent);
+    fake.statusOnce.set('t3_thread_launch', 502);
+    await tick();
+    assert.equal(await jobState(agent, job.jobId), 'unknown');
+    const { threadId } = fake.launchDirect({ projectId: 'project-1', title: 'Synthetic notes', message: `Synthetic mention of ${job.jobId}` });
+    fake.readFailures.set(threadId, { code: 'thread_access_denied', message: 'Synthetic read failure.' });
+    await tickAfter(MINUTE);
+    const pending = await agent.call<Status>('work_status', { jobId: job.jobId });
+    assert.equal(pending.state, 'unknown');
+    assert.equal(pending.lastError?.code, 't3_response_lost', 'the lookup completed: no lookup error recorded');
+    await tickAfter(10 * MINUTE);
+    const status = await agent.call<Status>('work_status', { jobId: job.jobId });
+    assert.equal(status.state, 'failed');
+    assert.equal(status.lastError?.code, 'launch_not_confirmed');
+  });
+
   test('a lost launch response is reconciled to running by finding the marker, without relaunching', async (t) => {
     const { fake, agent, tick, tickAfter } = await startJobHarness(t);
     const job = await startJob(agent);

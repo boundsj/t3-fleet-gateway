@@ -379,17 +379,20 @@ export class JobStore {
     this.#insertEvent(id, type, state, state, detail, this.#clock());
   }
 
-  /** Mark every open job on a host as unreachable since `since`, keeping an earlier mark. */
+  /** Mark every open job on a host as unreachable since `since`, keeping an earlier mark. A change bumps `updatedAt`. */
   markHostUnreachable(hostId: string, since: number): void {
     this.#db
       .prepare(
-        "UPDATE jobs SET host_unreachable_since = ? WHERE host_id = ? AND host_unreachable_since IS NULL AND state NOT IN ('cancelled', 'failed')",
+        'UPDATE jobs SET host_unreachable_since = ?, updated_at = ? ' +
+          "WHERE host_id = ? AND host_unreachable_since IS NULL AND state NOT IN ('cancelled', 'failed')",
       )
-      .run(since, hostId);
+      .run(since, this.#clock(), hostId);
   }
 
   clearHostUnreachable(hostId: string): void {
-    this.#db.prepare('UPDATE jobs SET host_unreachable_since = NULL WHERE host_id = ? AND host_unreachable_since IS NOT NULL').run(hostId);
+    this.#db
+      .prepare('UPDATE jobs SET host_unreachable_since = NULL, updated_at = ? WHERE host_id = ? AND host_unreachable_since IS NOT NULL')
+      .run(this.#clock(), hostId);
   }
 
   /** The latest events of one job, oldest first. */

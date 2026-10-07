@@ -159,6 +159,40 @@ describe('dispatcher', () => {
     assert.equal(fake.launches.length, 1);
   });
 
+  test('a T3 launch error that left a thread without a run fails the job as not started, keeping the thread', async (t) => {
+    const { fake, agent, tick } = await startJobHarness(t);
+    fake.launchWithoutRun = true;
+    fake.failuresAfterEffect.set('t3_thread_launch', { code: 'internal_error', message: 'Synthetic failure after creating the thread.' });
+    const job = await startJob(agent);
+    await tick();
+    const thread = fake.threadForJob(job.jobId);
+    assert.equal(thread.runs.length, 0);
+    const status = await agent.call<{ state: string; threadId: string; link: string | null; lastError: { code: string; message: string } }>('work_status', {
+      jobId: job.jobId,
+    });
+    assert.equal(status.state, 'failed', 'never idle: the task was not delivered');
+    assert.equal(status.lastError.code, 'launch_not_started');
+    assert.match(status.lastError.message, /started no run on it \(the launch answered internal_error\)/);
+    assert.equal(status.threadId, thread.threadId);
+    assert.equal(status.link, `t3-thread://v1/env-synthetic/${thread.threadId}`);
+    assert.equal(fake.launches.length, 1);
+  });
+
+  test('a T3 launch error whose lookup also fails leaves the job unknown for reconciliation, never failed', async (t) => {
+    const { fake, agent, tick, tickAfter } = await startJobHarness(t);
+    fake.failuresAfterEffect.set('t3_thread_launch', { code: 'internal_error', message: 'Synthetic failure after creating the thread.' });
+    fake.failures.set('t3_thread_list', { code: 'unavailable', message: 'Synthetic list failure.' });
+    const job = await startJob(agent);
+    await tick();
+    const status = await agent.call<{ state: string; lastError: { code: string } }>('work_status', { jobId: job.jobId });
+    assert.equal(status.state, 'unknown', 'a thread may exist: the slot stays held');
+    assert.equal(status.lastError.code, 'internal_error');
+    fake.failures.delete('t3_thread_list');
+    await tickAfter(MINUTE);
+    assert.equal(await jobState(agent, job.jobId), 'running', 'reconciliation found the thread');
+    assert.equal(fake.launches.length, 1);
+  });
+
   test('a launch T3 refuses for want of a model fails at once, without a lookup, and says how to fix it', async (t) => {
     const { fake, agent, tick } = await startJobHarness(t);
     fake.projects[0]!.defaultModelSelection = null;

@@ -61,7 +61,8 @@ export function isWorkerMessage(item: ThreadItem): boolean {
   return /assistant|plan/i.test(item.type) || (item.creationSource === 'provider' && /message/i.test(item.type));
 }
 
-function isActiveStatus(status: string): boolean {
+/** Whether a thread or run status means work is going on (or about to). */
+export function isActiveStatus(status: string): boolean {
   // A status this build does not know is treated as active: wait rather than declare the turn over.
   return ACTIVE_RUN_STATUSES.includes(status) || !(THREAD_STATUSES as readonly string[]).includes(status);
 }

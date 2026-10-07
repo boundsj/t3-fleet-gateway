@@ -7,7 +7,7 @@ import { T3TransportError } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
 import type { LaunchResult, ThreadRead } from '../t3/schemas.ts';
 import { MINUTE, SECOND, type Clock } from '../time.ts';
-import { EXCERPT_CHARS, observe, threadLinkTarget } from './derive.ts';
+import { EXCERPT_CHARS, isActiveStatus, observe, threadLinkTarget } from './derive.ts';
 import { deliverInterrupt } from './interrupt.ts';
 import { jobMarker } from './service.ts';
 import type { Job, JobChanges, JobStore } from './store.ts';
@@ -38,6 +38,13 @@ interface FoundThread {
   threadTitle: string;
   lastRunId: string | null;
   threadLink: string | null;
+  /** The thread's T3 status, for a thread found by a lookup. */
+  status?: string;
+}
+
+function foundThread(thread: { threadId: string; title: string; latestRunId: string | null; link: string; status: string }): FoundThread {
+  const { threadId, title, latestRunId, link, status } = thread;
+  return { threadId, threadTitle: title, lastRunId: latestRunId, threadLink: threadLinkTarget(link), status };
 }
 
 function isHostFailure(error: unknown): error is GatewayError {
@@ -263,7 +270,7 @@ export class JobEngine {
         return true;
       }
       const thread = { threadId: launched.threadId, threadTitle: job.title, lastRunId: launched.runId, threadLink: threadLinkTarget(launched.link) };
-      await this.#attach(job.id, thread, 'launched');
+      await this.#attach(job.id, thread, 'launched', null);
       return true;
     } finally {
       this.#inFlight.delete(job.id);
@@ -274,7 +281,8 @@ export class JobEngine {
    * T3 answered the launch with an error. Some refusals happen before anything is created; after any
    * other, T3 may have created the thread (its own guidance is to look before retrying), so the
    * marker is looked up once: found, the job continues on that thread; not found, it fails with
-   * T3's code. If the lookup cannot be done, the job is unknown and reconciliation takes over.
+   * T3's code. If the lookup fails in any way, the job is unknown and reconciliation takes over:
+   * failing it would free the slot while a thread may exist.
    */
   async #launchRefused(job: Job, project: ProjectConfig, projectId: string, error: T3ToolError): Promise<boolean> {
     const { store, config } = this.#options;
@@ -290,15 +298,12 @@ export class JobEngine {
       try {
         found = await this.#findThread(job.hostId, projectId, job.id);
       } catch (lookupError) {
-        // T3 refused the lookup too: it holds no thread to find. Anything else leaves the outcome open.
-        if (!(lookupError instanceof T3ToolError)) {
-          store.transition(job.id, { from: ['dispatching'], to: 'unknown', changes: failure, detail: { reason: 'launch_outcome_unknown', code: error.t3Code } });
-          if (isHostFailure(lookupError)) throw lookupError;
-          return true;
-        }
+        store.transition(job.id, { from: ['dispatching'], to: 'unknown', changes: failure, detail: { reason: 'launch_outcome_unknown', code: error.t3Code } });
+        if (isHostFailure(lookupError)) throw lookupError;
+        return true;
       }
       if (found) {
-        await this.#attach(job.id, found, 'reconciled');
+        await this.#attach(job.id, found, 'reconciled', error.t3Code);
         return true;
       }
     }
@@ -337,7 +342,10 @@ export class JobEngine {
     const found = await this.#findThread(job.hostId, projectId, job.id);
     if (found) {
       this.#unconfirmedSince.delete(job.id);
-      await this.#attach(job.id, found, 'reconciled');
+      // The launch's own error; lastError may since hold a failed lookup's.
+      const launchEvent = store.recentEvents(job.id, 20).findLast((event) => event.detail.reason === 'launch_outcome_unknown');
+      const launchCode = launchEvent?.detail.code ?? null;
+      await this.#attach(job.id, found, 'reconciled', launchCode);
       return;
     }
     const since = this.#unconfirmedSince.get(job.id)?.since ?? clock();
@@ -355,7 +363,8 @@ export class JobEngine {
 
   /**
    * The thread carrying the job's marker: by title in the project's unsettled, then settled threads,
-   * then by search.
+   * then by search. A search match T3 refuses to read is skipped: one unreadable thread must not stall
+   * reconciliation, and the job's own thread is found by title.
    */
   async #findThread(hostId: string, projectId: string, jobId: string): Promise<FoundThread | undefined> {
     const client = this.#options.registry.client(hostId);
@@ -366,12 +375,18 @@ export class JobEngine {
     for (const settled of [false, true]) {
       const listed = await client.listThreads({ projectId, titleContains: marker, limit: 10, ...(settled ? { settled } : {}) });
       const byTitle = listed.threads.filter((thread) => carriesMarker(thread.title)).sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
-      if (byTitle) return { threadId: byTitle.threadId, threadTitle: byTitle.title, lastRunId: byTitle.latestRunId, threadLink: threadLinkTarget(byTitle.link) };
+      if (byTitle) return foundThread(byTitle);
     }
     const searched = await client.searchThreads({ projectId, query: jobId, limit: 20 });
     for (const threadId of new Set(searched.matches.map((match) => match.threadId))) {
-      const { thread } = await client.readThread({ threadId, limit: 1, runLimit: 1 });
-      if (carriesMarker(thread.title)) return { threadId, threadTitle: thread.title, lastRunId: thread.latestRunId, threadLink: threadLinkTarget(thread.link) };
+      let thread: ThreadRead['thread'];
+      try {
+        ({ thread } = await client.readThread({ threadId, limit: 1, runLimit: 1 }));
+      } catch (error) {
+        if (error instanceof T3ToolError) continue;
+        throw error;
+      }
+      if (carriesMarker(thread.title)) return foundThread(thread);
     }
     return undefined;
   }
@@ -463,11 +478,27 @@ export class JobEngine {
 
   /**
    * Record the job's thread and move it to running. A job cancelled while its launch was in flight
-   * or unconfirmed keeps cancel_requested, and its thread is interrupted now.
+   * or unconfirmed keeps cancel_requested, and its thread is interrupted now. A found thread on
+   * which no run ever started never received the task: the job fails with `launch_not_started`
+   * (`launchCode` is the launch's own error, if any), keeping the thread so it can be inspected.
    */
-  async #attach(jobId: string, thread: FoundThread, via: 'launched' | 'reconciled'): Promise<void> {
+  async #attach(jobId: string, thread: FoundThread, via: 'launched' | 'reconciled', launchCode: string | null): Promise<void> {
     const { store, registry } = this.#options;
-    const { threadLink, ...rest } = thread;
+    const { threadLink, status, ...rest } = thread;
+    if (status !== undefined && thread.lastRunId === null && !isActiveStatus(status)) {
+      const changes = {
+        ...rest,
+        ...(threadLink ? { threadLink } : {}),
+        lastErrorCode: 'launch_not_started',
+        lastErrorMessage:
+          `T3 created the job's thread but started no run on it${launchCode ? ` (the launch answered ${launchCode})` : ''}, ` +
+          'so the task was never delivered. The thread is kept for inspection; start a new job if the work is still needed.',
+      };
+      const detail = { reason: 'launch_not_started', code: 'launch_not_started' };
+      store.transition(jobId, { from: ['dispatching', 'unknown'], to: 'failed', changes, detail });
+      store.transition(jobId, { from: ['cancel_requested'], to: 'cancelled', changes, detail });
+      return;
+    }
     const changes = { ...rest, ...(threadLink ? { threadLink } : {}), lastErrorCode: null, lastErrorMessage: null };
     if (store.transition(jobId, { from: ['dispatching', 'unknown'], to: 'running', changes, detail: { reason: via } })) return;
     const job = store.get(jobId);
