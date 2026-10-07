@@ -98,7 +98,7 @@ export interface RunningGateway {
 export interface GatewayOptions extends ServiceOptions {
   tools?: (services: GatewayServices) => GatewayTool[];
   /** Tests drive the job engine by hand (`autoStart: false`) or with a short interval. */
-  jobEngine?: { autoStart?: boolean; intervalMs?: number };
+  jobEngine?: { autoStart?: boolean; intervalMs?: number; launchTimeoutMs?: number };
   /** Listen on this port instead of `config.listen.port`; 0 lets the OS pick one (tests). */
   port?: number;
 }
@@ -134,6 +134,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
     clock: services.clock,
     logger,
     ...(options.jobEngine?.intervalMs === undefined ? {} : { intervalMs: options.jobEngine.intervalMs }),
+    ...(options.jobEngine?.launchTimeoutMs === undefined ? {} : { launchTimeoutMs: options.jobEngine.launchTimeoutMs }),
   });
   services.jobs.wake = () => engine.wake();
   if (options.jobEngine?.autoStart !== false) engine.start();

@@ -120,8 +120,8 @@ On `SIGINT` or `SIGTERM` the gateway stops accepting connections, finishes in-fl
 | `host.enrollment_succeeded`, `host.enrollment_failed`, `host.renewal_due`, `host.not_enrolled` | T3 credentials |
 | `job.created`, `job.state_changed` | Job id, project, host, client id; `from`, `to`, `reason`, `errorCode` |
 | `jobs.host_unreachable` (warn), `jobs.host_reachable` | The job engine lost or regained a host; jobs keep their state |
-| `jobs.watch_failed`, `jobs.interrupt_failed`, `jobs.interrupt_deferred` (warn) | A T3 call for one job failed; it is retried |
-| `jobs.tick_failed`, `jobs.host_tick_failed` (error) | Unexpected engine errors (with an error code) |
+| `jobs.reconcile_failed`, `jobs.watch_failed`, `jobs.interrupt_failed`, `jobs.interrupt_deferred` (warn) | A T3 call for one job failed (job id, error code); the error is on the job and the call is retried next tick |
+| `jobs.tick_failed`, `jobs.host_tick_failed` (error) | Unexpected engine errors (with an error code and, per host, the step); the next step still runs |
 | `http.request` | Method, path (no query), status, duration |
 
 Logs never contain tokens, codes, authorization headers, task text or message content.

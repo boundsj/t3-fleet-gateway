@@ -143,6 +143,76 @@ describe('watcher', () => {
   });
 });
 
+describe('failures that concern one job', () => {
+  test('a thread read T3 answers in an unexpected shape is recorded on that job; the host keeps going', async (t) => {
+    const { fake, agent, tick } = await startJobHarness(t, { maxConcurrentJobs: 2 });
+    const broken = await startJob(agent, 'Synthetic broken');
+    const healthy = await startJob(agent, 'Synthetic healthy');
+    const queued = await startJob(agent, 'Synthetic queued');
+    await tick();
+    fake.brokenReads.add(fake.threadForJob(broken.jobId).threadId);
+    fake.finishTurn(fake.threadForJob(healthy.jobId).threadId, 'Synthetic done');
+    await tick();
+    const status = await agent.call<Status>('work_status', { jobId: broken.jobId });
+    assert.equal(status.state, 'running', 'the job keeps its state');
+    assert.equal(status.lastError?.code, 't3_invalid_response');
+    assert.equal(status.hostUnreachableSince, null);
+    assert.equal(await jobState(agent, healthy.jobId), 'idle', 'the next job is still watched');
+    assert.equal(await jobState(agent, queued.jobId), 'running', 'queued work is still dispatched');
+
+    fake.brokenReads.clear();
+    fake.finishTurn(fake.threadForJob(broken.jobId).threadId, 'Synthetic recovered');
+    await tick();
+    assert.equal(await jobState(agent, broken.jobId), 'idle', 'retried on the next tick');
+  });
+
+  test('a T3 error while reconciling one job is recorded on it; other jobs progress and queued work starts', async (t) => {
+    const { fake, agent, tick, tickAfter } = await startJobHarness(t, { maxConcurrentJobs: 2 });
+    const lost = await startJob(agent);
+    fake.dropResponseOnce.add('t3_thread_launch');
+    await tick();
+    assert.equal(await jobState(agent, lost.jobId), 'unknown');
+    fake.failures.set('t3_thread_list', { code: 'unavailable', message: 'Synthetic list failure.' });
+    const running = await startJob(agent);
+    const queued = await startJob(agent);
+    await tickAfter(MINUTE);
+    const status = await agent.call<Status>('work_status', { jobId: lost.jobId });
+    assert.equal(status.state, 'unknown');
+    assert.equal(status.lastError?.code, 'unavailable');
+    assert.equal(await jobState(agent, running.jobId), 'running', 'dispatch ran in the same tick');
+    assert.equal(await jobState(agent, queued.jobId), 'queued', 'two slots: the unknown job and the new one');
+    fake.finishTurn(fake.threadForJob(running.jobId).threadId, 'Synthetic done');
+    await tick();
+    assert.equal(await jobState(agent, running.jobId), 'idle');
+    assert.equal(await jobState(agent, queued.jobId), 'running');
+    fake.failures.delete('t3_thread_list');
+    await tick();
+    assert.equal(await jobState(agent, lost.jobId), 'running', 'reconciled once T3 answers');
+  });
+
+  test('a launch that times out makes only that job unknown; the host is not backed off', async (t) => {
+    const { fake, gw, agent, tick } = await startJobHarness(t, { launchTimeoutMs: 100 });
+    const first = await startJob(agent);
+    await tick();
+    fake.toolDelays.set('t3_thread_launch', 300);
+    const slow = await startJob(agent);
+    await tick();
+    const status = await agent.call<Status>('work_status', { jobId: slow.jobId });
+    assert.equal(status.state, 'unknown');
+    assert.equal(status.lastError?.code, 't3_timeout');
+    assert.equal((await agent.call<Status>('work_status', { jobId: first.jobId })).hostUnreachableSince, null);
+    assert.equal(gw.logs.some((line) => line.includes('"event":"jobs.host_unreachable"')), false);
+
+    await new Promise((resolve) => setTimeout(resolve, 300)); // T3 finishes the slow launch
+    fake.toolDelays.delete('t3_thread_launch');
+    fake.finishTurn(fake.threadForJob(first.jobId).threadId, 'Synthetic done');
+    await tick(); // no clock advance: a backed-off host would be skipped
+    assert.equal(await jobState(agent, first.jobId), 'idle');
+    assert.equal(await jobState(agent, slow.jobId), 'running', 'reconciled');
+    assert.equal(fake.launches.length, 2);
+  });
+});
+
 describe('reconciliation', () => {
   test('a lost launch response is reconciled to running by finding the marker, without relaunching', async (t) => {
     const { fake, agent, tick, tickAfter } = await startJobHarness(t);

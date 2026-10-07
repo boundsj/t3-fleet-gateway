@@ -48,6 +48,8 @@ export interface JobEngineOptions {
   logger: Logger;
   /** Time between ticks. Defaults to `watcher.pollSeconds`. */
   intervalMs?: number;
+  /** How long to wait for `t3_thread_launch`. Defaults to 60 seconds. */
+  launchTimeoutMs?: number;
 }
 
 /**
@@ -60,6 +62,7 @@ export interface JobEngineOptions {
 export class JobEngine {
   readonly #options: JobEngineOptions;
   readonly #intervalMs: number;
+  readonly #launchTimeoutMs: number;
   readonly #hosts = new Map<string, HostState>();
   readonly #projectIds = new Map<string, string>();
   /** Jobs this process is launching right now; any other `dispatching` job is stale. */
@@ -75,6 +78,7 @@ export class JobEngine {
   constructor(options: JobEngineOptions) {
     this.#options = options;
     this.#intervalMs = options.intervalMs ?? options.config.watcher.pollSeconds * SECOND;
+    this.#launchTimeoutMs = options.launchTimeoutMs ?? LAUNCH_TIMEOUT_MS;
   }
 
   /** Tick now and then every interval. */
@@ -117,14 +121,38 @@ export class JobEngine {
     const client = this.#options.registry.client(host.id);
     try {
       if (state.unreachableSince !== null) await client.environmentRead();
-      await this.#reconcile(host);
-      await this.#watch(host);
-      await this.#dispatch(host);
+      // A failure that concerns one job is recorded on that job inside each step. Anything else that
+      // escapes a step is logged and the next step still runs, so queued work is still dispatched.
+      const steps = [
+        ['reconcile', () => this.#reconcile(host)],
+        ['watch', () => this.#watch(host)],
+        ['dispatch', () => this.#dispatch(host)],
+      ] as const;
+      for (const [step, run] of steps) {
+        try {
+          await run();
+        } catch (error) {
+          if (isHostFailure(error)) throw error;
+          logger.error('jobs.host_tick_failed', { hostId: host.id, step, errorCode: describeError(error).code });
+        }
+      }
       this.#markReachable(host.id);
     } catch (error) {
       if (isHostFailure(error)) this.#markUnreachable(host.id, error);
       else logger.error('jobs.host_tick_failed', { hostId: host.id, errorCode: describeError(error).code });
     }
+  }
+
+  /**
+   * Record a failure that concerns one job only (a T3 tool error, an answer in an unexpected shape):
+   * the job keeps its state, carries the error, and is tried again next tick. Host failures propagate.
+   */
+  #jobFailed(job: Job, error: unknown, event: string): void {
+    if (isHostFailure(error)) throw error;
+    const described = describeError(error);
+    const code = error instanceof T3ToolError ? error.t3Code : described.code;
+    this.#options.store.update(job.id, { lastErrorCode: code, lastErrorMessage: described.message });
+    this.#options.logger.warn(event, { jobId: job.id, hostId: job.hostId, errorCode: code });
   }
 
   /** Fill free slots with queued jobs, oldest first. */
@@ -167,11 +195,12 @@ export class JobEngine {
         to: 'dispatching',
         changes: { t3ProjectId: projectId, dispatchStartedAt: clock() },
       });
-      if (dispatching) await this.#launch(dispatching, project, projectId);
+      if (dispatching && !(await this.#launch(dispatching, project, projectId))) return;
     }
   }
 
-  async #launch(job: Job, project: ProjectConfig, projectId: string): Promise<void> {
+  /** Launch one job's thread. Returns false when no further job should be launched this tick. */
+  async #launch(job: Job, project: ProjectConfig, projectId: string): Promise<boolean> {
     const { store, registry } = this.#options;
     this.#inFlight.add(job.id);
     let launched: LaunchResult;
@@ -185,7 +214,7 @@ export class JobEngine {
           ...(project.modelSelection ? { modelSelection: project.modelSelection } : {}),
           message: launchMessage(job),
         },
-        { timeoutMs: LAUNCH_TIMEOUT_MS },
+        { timeoutMs: this.#launchTimeoutMs },
       );
     } catch (error) {
       this.#inFlight.delete(job.id);
@@ -195,7 +224,7 @@ export class JobEngine {
         const failure = { lastErrorCode: error.t3Code, lastErrorMessage: error.message };
         store.transition(job.id, { from: ['dispatching'], to: 'failed', changes: failure, detail: { reason: 'launch_rejected', code: error.t3Code } });
         store.transition(job.id, { from: ['cancel_requested'], to: 'cancelled', changes: failure, detail: { reason: 'launch_rejected', code: error.t3Code } });
-        return;
+        return true;
       }
       if (error instanceof T3TransportError && error.delivery === 'not_delivered') {
         store.transition(job.id, { from: ['dispatching'], to: 'queued', changes: { dispatchStartedAt: null }, detail: { reason: 'host_unreachable', code: error.code } });
@@ -209,11 +238,15 @@ export class JobEngine {
         changes: { lastErrorCode: described.code, lastErrorMessage: described.message },
         detail: { reason: 'launch_outcome_unknown', code: described.code },
       });
+      // T3 prepares the worktree before answering, so a slow launch says nothing about the host (the
+      // next tick's probe does). The job is reconciled like any unknown launch; launch no more now.
+      if (error instanceof T3TransportError && error.code === 't3_timeout') return false;
       if (isHostFailure(error)) throw error;
-      return;
+      return true;
     }
     this.#inFlight.delete(job.id);
     await this.#attach(job.id, { threadId: launched.threadId, threadTitle: job.title, lastRunId: launched.runId }, 'launched');
+    return true;
   }
 
   /**
@@ -222,7 +255,7 @@ export class JobEngine {
    * the host answers: the launch did not happen, so the job fails with `launch_not_confirmed`.
    */
   async #reconcile(host: HostConfig): Promise<void> {
-    const { store, clock, config } = this.#options;
+    const { store, config } = this.#options;
     for (const job of store.onHost(host.id, ['dispatching'])) {
       if (this.#inFlight.has(job.id)) continue;
       store.transition(job.id, { from: ['dispatching'], to: 'unknown', detail: { reason: 'dispatch_interrupted' } });
@@ -231,24 +264,34 @@ export class JobEngine {
     // cancel_requested jobs without a thread were cancelled while launching or unconfirmed.
     for (const job of store.onHost(host.id, ['unknown', 'cancel_requested'])) {
       if (job.threadId !== null || job.t3ProjectId === null || this.#inFlight.has(job.id)) continue;
-      const found = await this.#findThread(job.hostId, job.t3ProjectId, job.id);
-      if (found) {
-        this.#unconfirmedSince.delete(job.id);
-        await this.#attach(job.id, { threadId: found.threadId, threadTitle: found.title, lastRunId: found.latestRunId }, 'reconciled');
-        continue;
+      try {
+        await this.#reconcileJob(job, job.t3ProjectId, windowMs);
+      } catch (error) {
+        // A lookup that failed is not a miss: the window neither starts nor advances.
+        this.#jobFailed(job, error, 'jobs.reconcile_failed');
       }
-      const since = this.#unconfirmedSince.get(job.id)?.since ?? clock();
-      this.#unconfirmedSince.set(job.id, { hostId: host.id, since });
-      if (clock() - since < windowMs) continue;
-      this.#unconfirmedSince.delete(job.id);
-      const changes = {
-        lastErrorCode: 'launch_not_confirmed',
-        lastErrorMessage: `No T3 thread titled with ${jobMarker(job.id)} appeared within ${config.watcher.reconcileWindowMinutes} minutes, so the launch did not happen. Start a new job if the work is still needed.`,
-      };
-      const detail = { reason: 'launch_not_confirmed', code: 'launch_not_confirmed' };
-      store.transition(job.id, { from: ['unknown'], to: 'failed', changes, detail });
-      store.transition(job.id, { from: ['cancel_requested'], to: 'cancelled', changes, detail });
     }
+  }
+
+  async #reconcileJob(job: Job, projectId: string, windowMs: number): Promise<void> {
+    const { store, clock, config } = this.#options;
+    const found = await this.#findThread(job.hostId, projectId, job.id);
+    if (found) {
+      this.#unconfirmedSince.delete(job.id);
+      await this.#attach(job.id, { threadId: found.threadId, threadTitle: found.title, lastRunId: found.latestRunId }, 'reconciled');
+      return;
+    }
+    const since = this.#unconfirmedSince.get(job.id)?.since ?? clock();
+    this.#unconfirmedSince.set(job.id, { hostId: job.hostId, since });
+    if (clock() - since < windowMs) return;
+    this.#unconfirmedSince.delete(job.id);
+    const changes = {
+      lastErrorCode: 'launch_not_confirmed',
+      lastErrorMessage: `No T3 thread titled with ${jobMarker(job.id)} appeared within ${config.watcher.reconcileWindowMinutes} minutes, so the launch did not happen. Start a new job if the work is still needed.`,
+    };
+    const detail = { reason: 'launch_not_confirmed', code: 'launch_not_confirmed' };
+    store.transition(job.id, { from: ['unknown'], to: 'failed', changes, detail });
+    store.transition(job.id, { from: ['cancel_requested'], to: 'cancelled', changes, detail });
   }
 
   /** The thread carrying the job's marker: by title in the project's thread list, then by search. */
@@ -272,7 +315,11 @@ export class JobEngine {
     for (const job of store.onHost(host.id, ['running', 'needs_input', 'cancel_requested', 'idle'])) {
       if (job.threadId === null) continue;
       if (job.state === 'idle' && clock() - (this.#lastPolled.get(job.id) ?? 0) < IDLE_POLL_MS) continue;
-      await this.#observeJob(job, job.threadId);
+      try {
+        await this.#observeJob(job, job.threadId);
+      } catch (error) {
+        this.#jobFailed(job, error, 'jobs.watch_failed');
+      }
       this.#lastPolled.set(job.id, clock());
     }
   }
@@ -287,7 +334,7 @@ export class JobEngine {
       questions = await client.listPendingRequests(threadId);
     } catch (error) {
       if (!(error instanceof T3ToolError)) throw error;
-      logger.warn('jobs.watch_failed', { jobId: job.id, hostId: job.hostId, t3Code: error.t3Code });
+      logger.warn('jobs.watch_failed', { jobId: job.id, hostId: job.hostId, errorCode: error.t3Code });
       if (/not_found/.test(error.t3Code)) {
         store.transition(job.id, {
           from: [job.state],
@@ -365,8 +412,9 @@ export class JobEngine {
     try {
       await deliverInterrupt(this.#options.store, registry.client(hostId), jobId, thread);
     } catch (error) {
-      if (!(error instanceof T3ToolError)) throw error;
-      this.#options.logger.warn('jobs.interrupt_failed', { jobId, hostId, t3Code: error.t3Code });
+      // Tried again on the next tick while the job is still cancel_requested and its thread active.
+      if (isHostFailure(error)) throw error;
+      this.#options.logger.warn('jobs.interrupt_failed', { jobId, hostId, errorCode: error instanceof T3ToolError ? error.t3Code : describeError(error).code });
     }
   }
 

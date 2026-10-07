@@ -166,6 +166,8 @@ export class FakeT3 {
   readonly dropResponseOnce = new Set<string>();
   /** Tools whose next call is answered with this bare HTTP status instead of running. */
   readonly statusOnce = new Map<string, number>();
+  /** Threads whose t3_thread_read answers in a shape that does not match T3's schema. */
+  readonly brokenReads = new Set<string>();
   /** When set, interrupts are accepted but take effect only on completeInterrupts(). */
   deferInterrupts = false;
   readonly threads = new Map<string, FakeThread>();
@@ -505,7 +507,7 @@ export class FakeT3 {
         }),
     );
     tool('t3_thread_launch', launchInput, (input) => this.#launch(input));
-    tool('t3_thread_read', readInput, (input) => this.#read(input));
+    tool('t3_thread_read', readInput, (input) => (this.brokenReads.has(input.threadId) ? { thread: { threadId: input.threadId } } : this.#read(input)));
     tool('t3_thread_list', listInput, (input) => {
       const projectId = this.#target(input.projectId);
       const matching = [...this.threads.values()]

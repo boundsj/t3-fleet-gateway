@@ -64,6 +64,7 @@ export interface JobHarnessOptions {
   watcher?: Record<string, unknown>;
   /** Run the engine on a timer instead of by hand. */
   intervalMs?: number;
+  launchTimeoutMs?: number;
 }
 
 /**
@@ -92,7 +93,10 @@ export async function startJobHarness(t: TestContext, options: JobHarnessOptions
     ...(options.dataDir ? { dataDir: options.dataDir } : {}),
     ...(options.door ? { door: options.door } : {}),
     ...(options.clock ? { clock: options.clock } : {}),
-    jobEngine: options.intervalMs ? { intervalMs: options.intervalMs } : { autoStart: false },
+    jobEngine: {
+      ...(options.intervalMs ? { intervalMs: options.intervalMs } : { autoStart: false }),
+      ...(options.launchTimeoutMs ? { launchTimeoutMs: options.launchTimeoutMs } : {}),
+    },
   });
   if (gw.services.registry.credentialStatus('main').state === 'missing') await gw.services.registry.enroll('main');
   const agent = await connectAgent(t, gw, 'operate');
