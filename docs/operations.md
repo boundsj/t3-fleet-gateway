@@ -128,8 +128,14 @@ Re-running the installer replaces the running agent. `launchctl bootout` returns
 git clone /path/to/your/working/checkout ~/.local/lib/t3-fleet-gateway   # or clone from your remote
 cd ~/.local/lib/t3-fleet-gateway && npm ci --omit=dev
 deploy/launchd/install.sh             # REPO_DIR defaults to this clone
-# later: git -C ~/.local/lib/t3-fleet-gateway pull --ff-only && deploy/launchd/install.sh
 ```
+
+To deploy a new version into that clone, in this order, so a migration never runs under a live service and any failure is printed rather than buried in the service log:
+
+1. Stop the service: `launchctl bootout gui/$(id -u)/local.t3-fleet-gateway` (wait until `launchctl print gui/$(id -u)/local.t3-fleet-gateway` no longer finds it).
+2. Back up `gateway.db` and `gateway.key` from the data directory (see "Backup and restore"; with the service stopped, `cp -p` is enough).
+3. Update the clone (`git -C ~/.local/lib/t3-fleet-gateway pull --ff-only`, then `npm ci --omit=dev` there) and run `node bin/t3-fleet-gateway.js doctor` from it: it opens the database, applies any new migration and prints a failure (`database_error` naming the migration; the database stays at the version before it). Do not go on until it passes.
+4. Run `deploy/launchd/install.sh` from the clone, which loads the service again.
 
 Run operator commands (`pair`, `jobs adopt`, `doctor`) from either checkout: they share the config and the data directory. A newer checkout may migrate the database on first use, and an older service then refuses to start against it (`database_error`: the schema is newer than the build), so update the service clone first.
 
