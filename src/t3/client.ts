@@ -185,8 +185,19 @@ export class T3Client {
     return this.callTool('t3_thread_launch', { ...input }, launchResultSchema, options);
   }
 
-  /** One page of a thread's state and timeline. `afterPosition` continues from a previous `nextPosition`. */
-  readThread(input: { threadId: string; afterPosition?: number | null; limit?: number; runLimit?: number; maxCharsPerItem?: number }): Promise<ThreadRead> {
+  /**
+   * One page of a thread's state and timeline. `afterPosition` continues from a previous `nextPosition`.
+   * Callers name the view: `messages` returns user and assistant messages and proposed plans only,
+   * `activity` every timeline item (delegated work, reasoning, tools, checkpoints); positions are shared.
+   */
+  readThread(input: {
+    threadId: string;
+    view: 'messages' | 'activity';
+    afterPosition?: number | null;
+    limit?: number;
+    runLimit?: number;
+    maxCharsPerItem?: number;
+  }): Promise<ThreadRead> {
     return this.callTool('t3_thread_read', withoutNulls(input), threadReadSchema, { readOnly: true });
   }
 

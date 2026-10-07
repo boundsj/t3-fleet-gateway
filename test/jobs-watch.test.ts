@@ -16,6 +16,7 @@ interface Status {
   hostUnreachableSince: string | null;
   pendingRequests: { requestId: string }[];
   waitingForApproval: boolean;
+  waitingOnDelegatedWork: boolean;
   lastError: { code: string; message: string } | null;
   recentEvents: { type: string; fromState: string | null; toState: string | null; reason: string | null }[];
 }
@@ -103,6 +104,25 @@ describe('watcher', () => {
     assert.equal(status.state, 'idle');
     assert.equal(status.latestMessageExcerpt, 'Synthetic second answer');
     assert.deepEqual(status.recentEvents.at(-1), { ...status.recentEvents.at(-1), type: 'turn_finished', fromState: 'idle', toState: 'idle' });
+  });
+
+  test('a launched worker that delegates waits on that work too (activity view), from the start of its thread', async (t) => {
+    const { fake, gw, agent, tick, tickAfter } = await startJobHarness(t);
+    const job = await startJob(agent);
+    await tick();
+    const { threadId } = fake.threadForJob(job.jobId);
+    fake.addActivity(threadId, 'reasoning', 3);
+    const { childThreadId } = fake.delegate(threadId, 'Synthetic subtask');
+    fake.finishTurn(threadId, 'Synthetic: handed the subtask off');
+    await tick();
+    const waiting = await agent.call<Status>('work_status', { jobId: job.jobId });
+    assert.deepEqual([waiting.state, waiting.waitingOnDelegatedWork, waiting.latestMessageExcerpt], ['idle', true, 'Synthetic: handed the subtask off']);
+    const stored = gw.services.jobs.store.require(job.jobId);
+    assert.deepEqual([stored.readPosition, stored.activityPosition], [6, 6]);
+    fake.finishDelegated(childThreadId, 'Synthetic subtask summary');
+    await tickAfter(2 * MINUTE);
+    const resumed = await agent.call<Status>('work_status', { jobId: job.jobId });
+    assert.deepEqual([resumed.state, resumed.waitingOnDelegatedWork, resumed.latestMessageExcerpt], ['running', false, 'Synthetic: handed the subtask off']);
   });
 
   test('concurrency: a host runs at most maxConcurrentJobs; the next queued job starts when a slot frees', async (t) => {

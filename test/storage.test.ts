@@ -113,14 +113,14 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 3);
+    assert.equal(SCHEMA_VERSION, 4);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
-      after.map(({ standing, delegated_work, ...rest }) => rest),
+      after.map(({ standing, delegated_work, activity_position, ...rest }) => rest),
       before,
       'every row and column is copied as it was',
     );
-    assert.deepEqual(after.map((row) => [row.standing, row.delegated_work]), [[0, '[]'], [0, '[]']]);
+    assert.deepEqual(after.map((row) => [row.standing, row.delegated_work, row.activity_position]), [[0, '[]', null], [0, '[]', null]]);
     assert.deepEqual(db.prepare('SELECT * FROM job_events ORDER BY id').all(), eventsBefore);
     assert.equal((db.prepare('SELECT COUNT(*) AS n FROM idempotency_keys').get() as { n: number }).n, 1);
     assert.equal(db.prepare('PRAGMA foreign_keys').get()?.foreign_keys, 1, 'foreign keys are enforced again');
@@ -182,6 +182,38 @@ CREATE TABLE jobs (
     assert.equal(new JobStore(db, () => 1_000, silentLogger).require('jobolder001').readPosition, 42);
     assert.equal((db.prepare('SELECT COUNT(*) AS n FROM job_events').get() as { n: number }).n, 1);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+    const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
+    t.after(() => fresh.close());
+    const schema = (target: typeof db) => target.prepare("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'jobs' ORDER BY name").all();
+    assert.deepEqual(schema(db), schema(fresh), 'the same schema as a new database');
+  });
+
+  test('migration 4 adds the activity position to a version 3 database, keeping its jobs', (t) => {
+    const path = join(openDataDir(join(tempDir(t), 'data')).databasePath);
+    const v3 = new DatabaseSync(path);
+    v3.exec('PRAGMA foreign_keys = ON');
+    migrate(v3, MIGRATIONS.slice(0, 3));
+    assert.equal(schemaVersion(v3), 3);
+    v3.prepare(
+      `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode, t3_thread_id,
+         read_position, created_at, updated_at, state_changed_at, standing, delegated_work)
+       VALUES ('jobstand001', 'operator', 'adopted', 'pilot', 'main', 'idle', '', 'Synthetic coordinator', '', '', 'thread-1', 12, 1, 2, 3, 1,
+         '[{"itemId":"item-4","position":4,"title":"Synthetic task"}]')`,
+    ).run();
+    v3.prepare("INSERT INTO job_events (job_id, type, to_state, created_at) VALUES ('jobstand001', 'created', 'idle', 1)").run();
+    const before = v3.prepare('SELECT * FROM jobs').all().map((row) => ({ ...row }));
+    v3.close();
+
+    const db = openDatabase(path);
+    t.after(() => db.close());
+    assert.equal(schemaVersion(db), 4);
+    const after = (db.prepare('SELECT * FROM jobs').all() as Record<string, unknown>[]).map(({ activity_position, ...rest }) => [activity_position, rest]);
+    assert.deepEqual(after, before.map((row) => [null, row]), 'existing jobs keep every column and have no activity position yet');
+    const store = new JobStore(db, () => 1_000, silentLogger);
+    const job = store.require('jobstand001');
+    assert.deepEqual([job.readPosition, job.activityPosition, job.delegatedWork.length], [12, null, 1]);
+    store.update(job.id, { activityPosition: 40 });
+    assert.equal(store.require(job.id).activityPosition, 40);
     const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
     t.after(() => fresh.close());
     const schema = (target: typeof db) => target.prepare("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'jobs' ORDER BY name").all();
@@ -293,10 +325,13 @@ describe('job store', () => {
     const standing = {
       projectAlias: 'pilot', hostId: 'main', t3ProjectId: 'project-1', state: 'idle' as const, title: 'Synthetic coordinator', branch: '', runtimeMode: '',
       threadId: 'thread-1', threadTitle: 'Synthetic coordinator', threadLink: null, lastRunId: null, pendingRequestIds: [], latestMessageExcerpt: null,
-      latestActivityAt: null, readPosition: 3, lastErrorCode: null, lastErrorMessage: null, delegatedWork: [],
+      latestActivityAt: null, readPosition: 3, activityPosition: 9, lastErrorCode: null, lastErrorMessage: null, delegatedWork: [],
     };
     const first = store.adopt({ id: 'job1', ...standing });
-    assert.deepEqual([first.created, first.job.standing, first.job.clientId, first.job.readPosition], [true, true, 'operator', 3]);
+    assert.deepEqual(
+      [first.created, first.job.standing, first.job.clientId, first.job.readPosition, first.job.activityPosition],
+      [true, true, 'operator', 3, 9],
+    );
     assert.deepEqual(store.adopt({ id: 'job2', ...standing }), { job: first.job, created: false });
     assert.throws(() => store.adopt({ id: 'job3', ...standing, projectAlias: 'other' }), { code: 'job_state_conflict', message: /standing job job1 in project "pilot"/ });
     assert.deepEqual(store.recentEvents('job1', 5).map((event) => [event.type, event.fromState, event.toState, event.detail.reason]), [['created', null, 'idle', 'adopted']]);

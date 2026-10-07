@@ -8,7 +8,8 @@ import { T3TransportError, type T3Client } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
 import type { ThreadItem, ThreadRead } from '../t3/schemas.ts';
 import { HOUR, SECOND, type Clock } from '../time.ts';
-import { EXCERPT_CHARS, holdsReadPosition, isActiveStatus, isDelegatedWorkActive, observe, threadLinkTarget } from './derive.ts';
+import { scanActivity } from './activity.ts';
+import { EXCERPT_CHARS, holdsReadPosition, isActiveStatus, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { newJobId } from './ids.ts';
 import { cancelRequestId } from './interrupt.ts';
 import { isTerminal, OPEN_STATES, type JobState } from './states.ts';
@@ -27,7 +28,7 @@ export const MAX_TITLE_CHARS = 80;
 export const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 const TITLE_FROM_TASK_CHARS = 60;
-/** Pages of 100 timeline items read to find the end of a thread being adopted. */
+/** Pages of 100 messages read to find the end of a thread being adopted (messages view). */
 const MAX_ADOPT_PAGES = 1000;
 
 export interface Caller {
@@ -252,9 +253,11 @@ export class JobService {
 
   /**
    * Adopt an existing T3 thread as a standing job (operator CLI only). The thread must belong to the
-   * project's T3 project. Its state comes from a read now, and the read position starts at the
-   * thread's current end, so the watcher follows only what happens from now on. Adopting a thread
-   * that is already a standing job of the project returns that job (`created: false`).
+   * project's T3 project. Its state comes from a read now, and both read positions (messages and
+   * activity view) start at the thread's current end, so the watcher follows only what happens from now
+   * on; delegated work still running is found by a bounded scan back through the activity view
+   * (scanActivity). Adopting a thread that is already a standing job of the project returns that job
+   * (`created: false`).
    */
   async adopt(input: AdoptInput): Promise<{ job: Job; created: boolean }> {
     const project = this.project(input.project);
@@ -264,9 +267,11 @@ export class JobService {
     const projectId = await resolveProjectId(this.#registry, project);
     let read: ThreadRead;
     let questions: string[];
+    let activity: ActivityRead;
     try {
       read = await readToEnd(client, input.threadId);
       questions = await client.listPendingRequests(input.threadId);
+      activity = await scanActivity(client, input.threadId, read.items.at(-1)?.position ?? read.nextPosition);
     } catch (error) {
       if (error instanceof T3ToolError && /not_found/.test(error.t3Code)) {
         throw new GatewayError('not_found', `Host ${project.host} has no T3 thread ${input.threadId} (${error.t3Code}).`);
@@ -282,9 +287,10 @@ export class JobService {
     }
     const lastRunId = thread.activeRunId ?? thread.latestRunId;
     const seen = observe(
-      { state: 'idle', lastRunId, readPosition: null, threadLink: null, latestActivityAt: null, standing: true, delegatedWork: [] },
+      { state: 'idle', lastRunId, readPosition: null, activityPosition: null, threadLink: null, latestActivityAt: null, standing: true, delegatedWork: [] },
       read,
       questions,
+      activity,
     );
     const runtimeMode = (thread as { runtimeMode?: unknown }).runtimeMode;
     return this.store.adopt({
@@ -304,6 +310,7 @@ export class JobService {
       latestMessageExcerpt: seen.excerpt ?? null,
       latestActivityAt: seen.activityAt,
       readPosition: seen.readPosition,
+      activityPosition: seen.activityPosition,
       lastErrorCode: seen.errorCode ?? null,
       lastErrorMessage: seen.errorCode ? 'The latest T3 run failed. Open the thread in T3 for details.' : null,
       delegatedWork: seen.delegatedWork,
@@ -439,7 +446,7 @@ export class JobService {
     try {
       const client = this.#registry.client(job.hostId);
       // The interrupt's retry key names the run it stops, so learn which run is active first.
-      const { thread } = await client.readThread({ threadId: job.threadId, limit: 1, runLimit: 1, maxCharsPerItem: 1 });
+      const { thread } = await client.readThread({ threadId: job.threadId, view: 'messages', limit: 1, runLimit: 1, maxCharsPerItem: 1 });
       const result = await client.interruptThread({
         threadId: job.threadId,
         clientRequestId: cancelRequestId(job.id, thread.activeRunId ?? thread.latestRunId),
@@ -477,7 +484,7 @@ export class JobService {
     const client = this.#registry.client(job.hostId);
     let status: string;
     try {
-      const { thread } = await client.readThread({ threadId: job.threadId, limit: 1, runLimit: 1, maxCharsPerItem: 1 });
+      const { thread } = await client.readThread({ threadId: job.threadId, view: 'messages', limit: 1, runLimit: 1, maxCharsPerItem: 1 });
       if (thread.activeRunId === null && !isActiveStatus(thread.status)) {
         // T3 may keep a question listed after its turn was interrupted; only an answer clears it.
         const pendingQuestionIds = await client.listPendingRequests(job.threadId);
@@ -519,23 +526,20 @@ export class JobService {
 }
 
 /**
- * Read a thread to the end of its timeline, for adoption: the last page (or everything from the first
- * message that may still change, so a message being streamed is read again once settled) with the
- * thread's state, plus any earlier delegated work that is still running. Bounded by MAX_ADOPT_PAGES;
- * a longer thread is caught up by the watcher.
+ * Read a thread to the end of its messages view, for adoption: the last page (or everything from the
+ * first message that may still change, so a message being streamed is read again once settled) with the
+ * thread's state. Bounded by MAX_ADOPT_PAGES; a longer thread is caught up by the watcher.
  */
 async function readToEnd(client: T3Client, threadId: string): Promise<ThreadRead> {
   let afterPosition: number | null = null;
   let read: ThreadRead | undefined;
   let kept: ThreadItem[] = [];
-  const delegated: ThreadItem[] = [];
   for (let page = 0; page < MAX_ADOPT_PAGES; page++) {
-    read = await client.readThread({ threadId, afterPosition, limit: 100, runLimit: 5, maxCharsPerItem: EXCERPT_CHARS });
-    if (!kept.some(holdsReadPosition)) delegated.push(...kept.filter(isDelegatedWorkActive));
+    read = await client.readThread({ threadId, view: 'messages', afterPosition, limit: 100, runLimit: 5, maxCharsPerItem: EXCERPT_CHARS });
     kept = kept.some(holdsReadPosition) ? [...kept, ...read.items] : read.items;
     if (!read.hasMore || read.nextPosition === null || read.nextPosition === afterPosition) break;
     afterPosition = read.nextPosition;
   }
   if (!read) throw new GatewayError('internal_error', 'No thread read');
-  return { ...read, items: [...delegated, ...kept], nextPosition: read.nextPosition ?? afterPosition };
+  return { ...read, items: kept, nextPosition: read.nextPosition ?? afterPosition };
 }

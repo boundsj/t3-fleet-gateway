@@ -88,7 +88,7 @@ describe('standing jobs: adopt', () => {
     const { fake, gw, agent, tick } = harness;
     const threadId = coordinatorThread(fake);
     const { job } = await adopt(harness, threadId);
-    assert.equal(job.readPosition, 3, 'the last item when adopted');
+    assert.deepEqual([job.readPosition, job.activityPosition], [3, 3], 'the last item when adopted, in both views');
     assert.equal(job.lastRunId, fake.threads.get(threadId)?.runs.at(-1)?.runId);
 
     const adopted = await status(agent, job.id);
@@ -252,34 +252,33 @@ describe('standing jobs: driving them', () => {
     assert.equal((await status(agent, job.id)).lastError, null);
   });
 
-  test('follows a long turn whose timeline grows past what one tick reads', async (t) => {
+  test('follows a long turn whose activity grows past what one tick reads', async (t) => {
     const harness = await startJobHarness(t);
     const { fake, gw, agent, tick } = harness;
     const threadId = coordinatorThread(fake);
     const { job } = await adopt(harness, threadId);
     await agent.call('work_continue', { jobId: job.id, message: 'Synthetic: a long investigation', requestId: 'cos-long' });
-    // The timeline grows past what one tick reads (5 pages of 100), and another thread in the project finishes meanwhile.
-    const child = fake.launchDirect({ projectId: 'project-1', title: 'Synthetic delegated child', message: 'Synthetic child task' });
+    // The activity grows past what one tick reads (10 pages of 100), with delegated work at its end, and
+    // another thread in the project finishes meanwhile.
+    const child = fake.launchDirect({ projectId: 'project-1', title: 'Synthetic other thread', message: 'Synthetic other task' });
+    fake.addActivity(threadId, 'command_execution', 1200);
+    fake.delegate(threadId, 'Synthetic late task');
     const thread = fake.threads.get(threadId);
     assert.ok(thread);
-    const template = thread.items[0];
-    assert.ok(template);
-    for (let i = 0; i < 620; i++) {
-      thread.items.push({ ...template, position: thread.items.length, itemId: `extra-${i}`, type: 'command_execution', creationSource: 'provider' });
-    }
-    for (let i = 0; i < 3; i++) {
-      await tick();
-      assert.equal(await jobState(agent, job.id), 'running');
-    }
-    assert.equal(gw.services.jobs.store.require(job.id).readPosition, thread.items.length - 1, 'caught up over several ticks');
-    fake.finishTurn(child.threadId, 'Synthetic child done');
+    await tick();
+    const first = gw.services.jobs.store.require(job.id);
+    assert.deepEqual([first.state, first.readPosition, first.activityPosition], ['running', 4, 1003], 'messages at once; activity 1000 items on');
+    await tick();
+    const caughtUp = gw.services.jobs.store.require(job.id);
+    assert.deepEqual([caughtUp.activityPosition, caughtUp.delegatedWork.map((task) => task.title)], [thread.items.length - 1, ['Synthetic late task']]);
+    fake.finishTurn(child.threadId, 'Synthetic other thread done');
     await tick();
     assert.equal(await jobState(agent, job.id), 'running', "another thread's finish is not the coordinator's");
-    fake.finishTurn(threadId, 'Synthetic: the refactor is merged');
+    fake.finishTurn(threadId, 'Synthetic: delegated the last step');
     await tick();
     const done = await status(agent, job.id);
-    assert.deepEqual([done.state, done.latestMessageExcerpt], ['idle', 'Synthetic: the refactor is merged']);
-    assert.equal(gw.services.jobs.store.openJobForThread(child.threadId), undefined, 'child threads are not jobs');
+    assert.deepEqual([done.state, done.waitingOnDelegatedWork, done.latestMessageExcerpt], ['idle', true, 'Synthetic: delegated the last step']);
+    assert.equal(gw.services.jobs.store.openJobForThread(child.threadId), undefined, 'other threads are not jobs');
   });
 });
 
@@ -386,15 +385,112 @@ describe('standing jobs: a coordinator that delegates', () => {
       fake.userTurn(threadId, `Synthetic question ${i}`);
       fake.finishTurn(threadId, `Synthetic answer ${i}`);
     }
+    const before = fake.reads.length;
     const { job } = await adopt(harness, threadId);
     assert.deepEqual([job.state, job.delegatedWork.map((task) => task.title)], ['idle', ['Synthetic migration task']], 'found on an earlier page');
     assert.equal(job.latestMessageExcerpt, 'Synthetic answer 149');
+    const end = (fake.threads.get(threadId)?.items.length ?? 0) - 1;
+    assert.deepEqual([job.readPosition, job.activityPosition], [end, end], 'both views start at the end');
+    assert.deepEqual(
+      fake.reads.slice(before).filter((read) => read.view === 'activity').map((read) => read.afterPosition ?? null),
+      [end, end - 100, end - 200, end - 300, null],
+      'the activity tail after the last message, then back 100 positions per read',
+    );
 
     fake.finishDelegated(childThreadId, 'Synthetic migration summary');
     gw.clock.advance(2 * MINUTE);
     await tick();
     const resumed = await status(agent, job.id);
     assert.deepEqual([resumed.state, resumed.waitingOnDelegatedWork], ['running', false]);
+  });
+});
+
+describe('standing jobs: delegated work in the activity view', () => {
+  // T3's messages view never returns subagent items: they are in the activity view only, which a busy
+  // coordinator fills with reasoning and tool calls.
+  test('a busy coordinator: 600 activity items in one turn delay neither its reply nor its delegated work', async (t) => {
+    const harness = await startJobHarness(t);
+    const { fake, gw, agent, tick } = harness;
+    const threadId = coordinatorThread(fake);
+    const { job } = await adopt(harness, threadId);
+    await agent.call('work_continue', { jobId: job.id, message: 'Synthetic: get the release out', requestId: 'cos-busy' });
+    fake.addActivity(threadId, 'reasoning', 300);
+    fake.addActivity(threadId, 'dynamic_tool', 300);
+    const { childThreadId, item } = fake.delegate(threadId, 'Synthetic release task');
+    fake.addActivity(threadId, 'command_execution', 5);
+    fake.finishTurn(threadId, 'Synthetic: delegated the release; waiting for it');
+    const thread = fake.threads.get(threadId);
+    assert.ok(thread);
+    const end = thread.items.length - 1;
+
+    let before = fake.reads.length;
+    await tick();
+    const waiting = await status(agent, job.id);
+    assert.deepEqual(
+      [waiting.state, waiting.waitingOnDelegatedWork, waiting.delegatedTasks, waiting.latestMessageExcerpt],
+      ['idle', true, ['Synthetic release task'], 'Synthetic: delegated the release; waiting for it'],
+    );
+    const stored = gw.services.jobs.store.require(job.id);
+    assert.deepEqual([stored.readPosition, stored.activityPosition], [end, end]);
+    const pattern = () => fake.reads.slice(before).map((read) => [read.view, read.afterPosition ?? null, read.limit, read.maxCharsPerItem]);
+    assert.deepEqual(
+      pattern(),
+      [
+        ['messages', 3, 100, 2000],
+        ...[3, 103, 203, 303, 403, 503, 603].map((after) => ['activity', after, 100, 1]),
+      ],
+      'one messages read for the reply; the activity in pages of 100 items of one character',
+    );
+
+    // A quiet check: one read of each view, and the followed item re-read by position.
+    gw.clock.advance(2 * MINUTE);
+    before = fake.reads.length;
+    await tick();
+    assert.deepEqual(pattern(), [
+      ['messages', end, 100, 2000],
+      ['activity', end, 100, 1],
+      ['activity', item.position - 1, 100, 1],
+    ]);
+    assert.equal((await status(agent, job.id)).waitingOnDelegatedWork, true);
+
+    fake.finishDelegated(childThreadId, 'Synthetic release summary');
+    gw.clock.advance(2 * MINUTE);
+    await tick();
+    const resumed = await status(agent, job.id);
+    assert.deepEqual(
+      [resumed.state, resumed.waitingOnDelegatedWork, resumed.delegatedTasks, resumed.latestMessageExcerpt],
+      ['running', false, [], 'Synthetic: delegated the release; waiting for it'],
+      'neither the task prompt nor the summary is the excerpt',
+    );
+    fake.finishTurn(threadId, 'Synthetic: the release is out');
+    await tick();
+    const done = await status(agent, job.id);
+    assert.deepEqual([done.state, done.latestMessageExcerpt], ['idle', 'Synthetic: the release is out']);
+    assertNotLogged(gw, ['Synthetic release task', 'Synthetic delegated task prompt', 'Synthetic release summary']);
+  });
+
+  test('a standing job adopted before the activity position existed is scanned on its first check', async (t) => {
+    const harness = await startJobHarness(t);
+    const { fake, gw, agent, tick } = harness;
+    const threadId = coordinatorThread(fake);
+    fake.userTurn(threadId, 'Synthetic: start the audit');
+    fake.addActivity(threadId, 'reasoning', 40);
+    fake.delegate(threadId, 'Synthetic audit task');
+    fake.finishTurn(threadId, 'Synthetic: delegated the audit');
+    for (let i = 0; i < 20; i++) {
+      fake.userTurn(threadId, `Synthetic question ${i}`);
+      fake.addActivity(threadId, 'reasoning', 3);
+      fake.finishTurn(threadId, `Synthetic answer ${i}`);
+    }
+    const { job } = await adopt(harness, threadId);
+    // As a job adopted by an earlier build looks after migration 4: no activity position, nothing followed.
+    gw.services.jobs.store.update(job.id, { activityPosition: null, delegatedWork: [] });
+    gw.clock.advance(2 * MINUTE);
+    await tick();
+    const scanned = gw.services.jobs.store.require(job.id);
+    const end = (fake.threads.get(threadId)?.items.length ?? 0) - 1;
+    assert.deepEqual([scanned.activityPosition, scanned.delegatedWork.map((task) => task.title)], [end, ['Synthetic audit task']]);
+    assert.equal((await status(agent, job.id)).waitingOnDelegatedWork, true);
   });
 });
 

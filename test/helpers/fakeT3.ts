@@ -74,6 +74,8 @@ export const FAKE_ENVIRONMENT_ID = 'env-synthetic';
 const RUN_STATUSES = ['preparing', 'queued', 'starting', 'running', 'waiting', 'completed', 'interrupted', 'failed', 'cancelled', 'rolled_back'] as const;
 const THREAD_STATUSES = ['idle', ...RUN_STATUSES] as const;
 const ACTIVE = new Set(['preparing', 'queued', 'starting', 'running', 'waiting']);
+/** Item types t3_thread_read's messages view returns; the activity view returns every item. */
+const MESSAGE_VIEW_TYPES = new Set(['user_message', 'assistant_message', 'proposed_plan']);
 const nullable = <T extends z.ZodType>(schema: T) => schema.nullable().optional();
 
 /** Input schemas copied field-for-field from T3's tools, strict so a misspelled field fails the test. */
@@ -159,6 +161,8 @@ export class FakeT3 {
   /** Tool name to a T3 failure returned after the call has taken effect (for example a launch that created the thread). */
   readonly failuresAfterEffect = new Map<string, { code: string; message: string }>();
   readonly calls: string[] = [];
+  /** Every t3_thread_read input, in order (view, positions and sizes), for tests of the read pattern. */
+  readonly reads: z.output<typeof readInput>[] = [];
   readonly validTokens = new Set<string>();
   readonly issuedTokens: string[] = [];
   readonly registeredClientNames: string[] = [];
@@ -315,15 +319,32 @@ export class FakeT3 {
   }
 
   /**
+   * Activity the worker produces between messages (reasoning, tool calls, commands, checkpoints): items
+   * only the activity view returns. Adds `count` items of `type`, created by the provider.
+   */
+  addActivity(threadId: string, type: string, count = 1, status = 'completed'): FakeItem[] {
+    const thread = this.#thread(threadId);
+    const runId = this.#activeRun(thread)?.runId ?? null;
+    return Array.from({ length: count }, (_, index) =>
+      this.#addItem(thread, { runId, createdBy: 'agent', creationSource: 'provider', type, status, text: `Synthetic ${type} ${index}` }),
+    );
+  }
+
+  /**
    * The worker delegates a task to a child thread, as a T3 coordinator does (observed live): the parent's
-   * timeline gets one `subagent` item with no creator, titled with the child's task, whose text stays
-   * empty until the child is done; the child's own messages never appear in the parent. `itemStatus` is
-   * the item's status while the child works. The parent's run then ends with its own turn (finishTurn).
+   * timeline gets the delegate tool call and then one `subagent` item with no creator, titled with the
+   * child's task, whose text is the child's task prompt while it works (its summary once done); the
+   * child's own messages never appear in the parent. Both are activity items: the messages view does not
+   * return them. `itemStatus` is the item's status while the child works. The parent's run then ends
+   * with its own turn (finishTurn).
    */
   delegate(threadId: string, title: string, itemStatus = 'running'): { childThreadId: string; item: FakeItem } {
     const thread = this.#thread(threadId);
-    const { threadId: childThreadId } = this.launchDirect({ projectId: thread.projectId, title, message: `Synthetic delegated task: ${title}` });
-    const item = this.#addItem(thread, { runId: this.#activeRun(thread)?.runId ?? null, createdBy: null, creationSource: null, type: 'subagent', status: itemStatus, text: '', title });
+    const prompt = `Synthetic delegated task prompt: ${title}`;
+    const { threadId: childThreadId } = this.launchDirect({ projectId: thread.projectId, title, message: prompt });
+    const runId = this.#activeRun(thread)?.runId ?? null;
+    this.#addItem(thread, { runId, createdBy: 'agent', creationSource: 'provider', type: 'dynamic_tool', text: 'Synthetic delegate call' });
+    const item = this.#addItem(thread, { runId, createdBy: null, creationSource: null, type: 'subagent', status: itemStatus, text: prompt, title });
     this.#delegations.set(childThreadId, { parentThreadId: threadId, position: item.position });
     return { childThreadId, item };
   }
@@ -572,6 +593,7 @@ export class FakeT3 {
     );
     tool('t3_thread_launch', launchInput, (input) => this.#launch(input));
     tool('t3_thread_read', readInput, (input) => {
+      this.reads.push(input);
       const failure = this.readFailures.get(input.threadId);
       if (failure) throw new FakeFailure(failure.code, failure.message);
       return this.brokenReads.has(input.threadId) ? { thread: { threadId: input.threadId } } : this.#read(input);
@@ -821,11 +843,17 @@ export class FakeT3 {
     };
   }
 
+  /**
+   * T3's two views over the same positions: `messages` (the default) returns only user messages,
+   * assistant messages and proposed plans, skipping everything else; `activity` returns every item.
+   * `nextPosition` is the last returned item's position either way.
+   */
   #read(input: z.output<typeof readInput>): Record<string, unknown> {
     const thread = this.#thread(input.threadId);
     const after = input.afterPosition ?? -1;
     const limit = input.limit ?? 50;
-    const remaining = thread.items.filter((item) => item.position > after);
+    const inView = (input.view ?? 'messages') === 'activity' ? () => true : (item: FakeItem) => MESSAGE_VIEW_TYPES.has(item.type);
+    const remaining = thread.items.filter((item) => item.position > after && inView(item));
     const page = remaining.slice(0, limit);
     const maxChars = input.maxCharsPerItem ?? 4000;
     const active = this.#activeRun(thread);

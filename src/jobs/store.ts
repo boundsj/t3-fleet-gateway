@@ -25,8 +25,13 @@ export interface Job {
   pendingRequestIds: string[];
   latestMessageExcerpt: string | null;
   latestActivityAt: number | null;
-  /** The `afterPosition` for the next incremental `t3_thread_read`; null reads from the start. */
+  /** The `afterPosition` for the next incremental `t3_thread_read` of the messages view; null reads from the start. */
   readPosition: number | null;
+  /**
+   * The `afterPosition` for the next incremental read of the activity view, where delegated work shows
+   * (see activity.ts). Null reads from the start, except on a standing job, which is scanned as at adoption.
+   */
+  activityPosition: number | null;
   hostUnreachableSince: number | null;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
@@ -82,6 +87,7 @@ export type JobChanges = Partial<
     | 'latestMessageExcerpt'
     | 'latestActivityAt'
     | 'readPosition'
+    | 'activityPosition'
     | 'hostUnreachableSince'
     | 'lastErrorCode'
     | 'lastErrorMessage'
@@ -100,6 +106,7 @@ const COLUMNS: Record<keyof JobChanges, string> = {
   latestMessageExcerpt: 'latest_message_excerpt',
   latestActivityAt: 'latest_activity_at',
   readPosition: 'read_position',
+  activityPosition: 'activity_position',
   hostUnreachableSince: 'host_unreachable_since',
   lastErrorCode: 'last_error_code',
   lastErrorMessage: 'last_error_message',
@@ -127,6 +134,7 @@ interface JobRow {
   latest_message_excerpt: string | null;
   latest_activity_at: number | null;
   read_position: number | null;
+  activity_position: number | null;
   host_unreachable_since: number | null;
   last_error_code: string | null;
   last_error_message: string | null;
@@ -195,6 +203,7 @@ function toJob(row: JobRow): Job {
     latestMessageExcerpt: row.latest_message_excerpt,
     latestActivityAt: row.latest_activity_at,
     readPosition: row.read_position,
+    activityPosition: row.activity_position,
     hostUnreachableSince: row.host_unreachable_since,
     lastErrorCode: row.last_error_code,
     lastErrorMessage: row.last_error_message,
@@ -272,6 +281,7 @@ export interface NewStandingJob {
   latestMessageExcerpt: string | null;
   latestActivityAt: number | null;
   readPosition: number | null;
+  activityPosition: number | null;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
   delegatedWork: DelegatedTask[];
@@ -437,8 +447,9 @@ export class JobStore {
         .prepare(
           `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, t3_project_id, state, task, title, branch, runtime_mode,
              t3_thread_id, t3_thread_title, t3_thread_link, last_run_id, pending_request_ids, latest_message_excerpt, latest_activity_at,
-             read_position, last_error_code, last_error_message, created_at, updated_at, state_changed_at, finished_at, standing, delegated_work)
-           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+             read_position, last_error_code, last_error_message, created_at, updated_at, state_changed_at, finished_at, standing, delegated_work,
+             activity_position)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
         )
         .run(
           job.id,
@@ -466,6 +477,7 @@ export class JobStore {
           now,
           isTerminal(job.state) ? now : null,
           JSON.stringify(job.delegatedWork),
+          job.activityPosition,
         );
       this.#insertEvent(job.id, 'created', null, job.state, { reason: 'adopted' }, now);
       this.#logger.info('job.adopted', { jobId: job.id, project: job.projectAlias, hostId: job.hostId, state: job.state });

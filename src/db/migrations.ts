@@ -202,6 +202,14 @@ CREATE TABLE idempotency_keys (
     // JSON array of { itemId, position, title }.
     sql: `ALTER TABLE jobs ADD COLUMN delegated_work TEXT NOT NULL DEFAULT '[]';`,
   },
+  {
+    version: 4,
+    name: 'activity position',
+    // The read position in a thread's activity view (every timeline item), separate from read_position
+    // in the messages view: delegated work shows only in the activity view. NULL reads from the start,
+    // except on a standing job, which the watcher then scans as at adoption (jobs adopted before this).
+    sql: `ALTER TABLE jobs ADD COLUMN activity_position INTEGER;`,
+  },
 ];
 
 const JOBS_V2_TABLE = `

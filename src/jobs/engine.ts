@@ -5,9 +5,10 @@ import { resolveProjectId } from '../hosts/projects.ts';
 import type { Logger } from '../log.ts';
 import { T3TransportError } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
-import type { LaunchResult, ThreadItem, ThreadRead } from '../t3/schemas.ts';
+import type { LaunchResult, ThreadRead } from '../t3/schemas.ts';
 import { MINUTE, SECOND, type Clock } from '../time.ts';
-import { EXCERPT_CHARS, isActiveStatus, observe, threadLinkTarget } from './derive.ts';
+import { readActivity, refreshDelegated, scanActivity } from './activity.ts';
+import { EXCERPT_CHARS, isActiveStatus, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { deliverInterrupt } from './interrupt.ts';
 import { jobMarker } from './service.ts';
 import type { Job, JobChanges, JobStore } from './store.ts';
@@ -17,7 +18,7 @@ const LAUNCH_TIMEOUT_MS = 60 * SECOND;
 const MAX_BACKOFF_MS = 5 * MINUTE;
 /** Idle jobs are only checked for activity started from T3 itself, so less often. */
 const IDLE_POLL_MS = MINUTE;
-/** Pages of new timeline items read per job per tick. */
+/** Pages of new messages-view items read per job per tick (activity view: see activity.ts). */
 const MAX_READ_PAGES = 5;
 const READ_PAGE_SIZE = 100;
 const RECENT_RUNS = 5;
@@ -381,7 +382,7 @@ export class JobEngine {
     for (const threadId of new Set(searched.matches.map((match) => match.threadId))) {
       let thread: ThreadRead['thread'];
       try {
-        ({ thread } = await client.readThread({ threadId, limit: 1, runLimit: 1 }));
+        ({ thread } = await client.readThread({ threadId, view: 'messages', limit: 1, runLimit: 1, maxCharsPerItem: 1 }));
       } catch (error) {
         if (error instanceof T3ToolError) continue;
         throw error;
@@ -412,11 +413,13 @@ export class JobEngine {
     const client = registry.client(job.hostId);
     let read: ThreadRead;
     let questions: string[];
-    let refreshed: Map<string, ThreadItem | null>;
+    let activity: ActivityRead;
     try {
+      // Messages first: a subagent item comes before the reply that mentions it, so the activity read
+      // after it sees the delegated work behind any finished turn the messages read saw.
       read = await this.#readNew(job, threadId);
       questions = await client.listPendingRequests(threadId);
-      refreshed = await this.#readDelegated(job, threadId, read.items);
+      activity = await this.#readActivity(job, threadId);
     } catch (error) {
       if (!(error instanceof T3ToolError)) throw error;
       logger.warn('jobs.watch_failed', { jobId: job.id, hostId: job.hostId, errorCode: error.t3Code });
@@ -432,11 +435,12 @@ export class JobEngine {
       }
       return;
     }
-    const seen = observe(job, read, questions, refreshed);
+    const seen = observe(job, read, questions, activity);
     const changes: JobChanges = {
       pendingRequestIds: seen.pendingRequestIds,
       delegatedWork: seen.delegatedWork,
       readPosition: seen.readPosition,
+      activityPosition: seen.activityPosition,
       latestActivityAt: seen.activityAt,
       lastRunId: seen.lastRunId,
       ...(seen.excerpt === undefined ? {} : { latestMessageExcerpt: seen.excerpt }),
@@ -468,14 +472,21 @@ export class JobEngine {
     });
   }
 
-  /** Read the thread's state and every timeline item after the job's read position (bounded). */
+  /** Read the thread's state and every message after the job's read position (messages view, bounded). */
   async #readNew(job: Job, threadId: string): Promise<ThreadRead> {
     const client = this.#options.registry.client(job.hostId);
     let afterPosition = job.readPosition;
     let read: ThreadRead | undefined;
     const items: ThreadRead['items'] = [];
     for (let page = 0; page < MAX_READ_PAGES; page++) {
-      read = await client.readThread({ threadId, afterPosition, limit: READ_PAGE_SIZE, runLimit: RECENT_RUNS, maxCharsPerItem: EXCERPT_CHARS });
+      read = await client.readThread({
+        threadId,
+        view: 'messages',
+        afterPosition,
+        limit: READ_PAGE_SIZE,
+        runLimit: RECENT_RUNS,
+        maxCharsPerItem: EXCERPT_CHARS,
+      });
       items.push(...read.items);
       if (!read.hasMore || read.nextPosition === null) break;
       afterPosition = read.nextPosition;
@@ -485,31 +496,18 @@ export class JobEngine {
   }
 
   /**
-   * The current version of each delegated task the job follows that this tick's read did not return
-   * (the read position has moved past it), or null when T3 no longer has it. Read from the earliest
-   * such item on, so tasks near each other cost one read; at most MAX_READ_PAGES reads.
+   * The activity view after the job's activity position, for delegated work, and the current version of
+   * the tasks the job follows that it did not return. Every watched job reads it, launched ones too: a
+   * worker the gateway launched can delegate as well. A standing job without an activity position
+   * (adopted before the gateway kept one) is scanned as at adoption, from its read position.
    */
-  async #readDelegated(job: Job, threadId: string, read: readonly ThreadItem[]): Promise<Map<string, ThreadItem | null>> {
-    const found = new Map<string, ThreadItem | null>();
-    const seen = new Set(read.map((item) => item.itemId));
-    let wanted = job.delegatedWork.filter((task) => !seen.has(task.itemId)).sort((a, b) => a.position - b.position);
+  async #readActivity(job: Job, threadId: string): Promise<ActivityRead> {
     const client = this.#options.registry.client(job.hostId);
-    for (let page = 0; page < MAX_READ_PAGES && wanted[0] !== undefined; page++) {
-      const first = wanted[0];
-      const result = await client.readThread({
-        threadId,
-        afterPosition: first.position > 0 ? first.position - 1 : null,
-        limit: READ_PAGE_SIZE,
-        runLimit: 1,
-        maxCharsPerItem: 1,
-      });
-      for (const item of result.items) if (wanted.some((task) => task.itemId === item.itemId)) found.set(item.itemId, item);
-      // A task the page covered without returning its item is gone. The page always covers the first.
-      const last = result.items.at(-1)?.position ?? first.position;
-      for (const task of wanted) if (!found.has(task.itemId) && (task.position <= last || !result.hasMore)) found.set(task.itemId, null);
-      wanted = wanted.filter((task) => !found.has(task.itemId));
-    }
-    return found;
+    const activity =
+      job.standing && job.activityPosition === null
+        ? await scanActivity(client, threadId, job.readPosition)
+        : await readActivity(client, threadId, job.activityPosition);
+    return { ...activity, refreshed: await refreshDelegated(client, threadId, job.delegatedWork, activity.items) };
   }
 
   /**

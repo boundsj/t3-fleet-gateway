@@ -154,16 +154,21 @@ describe('T3 thread tools', () => {
     assert.equal(launched.status, 'running');
     assert.deepEqual(fake.launches[0]?.workspaceStrategy, LAUNCH.workspaceStrategy);
 
-    const first = await client.readThread({ threadId: launched.threadId, limit: 100, maxCharsPerItem: 10 });
+    const first = await client.readThread({ threadId: launched.threadId, view: 'messages', limit: 100, maxCharsPerItem: 10 });
     assert.equal(first.thread.status, 'running');
     assert.equal(first.thread.activeRunId, launched.runId);
     assert.equal(first.items.length, 1);
     assert.equal(first.items[0]?.text, 'Synthetic ');
     assert.equal(first.items[0]?.textTruncated, true);
+    fake.addActivity(launched.threadId, 'reasoning', 2);
     fake.finishTurn(launched.threadId, 'All done.');
-    const next = await client.readThread({ threadId: launched.threadId, afterPosition: first.nextPosition });
-    assert.deepEqual(next.items.map((item) => item.text), ['All done.'], 'only items after the position');
+    const next = await client.readThread({ threadId: launched.threadId, view: 'messages', afterPosition: first.nextPosition });
+    assert.deepEqual(next.items.map((item) => item.text), ['All done.'], 'only messages after the position');
+    assert.equal(next.nextPosition, 3, 'positions are shared by both views');
     assert.equal(next.recentRuns[0]?.status, 'completed');
+    const activity = await client.readThread({ threadId: launched.threadId, view: 'activity', afterPosition: first.nextPosition });
+    assert.deepEqual(activity.items.map((item) => [item.position, item.type]), [[1, 'reasoning'], [2, 'reasoning'], [3, 'assistant_message']]);
+    assert.deepEqual(fake.reads.map((input) => input.view), ['messages', 'messages', 'activity'], 'the view is always named');
 
     const listed = await client.listThreads({ projectId: 'project-1', titleContains: '[job:abc123]' });
     assert.deepEqual(listed.threads.map((thread) => thread.threadId), [launched.threadId]);
@@ -268,7 +273,7 @@ describe('T3 delivery classification', () => {
     const { fake, client } = await setup(t);
     const { threadId } = await client.launchThread(LAUNCH);
     fake.dropResponseOnce.add('t3_thread_read');
-    assert.equal((await client.readThread({ threadId })).thread.threadId, threadId);
+    assert.equal((await client.readThread({ threadId, view: 'messages' })).thread.threadId, threadId);
   });
 });
 

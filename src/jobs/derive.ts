@@ -33,7 +33,9 @@ export function holdsReadPosition(item: ThreadItem): boolean {
 /**
  * A task the thread delegated to another thread (a T3 subagent), followed until it finishes. T3 shows
  * delegated work in the parent's timeline as one `subagent` item (no creator, title = the child's task
- * title, text = the child's final summary once it is done); the child's own messages never appear there.
+ * title, text = the child's task prompt while it runs and its final summary once it is done); the
+ * child's own messages never appear there. The item is in the activity view only, never in the
+ * messages view (see activity.ts).
  */
 export interface DelegatedTask {
   itemId: string;
@@ -78,8 +80,22 @@ export function trackDelegated(
   return [...tasks.values()].sort((a, b) => a.position - b.position).slice(0, MAX_DELEGATED_TASKS);
 }
 
+/**
+ * What one tick read of the thread's activity view (activity.ts): the items after the job's activity
+ * position, the position to continue from, and `refreshed`, the latest version of followed tasks that
+ * were not among the items (null: T3 no longer has the item).
+ */
+export interface ActivityRead {
+  items: readonly ThreadItem[];
+  nextPosition: number | null;
+  refreshed?: ReadonlyMap<string, ThreadItem | null>;
+}
+
 /** What `observe` needs to know about the job. */
-export type ObservedJob = Pick<Job, 'state' | 'lastRunId' | 'readPosition' | 'threadLink' | 'latestActivityAt' | 'standing' | 'delegatedWork'>;
+export type ObservedJob = Pick<
+  Job,
+  'state' | 'lastRunId' | 'readPosition' | 'activityPosition' | 'threadLink' | 'latestActivityAt' | 'standing' | 'delegatedWork'
+>;
 
 /** States the watcher can derive from a thread. */
 export type ObservedState = Extract<JobState, 'running' | 'needs_input' | 'idle' | 'failed' | 'cancel_requested' | 'cancelled'>;
@@ -96,8 +112,10 @@ export interface Observation {
   /** The newest settled worker message in this read, bounded; undefined when there is none. */
   excerpt?: string;
   activityAt: number | null;
-  /** `afterPosition` for the next read: never past an item that may still change. */
+  /** `afterPosition` for the next messages read: never past a worker message that may still change. */
   readPosition: number | null;
+  /** `afterPosition` for the next activity read. */
+  activityPosition: number | null;
   /** The job was already idle and another turn has finished since (someone continued it in T3). */
   anotherTurnFinished: boolean;
   /** The thread's app link, when the job has none yet. */
@@ -147,8 +165,10 @@ function parseTime(value: string | undefined): number | null {
 }
 
 /**
- * Derive a job's state from one `t3_thread_read` (possibly several pages, items concatenated) and
- * the thread's pending question ids. The rules, in order:
+ * Derive a job's state from one `t3_thread_read` of the messages view (possibly several pages, items
+ * concatenated), the thread's pending question ids and, for delegated work, a read of the activity view
+ * (without one, the followed tasks are kept as they are). The excerpt and the read position come from
+ * the messages read only; activity items never become the excerpt. The rules, in order:
  *
  * 1. `cancel_requested` becomes `cancelled` once nothing is active (below), else stays.
  * 2. `needs_input` when T3 lists pending questions, or the thread or the followed run is `waiting`
@@ -164,14 +184,9 @@ function parseTime(value: string | undefined): number | null {
  *    `waiting_on_delegated_work`) for work it delegated, after which T3 starts its next turn by itself.
  *
  * An idle job that is running again was not continued by the gateway (that moves it to running
- * itself): the reason is `turn_started`. `refreshed` is passed to trackDelegated.
+ * itself): the reason is `turn_started`.
  */
-export function observe(
-  job: ObservedJob,
-  read: ThreadRead,
-  pendingQuestionIds: readonly string[],
-  refreshed?: ReadonlyMap<string, ThreadItem | null>,
-): Observation {
+export function observe(job: ObservedJob, read: ThreadRead, pendingQuestionIds: readonly string[], activity?: ActivityRead): Observation {
   const { thread, recentRuns } = read;
   const followed = job.lastRunId === null ? undefined : recentRuns.find((run) => run.runId === job.lastRunId);
   const latest = recentRuns.find((run) => run.runId === thread.latestRunId) ?? recentRuns[0];
@@ -201,7 +216,7 @@ export function observe(
   }
 
   const items = [...read.items].sort((a, b) => a.position - b.position);
-  const delegatedWork = trackDelegated(job.delegatedWork, items, refreshed);
+  const delegatedWork = trackDelegated(job.delegatedWork, activity?.items ?? [], activity?.refreshed);
   if (state === 'idle' && reason !== 'run_failed' && delegatedWork.length > 0) reason = 'waiting_on_delegated_work';
   const message = items.findLast((item) => isWorkerMessage(item) && !isUnsettled(item) && item.text !== null && item.text.trim().length > 0);
   // Items come back with positions after the stored one, so stopping before a held item never goes backwards.
@@ -210,7 +225,9 @@ export function observe(
   if (held) readPosition = held.position > 0 ? held.position - 1 : null;
   else readPosition = read.nextPosition ?? items.at(-1)?.position ?? job.readPosition;
 
-  const times = [parseTime(thread.updatedAt), ...items.map((item) => parseTime(item.updatedAt))].filter((value): value is number => value !== null);
+  const times = [thread.updatedAt, ...[...items, ...(activity?.items ?? [])].map((item) => item.updatedAt)]
+    .map(parseTime)
+    .filter((value): value is number => value !== null);
   const link = job.threadLink === null ? threadLinkTarget(thread.link) : null;
   const turnOver = state === 'idle' || state === 'failed' || state === 'cancelled';
   const lastRunId = turnOver ? (thread.latestRunId ?? job.lastRunId) : job.lastRunId;
@@ -224,6 +241,7 @@ export function observe(
     ...(message?.text ? { excerpt: message.text.slice(0, EXCERPT_CHARS) } : {}),
     activityAt: times.length > 0 ? Math.max(...times) : job.latestActivityAt,
     readPosition,
+    activityPosition: activity?.nextPosition ?? job.activityPosition,
     anotherTurnFinished: job.state === 'idle' && state === 'idle' && lastRunId !== job.lastRunId,
     ...(link ? { link } : {}),
     delegatedWork,

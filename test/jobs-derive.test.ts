@@ -27,6 +27,7 @@ function job(overrides: Partial<Job> = {}): Job {
     latestMessageExcerpt: null,
     latestActivityAt: null,
     readPosition: null,
+    activityPosition: null,
     hostUnreachableSince: null,
     lastErrorCode: null,
     lastErrorMessage: null,
@@ -140,21 +141,51 @@ describe('state derivation', () => {
 });
 
 describe('delegated work', () => {
+  // As T3 shows it (observed live): text is the child's task prompt while it runs, its summary once done.
   const subagent = (position: number, status: string, title = `Synthetic task ${position}`) =>
-    item(position, { type: 'subagent', createdBy: null, creationSource: null, status, text: status === 'completed' ? 'Synthetic summary' : '', title });
+    item(position, {
+      type: 'subagent',
+      createdBy: null,
+      creationSource: null,
+      status,
+      text: status === 'completed' ? 'Synthetic summary' : 'Synthetic task prompt',
+      title,
+    });
   const task = (position: number): DelegatedTask => ({ itemId: `item-${position}`, position, title: `Synthetic task ${position}` });
+  const activity = (items: ThreadItem[], nextPosition = items.at(-1)?.position ?? null) => ({ items, nextPosition });
+  const reasoning = (position: number) => item(position, { type: 'reasoning', text: 'Synthetic reasoning' });
 
   test('a turn that ends with delegated work running is idle, waiting on it', () => {
-    const turnEnded = read({ status: 'completed' }, [{ runId: 'run-1', status: 'completed' }], [subagent(3, 'running'), item(4)]);
-    const seen = observe(job(), turnEnded, []);
-    assert.deepEqual([seen.state, seen.reason, seen.delegatedWork], ['idle', 'waiting_on_delegated_work', [task(3)]]);
-    const done = observe(job(), read({ status: 'completed' }, [{ runId: 'run-1', status: 'completed' }], [subagent(3, 'completed'), item(4)]), []);
+    // The messages view returns only the reply; the activity view the subagent item before it.
+    const turnEnded = read({ status: 'completed' }, [{ runId: 'run-1', status: 'completed' }], [item(4)]);
+    const seen = observe(job(), turnEnded, [], activity([reasoning(2), subagent(3, 'running'), item(4)]));
+    assert.deepEqual([seen.state, seen.reason, seen.delegatedWork, seen.excerpt], ['idle', 'waiting_on_delegated_work', [task(3)], 'message 4']);
+    assert.deepEqual([seen.readPosition, seen.activityPosition], [4, 4]);
+    const done = observe(job(), turnEnded, [], activity([subagent(3, 'completed'), item(4)]));
     assert.deepEqual([done.reason, done.delegatedWork], ['completed', []], 'a subagent item T3 shows completed is not waited on');
+  });
+
+  test('delegated work is taken from the activity read only, and its text is never the excerpt', () => {
+    const turnEnded = read({ status: 'completed' }, [{ runId: 'run-1', status: 'completed' }], [item(4), subagent(5, 'running')]);
+    const seen = observe(job(), turnEnded, []);
+    assert.deepEqual([seen.reason, seen.delegatedWork, seen.excerpt], ['completed', [], 'message 4'], 'without an activity read nothing is followed');
+    const latest = observe(job({ readPosition: 4 }), read({ status: 'completed' }, [{ runId: 'run-1', status: 'completed' }]), [], activity([subagent(5, 'running')]));
+    assert.deepEqual([latest.excerpt, latest.readPosition, latest.activityPosition], [undefined, 4, 5], 'the task prompt is not a reply');
+    const summary = observe(job({ readPosition: 4, delegatedWork: [task(5)] }), read({ status: 'running', activeRunId: 'run-2' }), [], activity([subagent(5, 'completed')]));
+    assert.deepEqual([summary.excerpt, summary.delegatedWork], [undefined, []], 'nor is the summary');
+  });
+
+  test('the activity position follows the activity read, never held back, and stays without one', () => {
+    const running = read({ status: 'running', activeRunId: 'run-1' }, [{ runId: 'run-1', status: 'running' }]);
+    const busy = activity([item(10, { type: 'command_execution', status: 'running' }), subagent(11, 'running'), reasoning(12)]);
+    assert.equal(observe(job({ activityPosition: 9 }), running, [], busy).activityPosition, 12);
+    assert.equal(observe(job({ activityPosition: 9 }), running, [], activity([], null)).activityPosition, 9);
+    assert.equal(observe(job({ activityPosition: 9 }), running, []).activityPosition, 9);
   });
 
   test('an idle job running again by itself reports turn_started', () => {
     const resumed = read({ status: 'running', activeRunId: 'run-2' }, [{ runId: 'run-2', status: 'running' }, { runId: 'run-1', status: 'completed' }]);
-    const seen = observe(job({ state: 'idle', delegatedWork: [task(3)] }), resumed, []);
+    const seen = observe(job({ state: 'idle', delegatedWork: [task(3)] }), resumed, [], activity([]));
     assert.deepEqual([seen.state, seen.reason, seen.delegatedWork], ['running', 'turn_started', [task(3)]], 'kept until its item is read settled');
   });
 
