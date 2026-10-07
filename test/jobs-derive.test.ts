@@ -38,6 +38,9 @@ function job(overrides: Partial<Job> = {}): Job {
     finishedAt: null,
     standing: false,
     delegatedWork: [],
+    delegatedUntracked: 0,
+    delegatedUntrackedRunId: null,
+    delegatedEndedAt: null,
     ...overrides,
   };
 }
@@ -195,11 +198,46 @@ describe('delegated work', () => {
       ['item-3', subagent(3, 'completed')],
       ['item-8', null],
     ]);
-    assert.deepEqual(trackDelegated(previous, [subagent(12, 'pending'), subagent(13, 'completed')], refreshed), [task(9), task(12)]);
-    assert.deepEqual(trackDelegated([task(3)], [subagent(3, 'running', '  Renamed\n task ')]), [{ ...task(3), title: 'Renamed task' }]);
-    assert.deepEqual(trackDelegated([], [item(2, { type: 'subagent', status: 'running', title: null })]), [{ itemId: 'item-2', position: 2, title: 'Untitled delegated task' }]);
-    const many = Array.from({ length: 30 }, (_, index) => subagent(index, 'running'));
-    assert.equal(trackDelegated([], many).length, 20, 'bounded');
+    assert.deepEqual(trackDelegated(previous, [subagent(12, 'pending'), subagent(13, 'completed')], refreshed).tasks, [task(9), task(12)]);
+    assert.deepEqual(trackDelegated([task(3)], [subagent(3, 'running', '  Renamed\n task ')]).tasks, [{ ...task(3), title: 'Renamed task' }]);
+    assert.deepEqual(trackDelegated([], [item(2, { type: 'subagent', status: 'running', title: null })]).tasks, [{ itemId: 'item-2', position: 2, title: 'Untitled delegated task' }]);
+  });
+
+  test('follows 25 delegated tasks, all of them', () => {
+    const many = Array.from({ length: 25 }, (_, index) => subagent(index, 'running'));
+    const tracked = trackDelegated([], many);
+    assert.deepEqual([tracked.tasks.length, tracked.cut], [25, 0]);
+    const turnEnded = read({ status: 'completed' }, [{ runId: 'run-1', status: 'completed' }]);
+    const seen = observe(job(), turnEnded, [], activity(many));
+    assert.deepEqual([seen.reason, seen.delegatedWork.length, seen.delegatedUntracked], ['waiting_on_delegated_work', 25, 0]);
+  });
+
+  test('counts delegated tasks beyond the 200 it follows, and waits on them until a later turn has finished', () => {
+    const subagents = (from: number, count: number) => Array.from({ length: count }, (_, index) => subagent(from + index, 'running'));
+    const tracked = trackDelegated([], subagents(0, 230));
+    assert.deepEqual([tracked.tasks.length, tracked.tasks.at(-1)?.position, tracked.cut], [200, 199, 30], 'the first 200 by position');
+
+    // The coordinator delegates 230 tasks in its run run-1: the 30 beyond the cap are counted, with the run.
+    const running = read({ status: 'running', activeRunId: 'run-1' }, [{ runId: 'run-1', status: 'running' }]);
+    const delegating = observe(job({ lastRunId: 'run-0' }), running, [], activity(subagents(0, 230)));
+    assert.deepEqual([delegating.state, delegating.delegatedWork.length, delegating.delegatedUntracked, delegating.delegatedUntrackedRunId], ['running', 200, 30, 'run-1']);
+    const after = { delegatedWork: delegating.delegatedWork, delegatedUntracked: 30, delegatedUntrackedRunId: 'run-1' };
+
+    // Its run ends: still waiting, even once every followed task has finished, since 30 are not followed.
+    const ended = read({ status: 'completed', latestRunId: 'run-1' }, [{ runId: 'run-1', status: 'completed' }]);
+    const settled = new Map(delegating.delegatedWork.map((done) => [done.itemId, subagent(done.position, 'completed')]));
+    const waiting = observe(job({ ...after, lastRunId: 'run-0' }), ended, [], { items: [], nextPosition: 229, refreshed: settled });
+    assert.deepEqual([waiting.state, waiting.reason, waiting.delegatedWork.length, waiting.delegatedUntracked], ['idle', 'waiting_on_delegated_work', 0, 30]);
+    const still = observe(job({ state: 'idle', delegatedUntracked: 30, delegatedUntrackedRunId: 'run-1' }), ended, [], activity([], 229));
+    assert.deepEqual([still.reason, still.delegatedUntracked], ['waiting_on_delegated_work', 30], 'the same run, seen again');
+
+    // A new turn (run-2) starts: still counted while it runs; once it has finished, the count is cleared.
+    const idleAfter = { state: 'idle' as const, lastRunId: 'run-1', delegatedUntracked: 30, delegatedUntrackedRunId: 'run-1' };
+    const resumed = observe(job(idleAfter), read({ status: 'running', activeRunId: 'run-2', latestRunId: 'run-2' }, [{ runId: 'run-2', status: 'running' }]), [], activity([], 229));
+    assert.deepEqual([resumed.state, resumed.delegatedUntracked], ['running', 30]);
+    const finished = read({ status: 'completed', latestRunId: 'run-2' }, [{ runId: 'run-2', status: 'completed' }]);
+    const done = observe(job({ ...idleAfter, state: 'running' }), finished, [], activity([], 229));
+    assert.deepEqual([done.state, done.reason, done.delegatedUntracked, done.delegatedUntrackedRunId], ['idle', 'completed', 0, null]);
   });
 });
 

@@ -287,7 +287,18 @@ export class JobService {
     }
     const lastRunId = thread.activeRunId ?? thread.latestRunId;
     const seen = observe(
-      { state: 'idle', lastRunId, readPosition: null, activityPosition: null, threadLink: null, latestActivityAt: null, standing: true, delegatedWork: [] },
+      {
+        state: 'idle',
+        lastRunId,
+        readPosition: null,
+        activityPosition: null,
+        threadLink: null,
+        latestActivityAt: null,
+        standing: true,
+        delegatedWork: [],
+        delegatedUntracked: 0,
+        delegatedUntrackedRunId: null,
+      },
       read,
       questions,
       activity,
@@ -314,6 +325,8 @@ export class JobService {
       lastErrorCode: seen.errorCode ?? null,
       lastErrorMessage: seen.errorCode ? 'The latest T3 run failed. Open the thread in T3 for details.' : null,
       delegatedWork: seen.delegatedWork,
+      delegatedUntracked: seen.delegatedUntracked,
+      delegatedUntrackedRunId: seen.delegatedUntrackedRunId,
     });
   }
 

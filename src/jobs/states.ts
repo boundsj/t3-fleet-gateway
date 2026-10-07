@@ -39,9 +39,10 @@ export const STATE_MEANINGS: Record<JobState, string> = {
   idle:
     "Nothing is running on the thread: the worker's turn is over. Read its latest reply (work_status); idle is not proof the task succeeded. " +
     'A worker that delegated work to other threads (a coordinator usually does) goes idle while that work runs and starts its next turn ' +
-    'by itself when it is done: if waitingOnDelegatedWork is true, or its reply says it delegated or is waiting, do not send new ' +
-    'instructions; wait for its next turn in work_feed. Otherwise send the next instruction with work_continue when the reply asks ' +
-    'for input or the work is done.',
+    'by itself when it is done. waitingOnDelegatedWork tells which, and wins over the reply text when they disagree: while it is true, ' +
+    'do not send new instructions; wait for its next turn in work_feed. When it is false, send the next instruction with work_continue ' +
+    'when the reply asks for input or the work is done; if work_feed reports delegated_work_ended (its delegated work ended but it ' +
+    'did not resume), send work_continue asking it to check on that work.',
   cancel_requested: 'An interrupt was requested; waiting for T3 to confirm the thread stopped.',
   cancelled: 'Stopped by work_cancel. Terminal.',
   released:

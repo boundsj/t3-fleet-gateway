@@ -12,8 +12,11 @@ const UNSETTLED_ITEM_STATUSES = new Set(['pending', 'running', 'waiting']);
 /** Statuses of a `subagent` item whose delegated work is still going. */
 const DELEGATED_ACTIVE_STATUSES = new Set([...UNSETTLED_ITEM_STATUSES, ...ACTIVE_RUN_STATUSES]);
 
-/** Delegated tasks followed per job, at most; and the characters of each title kept. */
-export const MAX_DELEGATED_TASKS = 20;
+/**
+ * Delegated tasks followed per job, at most; and the characters of each title kept. Running tasks beyond
+ * the cap are counted (`delegatedUntracked`), never dropped silently.
+ */
+export const MAX_DELEGATED_TASKS = 200;
 const MAX_DELEGATED_TITLE_CHARS = 200;
 
 export function isUnsettled(item: ThreadItem): boolean {
@@ -58,15 +61,17 @@ function delegatedTask(item: ThreadItem): DelegatedTask {
 }
 
 /**
- * The delegated tasks still running after this read. `items` are the items read now; `refreshed` holds
- * the latest version of followed tasks that were not among them (null: T3 no longer has the item). A
- * followed task stays until T3 shows its item settled or gone; a task not read again is kept as it was.
+ * The delegated tasks still running after this read, the first MAX_DELEGATED_TASKS by position, and how
+ * many running tasks were cut beyond those (`cut`; they are not followed again, so the caller counts
+ * them). `items` are the items read now; `refreshed` holds the latest version of followed tasks that
+ * were not among them (null: T3 no longer has the item). A followed task stays until T3 shows its item
+ * settled or gone; a task not read again is kept as it was.
  */
 export function trackDelegated(
   previous: readonly DelegatedTask[],
   items: readonly ThreadItem[],
   refreshed: ReadonlyMap<string, ThreadItem | null> = new Map(),
-): DelegatedTask[] {
+): { tasks: DelegatedTask[]; cut: number } {
   const latest = new Map<string, ThreadItem | null>(refreshed);
   for (const item of items) if (isDelegatedWork(item)) latest.set(item.itemId, item);
   const tasks = new Map<string, DelegatedTask>();
@@ -77,7 +82,8 @@ export function trackDelegated(
     latest.delete(task.itemId);
   }
   for (const item of latest.values()) if (item !== null && isDelegatedWorkActive(item)) tasks.set(item.itemId, delegatedTask(item));
-  return [...tasks.values()].sort((a, b) => a.position - b.position).slice(0, MAX_DELEGATED_TASKS);
+  const running = [...tasks.values()].sort((a, b) => a.position - b.position);
+  return { tasks: running.slice(0, MAX_DELEGATED_TASKS), cut: Math.max(0, running.length - MAX_DELEGATED_TASKS) };
 }
 
 /**
@@ -94,7 +100,16 @@ export interface ActivityRead {
 /** What `observe` needs to know about the job. */
 export type ObservedJob = Pick<
   Job,
-  'state' | 'lastRunId' | 'readPosition' | 'activityPosition' | 'threadLink' | 'latestActivityAt' | 'standing' | 'delegatedWork'
+  | 'state'
+  | 'lastRunId'
+  | 'readPosition'
+  | 'activityPosition'
+  | 'threadLink'
+  | 'latestActivityAt'
+  | 'standing'
+  | 'delegatedWork'
+  | 'delegatedUntracked'
+  | 'delegatedUntrackedRunId'
 >;
 
 /** States the watcher can derive from a thread. */
@@ -122,6 +137,9 @@ export interface Observation {
   link?: string;
   /** Work the thread delegated to other threads that is still running. */
   delegatedWork: DelegatedTask[];
+  /** Running delegated tasks beyond `delegatedWork`, not followed (see Job.delegatedUntracked). */
+  delegatedUntracked: number;
+  delegatedUntrackedRunId: string | null;
 }
 
 /**
@@ -183,6 +201,9 @@ function parseTime(value: string | undefined): number | null {
  *    with no run) and the thread is waiting for its next instruction, or (reason
  *    `waiting_on_delegated_work`) for work it delegated, after which T3 starts its next turn by itself.
  *
+ * Delegated tasks beyond MAX_DELEGATED_TASKS are counted, not followed: the job counts as waiting on
+ * delegated work until a turn that started after the last of them were cut has finished.
+ *
  * An idle job that is running again was not continued by the gateway (that moves it to running
  * itself): the reason is `turn_started`.
  */
@@ -216,8 +237,22 @@ export function observe(job: ObservedJob, read: ThreadRead, pendingQuestionIds: 
   }
 
   const items = [...read.items].sort((a, b) => a.position - b.position);
-  const delegatedWork = trackDelegated(job.delegatedWork, activity?.items ?? [], activity?.refreshed);
-  if (state === 'idle' && reason !== 'run_failed' && delegatedWork.length > 0) reason = 'waiting_on_delegated_work';
+  const turnOver = state === 'idle' || state === 'failed' || state === 'cancelled';
+  const lastRunId = turnOver ? (thread.latestRunId ?? job.lastRunId) : job.lastRunId;
+
+  const { tasks: delegatedWork, cut } = trackDelegated(job.delegatedWork, activity?.items ?? [], activity?.refreshed);
+  let delegatedUntracked = job.delegatedUntracked;
+  let delegatedUntrackedRunId = job.delegatedUntrackedRunId;
+  // Untracked tasks may still run until the coordinator has run a turn that started after they were cut.
+  if (delegatedUntracked > 0 && turnOver && lastRunId !== delegatedUntrackedRunId) {
+    delegatedUntracked = 0;
+    delegatedUntrackedRunId = null;
+  }
+  if (cut > 0) {
+    delegatedUntracked += cut;
+    delegatedUntrackedRunId = thread.activeRunId ?? thread.latestRunId;
+  }
+  if (state === 'idle' && reason !== 'run_failed' && (delegatedWork.length > 0 || delegatedUntracked > 0)) reason = 'waiting_on_delegated_work';
   const message = items.findLast((item) => isWorkerMessage(item) && !isUnsettled(item) && item.text !== null && item.text.trim().length > 0);
   // Items come back with positions after the stored one, so stopping before a held item never goes backwards.
   const held = items.find(holdsReadPosition);
@@ -229,8 +264,6 @@ export function observe(job: ObservedJob, read: ThreadRead, pendingQuestionIds: 
     .map(parseTime)
     .filter((value): value is number => value !== null);
   const link = job.threadLink === null ? threadLinkTarget(thread.link) : null;
-  const turnOver = state === 'idle' || state === 'failed' || state === 'cancelled';
-  const lastRunId = turnOver ? (thread.latestRunId ?? job.lastRunId) : job.lastRunId;
 
   return {
     state,
@@ -245,5 +278,7 @@ export function observe(job: ObservedJob, read: ThreadRead, pendingQuestionIds: 
     anotherTurnFinished: job.state === 'idle' && state === 'idle' && lastRunId !== job.lastRunId,
     ...(link ? { link } : {}),
     delegatedWork,
+    delegatedUntracked,
+    delegatedUntrackedRunId,
   };
 }

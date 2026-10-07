@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { MAX_DELEGATED_TASKS } from '../jobs/derive.ts';
 import {
   ATTENTION_RECENT_MS,
   MAX_ANSWERS_CHARS,
@@ -51,10 +52,18 @@ const jobSchema = z.object({
   waitingOnDelegatedWork: z
     .boolean()
     .describe(
-      'true while work the thread delegated to other threads (T3 subagents) is still running. An idle job in this state resumes ' +
-        'by itself when that work is done: do not send it new instructions, wait for its next turn',
+      'true while work the thread delegated to other threads (T3 subagents) is still running, from T3\'s own status of that ' +
+        'work. An idle job in this state resumes by itself when that work is done: do not send it new instructions, wait for ' +
+        'its next turn. When this flag and the reply text disagree, trust the flag',
     ),
   delegatedTasks: z.array(z.string()).describe('Titles of the delegated work still running (see waitingOnDelegatedWork)'),
+  delegatedTasksUntracked: z
+    .int()
+    .min(0)
+    .describe(
+      `Delegated tasks beyond the ${MAX_DELEGATED_TASKS} the gateway follows. While above 0, waitingOnDelegatedWork stays true ` +
+        'until the job has run a new turn; ask the coordinator for status before sending more work',
+    ),
   threadId: z.string().nullable().describe('The T3 thread, once it exists'),
   link: z
     .string()
@@ -70,7 +79,7 @@ const jobSchema = z.object({
 const eventSchema = z.object({
   cursor: z.string().describe('Feed position of this event'),
   jobId: z.string(),
-  type: z.string().describe('created, state_changed, followup_sent, input_answered, turn_finished or interrupt_requested'),
+  type: z.string().describe('created, state_changed, followup_sent, input_answered, turn_finished, delegated_work_ended or interrupt_requested'),
   fromState: z.enum(JOB_STATES).nullable(),
   toState: z.enum(JOB_STATES).nullable(),
   reason: z.string().nullable(),
@@ -113,8 +122,9 @@ export function jobView(job: Job, context: ToolContext): JobView {
     title: job.title,
     branch: job.branch,
     standing: job.standing,
-    waitingOnDelegatedWork: job.delegatedWork.length > 0,
+    waitingOnDelegatedWork: job.delegatedWork.length > 0 || job.delegatedUntracked > 0,
     delegatedTasks: job.delegatedWork.map((task) => task.title),
+    delegatedTasksUntracked: job.delegatedUntracked,
     threadId: job.threadId,
     link: job.threadLink,
     createdAt: isoTime(job.createdAt),
@@ -203,10 +213,11 @@ export function workTools(jobs: JobService): GatewayTool[] {
     description:
       "Show one job in detail: state and what it means, the T3 thread, branch, timestamps, the worker's pending questions, " +
       "whether it waits for an operator approval, an excerpt of the worker's latest message (its own reply, never the summaries " +
-      'of work it delegated), whether it waits on work it delegated (waitingOnDelegatedWork, delegatedTasks), host ' +
-      'reachability, the last error and recent events. Use it when work_feed reports a change on a job, before deciding to ' +
-      'continue, respond or cancel: if the reply says the worker delegated work or is waiting, send nothing and wait for its ' +
-      `next turn. Read-only. States: ${STATE_GUIDE}`,
+      'of work it delegated), whether it waits on work it delegated (waitingOnDelegatedWork, delegatedTasks, ' +
+      'delegatedTasksUntracked), host reachability, the last error and recent events. Use it when work_feed reports a change ' +
+      'on a job, before deciding to continue, respond or cancel: if waitingOnDelegatedWork is true, send nothing and wait for ' +
+      'its next turn; the flag wins over the reply text when they disagree. ' +
+      `Read-only. States: ${STATE_GUIDE}`,
     scope: READ_SCOPE,
     readOnly: true,
     inputSchema: z.object({ jobId: jobIdInput }),
@@ -231,7 +242,9 @@ export function workTools(jobs: JobService): GatewayTool[] {
       if (view.waitingForApproval) lines.push('Waiting for an approval the operator must give in T3.');
       if (view.hostUnreachableSince) lines.push(`Host unreachable since ${view.hostUnreachableSince}.`);
       if (view.waitingOnDelegatedWork) {
-        lines.push(`Waiting on delegated work (${view.delegatedTasks.join('; ')}); it resumes by itself. Do not send new instructions.`);
+        lines.push(`Waiting on delegated work (${delegatedSummary(job, Infinity)}); it resumes by itself. Do not send new instructions.`);
+      } else if (job.delegatedEndedAt !== null) {
+        lines.push(DELEGATED_ENDED);
       }
       if (view.lastError) lines.push(`Last error: ${view.lastError.code}`);
       if (view.latestMessageExcerpt) lines.push(`Latest worker message (excerpt):\n${view.latestMessageExcerpt}`);
@@ -247,15 +260,18 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'the nextCursor from your previous call (omit cursor the first time), handle the events, store the new nextCursor, ' +
       'and call again with it while hasMore is true. The cursor is exclusive, so no event is returned twice. Events: ' +
       'created, state_changed (fromState to toState, with a reason), followup_sent, input_answered, turn_finished (an idle ' +
-      'job ran a whole turn you did not start, between two checks), interrupt_requested (work_cancel on a standing job). A ' +
+      'job ran a whole turn you did not start, between two checks), delegated_work_ended (an idle job\'s delegated work ' +
+      'finished, failed or was cancelled and it did not resume: send work_continue asking it to check on that work), ' +
+      'interrupt_requested (work_cancel on a standing job). A ' +
       'turn you did not start shows as state_changed idle to running with reason turn_started (or as turn_finished): a person ' +
       'typed in T3, or a coordinator resumed after work it delegated finished. Standing jobs (long-lived threads the operator ' +
       'registered) report here like any job, so this is also how you follow a coordinator you send work to with work_continue. ' +
       'A coordinator goes idle while work it delegated runs (reason waiting_on_delegated_work, waitingOnDelegatedWork true) and ' +
-      'resumes by itself: wait for its next turn instead of sending new instructions. ' +
+      'resumes by itself: wait for its next turn instead of sending new instructions, even if its reply reads otherwise. ' +
       '"attention" lists jobs in needs_input (answer with work_respond, or the operator must approve in T3) or unknown ' +
-      `(the gateway is confirming the launch) at any age, and jobs that went idle or failed within the last ${ATTENTION_RECENT_MS / HOUR} ` +
-      'hours, each with "why": what to do next. An idle job is not proof the task succeeded. Read-only.',
+      '(the gateway is confirming the launch) at any age, and jobs that went idle or failed, or whose delegated work ended, ' +
+      `within the last ${ATTENTION_RECENT_MS / HOUR} hours, each with "why": what to do next. An idle job is not proof the task ` +
+      'succeeded. Read-only.',
     scope: READ_SCOPE,
     readOnly: true,
     inputSchema: z.object({
@@ -295,9 +311,10 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'job T3 steers the active turn or queues the message behind it. This is also how you give work to a standing job ' +
       '(standing: true, for example a coordinator thread the operator registered; fleet_status lists them per project): send ' +
       'it the instruction here, then follow it with work_feed and work_status. A coordinator goes idle while work it delegated ' +
-      'runs and resumes by itself when that is done: before sending, read its latest reply (work_status); if ' +
-      'waitingOnDelegatedWork is true or the reply says it delegated or is waiting, do not send (a message would start a ' +
-      'competing turn); wait for its next turn in work_feed. Send follow-ups when its reply asks for input or the work is done. ' +
+      'runs and resumes by itself when that is done: before sending, check work_status. If waitingOnDelegatedWork is true, do ' +
+      'not send (a message would start a competing turn), whatever the reply says; wait for its next turn in work_feed. If it ' +
+      'is false, nothing it delegated is still running: send follow-ups when its reply asks for input or the work is done, or ' +
+      'when work_feed reports delegated_work_ended (its delegated work ended but it did not resume: ask it to check on that work). ' +
       'Idempotent: pass a unique requestId per message; ' +
       'repeating a requestId returns the first result without sending again, and if a call fails with an uncertain outcome, ' +
       'repeating it with the same requestId is safe. Request ids are scoped to this tool, separate from work_start. Not for answering a pending question: use work_respond.',
@@ -403,10 +420,20 @@ export function workTools(jobs: JobService): GatewayTool[] {
   return [workStart, workContinue, workRespond, workCancel, workStatus, workList, workFeed];
 }
 
-/** The delegated tasks' titles for a one-line reason: the first three, then how many more. */
-function delegatedSummary(job: Job): string {
+const DELEGATED_ENDED =
+  'Its delegated work has ended (finished, failed or cancelled) but it did not resume. Send work_continue asking it to check on that work.';
+
+/**
+ * The delegated tasks for a one-line reason: the first `shown` titles, then how many more, and the
+ * tasks beyond those followed, if any.
+ */
+function delegatedSummary(job: Job, shown = 3): string {
   const titles = job.delegatedWork.map((task) => `"${task.title}"`);
-  return titles.length > 3 ? `${titles.slice(0, 3).join(', ')} and ${titles.length - 3} more` : titles.join(', ');
+  const listed = titles.length > shown ? `${titles.slice(0, shown).join(', ')} and ${titles.length - shown} more` : titles.join(', ');
+  if (job.delegatedUntracked === 0) return listed;
+  const total = job.delegatedWork.length + job.delegatedUntracked;
+  const untracked = `following ${job.delegatedWork.length} of ${total} delegated tasks; ask the coordinator for status before sending more work`;
+  return listed ? `${listed}; ${untracked}` : untracked;
 }
 
 function attentionReason(job: Job): string {
@@ -418,18 +445,19 @@ function attentionReason(job: Job): string {
     case 'unknown':
       return 'The launch outcome is unconfirmed; the gateway is checking T3. Do not start a duplicate yet.';
     case 'idle': {
-      if (job.delegatedWork.length > 0) {
+      if (job.delegatedWork.length > 0 || job.delegatedUntracked > 0) {
         return (
           `Waiting on work it delegated (${delegatedSummary(job)}). It resumes by itself when that is done: do not send new ` +
           'instructions; wait for its next turn in work_feed.'
         );
       }
+      if (job.delegatedEndedAt !== null) return DELEGATED_ENDED;
       if (!job.standing) return 'Turn finished: review with work_status, then work_continue or work_cancel.';
       const failed = job.lastErrorCode === 't3_run_failed' ? ' Its last run failed (see lastError).' : '';
       return (
-        `Standing job's turn ended:${failed} read its reply with work_status. If it says it delegated work or is waiting, send ` +
-        'nothing: it resumes by itself (watch work_feed for its next turn). Send work_continue only when the reply asks for ' +
-        'input or the work is done.'
+        `Standing job's turn ended:${failed} read its reply with work_status. Nothing it delegated is still running ` +
+        '(waitingOnDelegatedWork is false, which wins over the reply text). Send work_continue when the reply asks for input ' +
+        'or the work is done.'
       );
     }
     case 'failed':

@@ -409,7 +409,7 @@ export class JobEngine {
   }
 
   async #observeJob(job: Job, threadId: string): Promise<void> {
-    const { store, registry, logger } = this.#options;
+    const { store, registry, logger, clock } = this.#options;
     const client = registry.client(job.hostId);
     let read: ThreadRead;
     let questions: string[];
@@ -436,9 +436,18 @@ export class JobEngine {
       return;
     }
     const seen = observe(job, read, questions, activity);
+    // An idle job's delegated work ended (finished, failed or cancelled) and no turn followed: T3 starts
+    // one by itself when a child finishes, but not always (a failed or cancelled child, say), and the job
+    // would otherwise sit waiting with nothing to tell the agent.
+    const hadDelegated = job.delegatedWork.length > 0 || job.delegatedUntracked > 0;
+    const hasDelegated = seen.delegatedWork.length > 0 || seen.delegatedUntracked > 0;
+    const delegatedEnded = job.state === 'idle' && seen.state === 'idle' && hadDelegated && !hasDelegated && !seen.anotherTurnFinished;
     const changes: JobChanges = {
       pendingRequestIds: seen.pendingRequestIds,
       delegatedWork: seen.delegatedWork,
+      delegatedUntracked: seen.delegatedUntracked,
+      delegatedUntrackedRunId: seen.delegatedUntrackedRunId,
+      ...(delegatedEnded ? { delegatedEndedAt: clock() } : hasDelegated || seen.anotherTurnFinished ? { delegatedEndedAt: null } : {}),
       readPosition: seen.readPosition,
       activityPosition: seen.activityPosition,
       latestActivityAt: seen.activityAt,
@@ -457,6 +466,7 @@ export class JobEngine {
     if (seen.state === job.state) {
       if (!store.transition(job.id, { from: [job.state], to: job.state, changes })) return;
       if (seen.anotherTurnFinished) store.appendEvent(job.id, 'turn_finished', 'idle', { reason: seen.reason });
+      if (delegatedEnded) store.appendEvent(job.id, 'delegated_work_ended', 'idle', { reason: 'no_turn_started' });
       // Still running after a cancel: the interrupt may never have arrived, or a new run started
       // since (a queued follow-up, or someone in T3). Interrupt the run that is active now.
       if (job.state === 'cancel_requested') {

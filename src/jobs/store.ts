@@ -50,8 +50,21 @@ export interface Job {
   /**
    * Work the thread delegated to other threads (T3 subagents) that is still running, from its timeline.
    * A coordinator is idle while it waits for such work, and T3 starts its next turn when the work is done.
+   * At most MAX_DELEGATED_TASKS (derive.ts); cleared when the job finishes.
    */
   delegatedWork: DelegatedTask[];
+  /**
+   * Running delegated tasks beyond the ones in `delegatedWork`, which the gateway does not follow: while
+   * above 0 the job counts as waiting on delegated work, until a turn that started after the last were
+   * cut (`delegatedUntrackedRunId` is the thread's run then) has finished. Cleared when the job finishes.
+   */
+  delegatedUntracked: number;
+  delegatedUntrackedRunId: string | null;
+  /**
+   * When the delegated work of this idle job ended (finished, failed or cancelled) without a new turn
+   * starting: the `delegated_work_ended` event. Cleared when the job changes state.
+   */
+  delegatedEndedAt: number | null;
 }
 
 /** The client id recorded on standing jobs: the operator adopted them, no agent started them. Real client ids are longer. */
@@ -93,6 +106,9 @@ export type JobChanges = Partial<
     | 'lastErrorMessage'
     | 'dispatchStartedAt'
     | 'delegatedWork'
+    | 'delegatedUntracked'
+    | 'delegatedUntrackedRunId'
+    | 'delegatedEndedAt'
   >
 >;
 
@@ -112,6 +128,9 @@ const COLUMNS: Record<keyof JobChanges, string> = {
   lastErrorMessage: 'last_error_message',
   dispatchStartedAt: 'dispatch_started_at',
   delegatedWork: 'delegated_work',
+  delegatedUntracked: 'delegated_untracked',
+  delegatedUntrackedRunId: 'delegated_untracked_run_id',
+  delegatedEndedAt: 'delegated_ended_at',
 };
 
 interface JobRow {
@@ -145,6 +164,9 @@ interface JobRow {
   finished_at: number | null;
   standing: number;
   delegated_work: string;
+  delegated_untracked: number;
+  delegated_untracked_run_id: string | null;
+  delegated_ended_at: number | null;
 }
 
 interface EventRow {
@@ -214,6 +236,9 @@ function toJob(row: JobRow): Job {
     finishedAt: row.finished_at,
     standing: row.standing === 1,
     delegatedWork: parseDelegated(row.delegated_work),
+    delegatedUntracked: row.delegated_untracked,
+    delegatedUntrackedRunId: row.delegated_untracked_run_id,
+    delegatedEndedAt: row.delegated_ended_at,
   };
 }
 
@@ -285,6 +310,8 @@ export interface NewStandingJob {
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
   delegatedWork: DelegatedTask[];
+  delegatedUntracked: number;
+  delegatedUntrackedRunId: string | null;
 }
 
 export interface TransitionOptions {
@@ -448,8 +475,8 @@ export class JobStore {
           `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, t3_project_id, state, task, title, branch, runtime_mode,
              t3_thread_id, t3_thread_title, t3_thread_link, last_run_id, pending_request_ids, latest_message_excerpt, latest_activity_at,
              read_position, last_error_code, last_error_message, created_at, updated_at, state_changed_at, finished_at, standing, delegated_work,
-             activity_position)
-           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+             activity_position, delegated_untracked, delegated_untracked_run_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
         )
         .run(
           job.id,
@@ -478,6 +505,8 @@ export class JobStore {
           isTerminal(job.state) ? now : null,
           JSON.stringify(job.delegatedWork),
           job.activityPosition,
+          job.delegatedUntracked,
+          job.delegatedUntrackedRunId,
         );
       this.#insertEvent(job.id, 'created', null, job.state, { reason: 'adopted' }, now);
       this.#logger.info('job.adopted', { jobId: job.id, project: job.projectAlias, hostId: job.hostId, state: job.state });
@@ -558,18 +587,20 @@ export class JobStore {
   }
 
   /**
-   * Jobs that want the agent's attention, most recent state change first: blocked or unconfirmed
-   * jobs at any age, and jobs that went idle or failed within `recentMs`.
+   * Jobs that want the agent's attention, most recent change first: blocked or unconfirmed jobs at any
+   * age, and jobs that went idle or failed, or whose delegated work ended while idle, within `recentMs`.
    */
   attention(now: number, recentMs: number, limit: number, clientId?: string): Job[] {
     const mine = clientId === undefined ? '' : 'AND client_id = ?';
+    const since = now - recentMs;
     const rows = this.#db
       .prepare(
         `SELECT * FROM jobs
-          WHERE (state IN ('needs_input', 'unknown') OR (state IN ('idle', 'failed') AND state_changed_at >= ?)) ${mine}
-          ORDER BY state_changed_at DESC, rowid DESC LIMIT ?`,
+          WHERE (state IN ('needs_input', 'unknown') OR (state IN ('idle', 'failed') AND state_changed_at >= ?)
+            OR (state = 'idle' AND delegated_ended_at >= ?)) ${mine}
+          ORDER BY MAX(state_changed_at, COALESCE(delegated_ended_at, 0)) DESC, rowid DESC LIMIT ?`,
       )
-      .all(...(clientId === undefined ? [now - recentMs, limit] : [now - recentMs, clientId, limit])) as unknown as JobRow[];
+      .all(...(clientId === undefined ? [since, since, limit] : [since, since, clientId, limit])) as unknown as JobRow[];
     return rows.map(toJob);
   }
 
@@ -600,15 +631,21 @@ export class JobStore {
       .run(clientId, tool, requestId);
   }
 
-  /** Write what differs from `current`. Returns false, writing nothing, when nothing differs. */
+  /**
+   * Write what differs from `current`. Returns false, writing nothing, when nothing differs. A state
+   * change clears `delegatedEndedAt`; a finished job follows no delegated work.
+   */
   #write(current: Job, changes: JobChanges, now: number, state?: JobState): boolean {
     const sets: string[] = [];
     const params: (string | number | null)[] = [];
+    let effective = changes;
     if (state !== undefined && state !== current.state) {
       sets.push('state = ?', 'state_changed_at = ?', 'finished_at = ?');
       params.push(state, now, isTerminal(state) ? now : null);
+      effective = { ...changes, delegatedEndedAt: null };
+      if (isTerminal(state)) effective = { ...effective, delegatedWork: [], delegatedUntracked: 0, delegatedUntrackedRunId: null };
     }
-    for (const [key, value] of Object.entries(changes) as [keyof JobChanges, JobChanges[keyof JobChanges]][]) {
+    for (const [key, value] of Object.entries(effective) as [keyof JobChanges, JobChanges[keyof JobChanges]][]) {
       if (value === undefined) continue;
       const next = columnValue(key, value);
       if (next === columnValue(key, current[key])) continue;

@@ -365,6 +365,17 @@ export class FakeT3 {
     this.#startRun(parent);
   }
 
+  /**
+   * A delegated child's `subagent` item in the parent settles as `status` (for example `failed`, or
+   * `cancelled`) and T3 starts no run on the parent: the coordinator does not resume by itself.
+   */
+  settleDelegated(childThreadId: string, status: string): void {
+    const delegation = this.#delegations.get(childThreadId);
+    if (!delegation) throw new Error(`no delegation for ${childThreadId}`);
+    const item = this.#thread(delegation.parentThreadId).items[delegation.position];
+    if (item) Object.assign(item, { status, updatedAt: new Date().toISOString() });
+  }
+
   /** Create a thread as t3_thread_launch would, outside MCP: a launch the gateway never heard back from. */
   launchDirect(input: Record<string, unknown>): { threadId: string } {
     return this.#launch(launchInput.parse(input)) as { threadId: string };

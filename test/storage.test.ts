@@ -113,10 +113,10 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 4);
+    assert.equal(SCHEMA_VERSION, 5);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
-      after.map(({ standing, delegated_work, activity_position, ...rest }) => rest),
+      after.map(({ standing, delegated_work, activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, ...rest }) => rest),
       before,
       'every row and column is copied as it was',
     );
@@ -206,14 +206,51 @@ CREATE TABLE jobs (
 
     const db = openDatabase(path);
     t.after(() => db.close());
-    assert.equal(schemaVersion(db), 4);
-    const after = (db.prepare('SELECT * FROM jobs').all() as Record<string, unknown>[]).map(({ activity_position, ...rest }) => [activity_position, rest]);
+    assert.equal(schemaVersion(db), SCHEMA_VERSION);
+    const after = (db.prepare('SELECT * FROM jobs').all() as Record<string, unknown>[]).map(
+      ({ activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, ...rest }) => [activity_position, rest],
+    );
     assert.deepEqual(after, before.map((row) => [null, row]), 'existing jobs keep every column and have no activity position yet');
     const store = new JobStore(db, () => 1_000, silentLogger);
     const job = store.require('jobstand001');
     assert.deepEqual([job.readPosition, job.activityPosition, job.delegatedWork.length], [12, null, 1]);
     store.update(job.id, { activityPosition: 40 });
     assert.equal(store.require(job.id).activityPosition, 40);
+    const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
+    t.after(() => fresh.close());
+    const schema = (target: typeof db) => target.prepare("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'jobs' ORDER BY name").all();
+    assert.deepEqual(schema(db), schema(fresh), 'the same schema as a new database');
+  });
+
+  test('migration 5 adds the delegated work bounds to a version 4 database, keeping its jobs', (t) => {
+    const path = join(openDataDir(join(tempDir(t), 'data')).databasePath);
+    const v4 = new DatabaseSync(path);
+    v4.exec('PRAGMA foreign_keys = ON');
+    migrate(v4, MIGRATIONS.slice(0, 4));
+    assert.equal(schemaVersion(v4), 4);
+    v4.prepare(
+      `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode, t3_thread_id,
+         read_position, created_at, updated_at, state_changed_at, standing, delegated_work, activity_position)
+       VALUES ('jobstand001', 'operator', 'adopted', 'pilot', 'main', 'idle', '', 'Synthetic coordinator', '', '', 'thread-1', 12, 1, 2, 3, 1,
+         '[{"itemId":"item-4","position":4,"title":"Synthetic task"}]', 20)`,
+    ).run();
+    v4.prepare("INSERT INTO job_events (job_id, type, to_state, created_at) VALUES ('jobstand001', 'created', 'idle', 1)").run();
+    const before = v4.prepare('SELECT * FROM jobs').all().map((row) => ({ ...row }));
+    v4.close();
+
+    const db = openDatabase(path);
+    t.after(() => db.close());
+    assert.equal(schemaVersion(db), 5);
+    const after = (db.prepare('SELECT * FROM jobs').all() as Record<string, unknown>[]).map(
+      ({ delegated_untracked, delegated_untracked_run_id, delegated_ended_at, ...rest }) => [[delegated_untracked, delegated_untracked_run_id, delegated_ended_at], rest],
+    );
+    assert.deepEqual(after, before.map((row) => [[0, null, null], row]), 'existing jobs keep every column, with nothing untracked or ended');
+    const store = new JobStore(db, () => 1_000, silentLogger);
+    const job = store.require('jobstand001');
+    assert.deepEqual([job.delegatedWork.length, job.activityPosition, job.delegatedUntracked, job.delegatedEndedAt], [1, 20, 0, null]);
+    store.update(job.id, { delegatedUntracked: 3, delegatedUntrackedRunId: 'run-2', delegatedEndedAt: 900 });
+    const updated = store.require(job.id);
+    assert.deepEqual([updated.delegatedUntracked, updated.delegatedUntrackedRunId, updated.delegatedEndedAt], [3, 'run-2', 900]);
     const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
     t.after(() => fresh.close());
     const schema = (target: typeof db) => target.prepare("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'jobs' ORDER BY name").all();
@@ -326,16 +363,50 @@ describe('job store', () => {
       projectAlias: 'pilot', hostId: 'main', t3ProjectId: 'project-1', state: 'idle' as const, title: 'Synthetic coordinator', branch: '', runtimeMode: '',
       threadId: 'thread-1', threadTitle: 'Synthetic coordinator', threadLink: null, lastRunId: null, pendingRequestIds: [], latestMessageExcerpt: null,
       latestActivityAt: null, readPosition: 3, activityPosition: 9, lastErrorCode: null, lastErrorMessage: null, delegatedWork: [],
+      delegatedUntracked: 4, delegatedUntrackedRunId: 'run-1',
     };
     const first = store.adopt({ id: 'job1', ...standing });
     assert.deepEqual(
       [first.created, first.job.standing, first.job.clientId, first.job.readPosition, first.job.activityPosition],
       [true, true, 'operator', 3, 9],
     );
+    assert.deepEqual([first.job.delegatedUntracked, first.job.delegatedUntrackedRunId, first.job.delegatedEndedAt], [4, 'run-1', null]);
     assert.deepEqual(store.adopt({ id: 'job2', ...standing }), { job: first.job, created: false });
     assert.throws(() => store.adopt({ id: 'job3', ...standing, projectAlias: 'other' }), { code: 'job_state_conflict', message: /standing job job1 in project "pilot"/ });
     assert.deepEqual(store.recentEvents('job1', 5).map((event) => [event.type, event.fromState, event.toState, event.detail.reason]), [['created', null, 'idle', 'adopted']]);
     assert.deepEqual(store.standingJobs('pilot').map((job) => job.id), ['job1']);
     assert.deepEqual(store.standingJobs('other'), []);
+  });
+
+  test('a state change clears the delegated-work-ended mark; a finished job follows no delegated work', (t) => {
+    const db = openDatabase(openDataDir(join(tempDir(t), 'data')).databasePath);
+    t.after(() => db.close());
+    const store = new JobStore(db, () => 1_000, silentLogger);
+    const delegated = { delegatedWork: [{ itemId: 'item-4', position: 4, title: 'Synthetic task' }], delegatedUntracked: 2, delegatedUntrackedRunId: 'run-1' };
+    const fields = (id: string) => {
+      const job = store.require(id);
+      return [job.state, job.delegatedWork.length, job.delegatedUntracked, job.delegatedUntrackedRunId, job.delegatedEndedAt];
+    };
+    for (const [id, to] of [['job1', 'released'], ['job2', 'cancelled'], ['job3', 'failed']] as const) {
+      store.adopt({
+        id, projectAlias: 'pilot', hostId: 'main', t3ProjectId: 'project-1', state: 'idle', title: 'Synthetic', branch: '', runtimeMode: '',
+        threadId: `thread-${id}`, threadTitle: 'Synthetic', threadLink: null, lastRunId: null, pendingRequestIds: [], latestMessageExcerpt: null,
+        latestActivityAt: null, readPosition: null, activityPosition: null, lastErrorCode: null, lastErrorMessage: null, ...delegated,
+      });
+      store.update(id, { delegatedEndedAt: 500 });
+      assert.deepEqual(fields(id), ['idle', 1, 2, 'run-1', 500]);
+      store.transition(id, { from: ['idle'], to, changes: delegated });
+      assert.deepEqual(fields(id), [to, 0, 0, null, null], `cleared on ${to}`);
+    }
+    store.adopt({
+      id: 'job4', projectAlias: 'pilot', hostId: 'main', t3ProjectId: 'project-1', state: 'idle', title: 'Synthetic', branch: '', runtimeMode: '',
+      threadId: 'thread-job4', threadTitle: 'Synthetic', threadLink: null, lastRunId: null, pendingRequestIds: [], latestMessageExcerpt: null,
+      latestActivityAt: null, readPosition: null, activityPosition: null, lastErrorCode: null, lastErrorMessage: null, ...delegated,
+    });
+    store.update('job4', { delegatedEndedAt: 500 });
+    store.transition('job4', { from: ['idle'], to: 'idle', changes: { readPosition: 7 } });
+    assert.equal(store.require('job4').delegatedEndedAt, 500, 'kept while the job stays idle');
+    store.transition('job4', { from: ['idle'], to: 'running' });
+    assert.deepEqual(fields('job4'), ['running', 1, 2, 'run-1', null], 'an open job keeps its delegated work');
   });
 });

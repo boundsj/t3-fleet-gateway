@@ -20,6 +20,8 @@ const ITEM_CHARS = 1;
 export const MAX_ACTIVITY_PAGES = 10;
 /** Pages read by the scan at adoption, the tail first; each further page goes PAGE_SIZE positions back. */
 export const SCAN_PAGES = 20;
+/** Of SCAN_PAGES, the most the forward tail may use: the rest (at least 5) look back from the anchor. */
+export const SCAN_TAIL_PAGES = 15;
 /** Pages read per tick to re-read followed tasks the activity position has moved past. */
 const MAX_REFRESH_PAGES = 5;
 
@@ -47,15 +49,17 @@ export async function readActivity(client: T3Client, threadId: string, afterPosi
  * The activity at adoption: the position where the thread's activity ends now (reached from `anchor`,
  * the last position the messages view returned, so the read is short), and the delegated work still
  * running, from a bounded scan backwards from `anchor`, PAGE_SIZE positions per page, while SCAN_PAGES
- * last. Positions are shared by both views, so any position is a valid place to start reading. Delegated
- * work further back is not found; a tail longer than the scan leaves the position short of the end, and
- * the watcher catches up from there.
+ * last. The tail reads at most SCAN_TAIL_PAGES, so the work just before the anchor (where a coordinator
+ * waiting on delegated work has it) is always looked at. Positions are shared by both views, so any
+ * position is a valid place to start reading. Delegated work further back is not found; a tail longer
+ * than SCAN_TAIL_PAGES leaves the position short of the end, and the watcher catches up from there
+ * (delegated work in the rest of the tail is found then).
  */
 export async function scanActivity(client: T3Client, threadId: string, anchor: number | null): Promise<ActivityRead> {
   const items: ThreadItem[] = [];
   let pages = 0;
   let position = anchor;
-  while (pages < SCAN_PAGES) {
+  while (pages < SCAN_TAIL_PAGES) {
     const read = await readPage(client, threadId, position);
     pages++;
     items.push(...read.items);

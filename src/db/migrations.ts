@@ -210,6 +210,19 @@ CREATE TABLE idempotency_keys (
     // except on a standing job, which the watcher then scans as at adoption (jobs adopted before this).
     sql: `ALTER TABLE jobs ADD COLUMN activity_position INTEGER;`,
   },
+  {
+    version: 5,
+    name: 'delegated work bounds',
+    // delegated_untracked: running delegated tasks beyond the ones followed in delegated_work, counted
+    // when they were cut; delegated_untracked_run_id: the thread's run when the last were cut (the count
+    // is cleared once a later turn has finished). delegated_ended_at: when the delegated work of an idle
+    // job ended without a new turn starting (cleared when the job changes state).
+    sql: `
+ALTER TABLE jobs ADD COLUMN delegated_untracked INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN delegated_untracked_run_id TEXT;
+ALTER TABLE jobs ADD COLUMN delegated_ended_at INTEGER;
+`,
+  },
 ];
 
 const JOBS_V2_TABLE = `
