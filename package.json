@@ -1,0 +1,25 @@
+{
+  "name": "t3-fleet-gateway",
+  "version": "0.1.0",
+  "description": "Let hosted AI agents hand coding work to your own T3 Code servers over MCP, with OAuth and a durable job ledger.",
+  "license": "MIT",
+  "author": "Jesse Bounds",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test --test-reporter=spec \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "^2.3.1",
+    "@modelcontextprotocol/server": "^2.3.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "typescript": "^7.0.2"
+  }
+}

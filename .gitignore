@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+# Local runtime state never belongs in the repo.
+config.json
+*.db
+*.db-wal
+*.db-shm
