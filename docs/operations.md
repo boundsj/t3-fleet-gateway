@@ -102,6 +102,19 @@ deploy/launchd/install.sh --uninstall # unload and remove the plist
 
 The installer fills in absolute paths and puts the directories of `node` and `t3` on the service's `PATH`. Override any default with environment variables: `LABEL`, `REPO_DIR`, `NODE_BIN`, `T3_BIN`, `CONFIG_PATH`, `DATA_DIR`, `LOG_DIR`, `PLIST_DIR`.
 
+Re-running the installer replaces the running agent. `launchctl bootout` returns before launchd has finished unloading it, and loading again in that window fails with `Bootstrap failed: 5: Input/output error`, so the installer waits (up to 10 seconds) until `launchctl print gui/<uid>/<label>` no longer finds the agent, and retries the load once if it still fails. `--uninstall` waits the same way before removing the plist.
+
+**Run the service from its own checkout.** The service runs the code in `REPO_DIR` directly (there is no build step), so a checkout you develop in is a checkout you deploy from: switching branches, editing files or running `npm install` there changes what the next restart runs, and KeepAlive restarts happen without asking. Keep a separate clone for the service, update it deliberately, and install from it:
+
+```sh
+git clone /path/to/your/working/checkout ~/.local/lib/t3-fleet-gateway   # or clone from your remote
+cd ~/.local/lib/t3-fleet-gateway && npm ci --omit=dev
+deploy/launchd/install.sh             # REPO_DIR defaults to this clone
+# later: git -C ~/.local/lib/t3-fleet-gateway pull --ff-only && deploy/launchd/install.sh
+```
+
+Run operator commands (`pair`, `jobs adopt`, `doctor`) from either checkout: they share the config and the data directory. A newer checkout may migrate the database on first use, and an older service then refuses to start against it (`database_error`: the schema is newer than the build), so update the service clone first.
+
 Linux (systemd user unit): see the comments at the top of [`deploy/systemd/t3-fleet-gateway.service`](../deploy/systemd/t3-fleet-gateway.service).
 
 On `SIGINT` or `SIGTERM` the gateway stops accepting connections, finishes in-flight requests (up to 10 seconds), lets the job engine finish its current tick, stops the renewal loop and closes the database. Job state is written as it changes, so nothing is lost; a launch interrupted by a crash is reconciled at the next start.

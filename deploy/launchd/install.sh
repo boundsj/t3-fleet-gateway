@@ -23,6 +23,19 @@ domain="gui/$(id -u)"
 
 die() { echo "install.sh: $*" >&2; exit 1; }
 
+# launchctl bootout returns before launchd has finished removing the service, and a bootstrap in
+# that window fails with "Bootstrap failed: 5: Input/output error". Wait (up to about 10 s) until
+# launchd no longer knows the label.
+wait_until_unloaded() {
+  local tries
+  for ((tries = 0; tries < 50; tries++)); do
+    launchctl print "$domain/$LABEL" >/dev/null 2>&1 || return 0
+    sleep 0.2
+  done
+  echo "install.sh: warning: $LABEL is still loaded after 10 s" >&2
+  return 1
+}
+
 xml_escape() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<<"$1"; }
 
 # Escape a value for use as a sed replacement with | as the delimiter.
@@ -46,6 +59,7 @@ render() {
 case "${1:-}" in
   --uninstall)
     launchctl bootout "$domain/$LABEL" 2>/dev/null || true
+    wait_until_unloaded || die "$LABEL did not unload; check: launchctl print $domain/$LABEL"
     rm -f "$plist_path"
     echo "Removed $LABEL. Config, data and logs are left in place."
     exit 0
@@ -72,6 +86,12 @@ chmod 700 "$LOG_DIR"
 render >"$plist_path"
 plutil -lint "$plist_path" >/dev/null
 launchctl bootout "$domain/$LABEL" 2>/dev/null || true
-launchctl bootstrap "$domain" "$plist_path"
+wait_until_unloaded || true
+if ! launchctl bootstrap "$domain" "$plist_path"; then
+  echo "install.sh: bootstrap failed; waiting for launchd and retrying once" >&2
+  sleep 1
+  wait_until_unloaded || true
+  launchctl bootstrap "$domain" "$plist_path"
+fi
 echo "Loaded $LABEL from $plist_path"
 echo "Logs: $LOG_DIR/gateway.log   Check: $NODE_BIN $REPO_DIR/bin/t3-fleet-gateway.js doctor"
