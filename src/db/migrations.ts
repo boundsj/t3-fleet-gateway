@@ -133,7 +133,7 @@ CREATE TABLE jobs (
   pending_request_ids TEXT NOT NULL DEFAULT '[]',
   latest_message_excerpt TEXT,
   latest_activity_at INTEGER,
-  read_position TEXT,
+  read_position INTEGER,
   host_unreachable_since INTEGER,
   last_error_code TEXT,
   last_error_message TEXT,
@@ -169,7 +169,7 @@ CREATE TABLE idempotency_keys (
   job_id TEXT NOT NULL REFERENCES jobs(id),
   response TEXT,
   created_at INTEGER NOT NULL,
-  PRIMARY KEY (client_id, request_id)
+  PRIMARY KEY (client_id, tool, request_id)
 ) STRICT;
 `,
   },

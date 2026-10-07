@@ -53,4 +53,4 @@ Define it with `defineTool` (see `src/mcp/fleetStatus.ts`): name, LLM-oriented d
 
 ## Status
 
-Round A (OAuth, MCP endpoint, `fleet_status`, T3 client, enrollment, CLI) and round B (the job layer: `work_*` tools, dispatcher, watcher, reconciliation, live end-to-end script) are done. The job layer's behavior in detail, including the T3 fields it relies on, is in docs/design.md under "Jobs → As built". Not yet confirmed against a real T3: the state derivation and worker-message detection rules; `scripts/e2e-live.ts` is how to check them.
+Round A (OAuth, MCP endpoint, `fleet_status`, T3 client, enrollment, CLI) and round B (the job layer: `work_*` tools, dispatcher, watcher, reconciliation, live end-to-end script) are done. The job layer's behavior in detail, including the T3 fields it relies on, is in docs/design.md under "Jobs → As built". A live T3 thread read confirmed the shape of a finished turn and the exclusive `afterPosition` (a test in `test/jobs-derive.test.ts` uses that item sequence); the other derivation rules (questions, approvals, failures, interrupts) are not yet confirmed against a real T3, and `scripts/e2e-live.ts` is how to check them.

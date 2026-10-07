@@ -32,11 +32,13 @@ export interface Observation {
 /**
  * Whether a timeline item is the worker's own message. T3's messages view returns user messages,
  * assistant messages and proposed plans; the item `type` names the kind, and `creationSource` is
- * `provider` for model output. Messages the gateway or a person sent are never worker output.
+ * `provider` for model output. Messages the gateway or a person sent are never worker output: the
+ * launch prompt and follow-ups are `user_message` items created by `agent` through `mcp`. Other
+ * activity (command executions, checkpoints) is not a message even when the provider produced it.
  */
 export function isWorkerMessage(item: ThreadItem): boolean {
   if (item.createdBy === 'user' || /user/i.test(item.type)) return false;
-  return /assistant|plan/i.test(item.type) || item.creationSource === 'provider';
+  return /assistant|plan/i.test(item.type) || (item.creationSource === 'provider' && /message/i.test(item.type));
 }
 
 function isActiveStatus(status: string): boolean {

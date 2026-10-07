@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { checkDataDirPermissions, openDataDir } from '../src/dataDir.ts';
 import { migrate, openDatabase, SCHEMA_VERSION, schemaVersion } from '../src/db/database.ts';
+import { JobStore } from '../src/jobs/store.ts';
+import { silentLogger } from '../src/log.ts';
 import { tempDir } from './helpers/tmp.ts';
 
 describe('data directory', () => {
@@ -96,5 +98,34 @@ describe('database', () => {
     const data = openDataDir(join(tempDir(t), 'data'));
     openDatabase(data.databasePath).close();
     assert.equal(readFileSync(data.databasePath).includes(data.key), false);
+  });
+});
+
+describe('job store', () => {
+  test('stores T3 read positions as integers and reads them back as numbers', (t) => {
+    const db = openDatabase(openDataDir(join(tempDir(t), 'data')).databasePath);
+    t.after(() => db.close());
+    const store = new JobStore(db, () => 1_000, silentLogger);
+    const job = { clientId: 'c', requestId: 'r', inputHash: 'h', projectAlias: 'pilot', hostId: 'main', task: 'synthetic', title: 't', branch: 'b', runtimeMode: 'auto' };
+    store.create({ id: 'job1', ...job });
+    assert.equal(store.require('job1').readPosition, null);
+    store.update('job1', { readPosition: 42 });
+    assert.equal(store.require('job1').readPosition, 42);
+    assert.deepEqual({ ...(db.prepare('SELECT read_position AS p, typeof(read_position) AS type FROM jobs').get() as object) }, { p: 42, type: 'integer' });
+    assert.throws(() => store.update('job1', { readPosition: 1.5 }), /INTEGER/);
+    store.update('job1', { readPosition: null });
+    assert.equal(store.require('job1').readPosition, null);
+  });
+
+  test('scopes request ids per agent and per tool', (t) => {
+    const db = openDatabase(openDataDir(join(tempDir(t), 'data')).databasePath);
+    t.after(() => db.close());
+    const store = new JobStore(db, () => 1_000, silentLogger);
+    const job = { clientId: 'c', requestId: 'shared', inputHash: 'h', projectAlias: 'pilot', hostId: 'main', task: 'synthetic', title: 't', branch: 'b', runtimeMode: 'auto' };
+    assert.equal(store.create({ id: 'job1', ...job }).created, true);
+    store.claimIdempotencyKey('c', 'work_continue', 'shared', { inputHash: 'other', jobId: 'job1' });
+    assert.equal(store.idempotencyKey('c', 'work_start', 'shared')?.inputHash, 'h');
+    assert.equal(store.idempotencyKey('c', 'work_continue', 'shared')?.inputHash, 'other');
+    assert.deepEqual(store.create({ id: 'job2', ...job }), { job: store.require('job1'), created: false }, 'work_start replays unaffected');
   });
 });

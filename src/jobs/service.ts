@@ -215,9 +215,9 @@ export class JobService {
   async continue(caller: Caller, input: ContinueInput): Promise<ContinueResult> {
     let job = this.store.require(input.jobId);
     const hash = inputHash('work_continue', { jobId: input.jobId, message: input.message });
-    const key = this.store.idempotencyKey(caller.clientId, input.requestId);
+    const key = this.store.idempotencyKey(caller.clientId, 'work_continue', input.requestId);
     if (key) {
-      if (key.tool !== 'work_continue' || key.jobId !== input.jobId || key.inputHash !== hash) {
+      if (key.jobId !== input.jobId || key.inputHash !== hash) {
         throw new GatewayError('request_id_conflict', `requestId "${input.requestId}" was already used for a different request. Use a new requestId.`);
       }
       if (key.response !== null) {
@@ -228,7 +228,7 @@ export class JobService {
       if (!['idle', 'running', 'needs_input'].includes(job.state) || job.threadId === null) {
         throw new GatewayError('job_state_conflict', `Job ${job.id} is ${job.state}; work_continue needs a job that is idle, running or needs_input.`);
       }
-      this.store.claimIdempotencyKey(caller.clientId, input.requestId, { tool: 'work_continue', inputHash: hash, jobId: job.id });
+      this.store.claimIdempotencyKey(caller.clientId, 'work_continue', input.requestId, { inputHash: hash, jobId: job.id });
     }
     const threadId = job.threadId;
     if (threadId === null) throw new GatewayError('job_state_conflict', `Job ${job.id} has no thread.`);
@@ -242,7 +242,7 @@ export class JobService {
       });
     } catch (error) {
       if (error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered')) {
-        this.store.releaseIdempotencyKey(caller.clientId, input.requestId);
+        this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
         throw error;
       }
       const described = describeError(error);
@@ -251,7 +251,7 @@ export class JobService {
         `${described.message}. The message may or may not have reached T3: call work_continue again with the same requestId; T3 deduplicates it.`,
       );
     }
-    this.store.completeIdempotencyKey(caller.clientId, input.requestId, JSON.stringify({ runId: sent.runId, delivery: sent.delivery }));
+    this.store.completeIdempotencyKey(caller.clientId, 'work_continue', input.requestId, JSON.stringify({ runId: sent.runId, delivery: sent.delivery }));
     job = this.store.require(job.id);
     const moved = this.store.transition(job.id, {
       from: ['idle'],

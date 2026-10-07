@@ -102,7 +102,7 @@ interface JobRow {
   pending_request_ids: string;
   latest_message_excerpt: string | null;
   latest_activity_at: number | null;
-  read_position: string | null;
+  read_position: number | null;
   host_unreachable_since: number | null;
   last_error_code: string | null;
   last_error_message: string | null;
@@ -150,7 +150,7 @@ function toJob(row: JobRow): Job {
     pendingRequestIds: parseIds(row.pending_request_ids),
     latestMessageExcerpt: row.latest_message_excerpt,
     latestActivityAt: row.latest_activity_at,
-    readPosition: row.read_position === null ? null : Number(row.read_position),
+    readPosition: row.read_position,
     hostUnreachableSince: row.host_unreachable_since,
     lastErrorCode: row.last_error_code,
     lastErrorMessage: row.last_error_message,
@@ -175,7 +175,7 @@ function toEvent(row: EventRow): JobEvent {
 
 function columnValue(key: keyof JobChanges, value: JobChanges[keyof JobChanges]): string | number | null {
   if (key === 'pendingRequestIds') return JSON.stringify(value ?? []);
-  if (key === 'readPosition') return value === null || value === undefined ? null : String(value);
+  // T3 positions are integers; the STRICT INTEGER column refuses anything else.
   return (value ?? null) as string | number | null;
 }
 
@@ -184,8 +184,10 @@ export interface FeedEvent extends JobEvent {
   title: string;
 }
 
+/** Tools whose requestId makes a call idempotent. Keys are scoped per agent and per tool. */
+export type IdempotentTool = 'work_start' | 'work_continue';
+
 export interface IdempotencyKey {
-  tool: string;
   inputHash: string;
   jobId: string;
   /** The stored result, or null while the outcome of the first attempt is unknown. */
@@ -294,21 +296,19 @@ export class JobStore {
 
   /**
    * Insert a queued job with its first event, or return the existing job for a repeated request.
-   * The same (client, requestId) with a different input is rejected.
+   * The same (client, requestId) for work_start with a different input is rejected.
    */
   create(job: NewJob): { job: Job; created: boolean } {
     return transaction(this.#db, () => {
-      const existing = this.#db
-        .prepare('SELECT tool, input_hash, job_id FROM idempotency_keys WHERE client_id = ? AND request_id = ?')
-        .get(job.clientId, job.requestId) as { tool: string; input_hash: string; job_id: string } | undefined;
+      const existing = this.idempotencyKey(job.clientId, 'work_start', job.requestId);
       if (existing) {
-        if (existing.tool !== 'work_start' || existing.input_hash !== job.inputHash) {
+        if (existing.inputHash !== job.inputHash) {
           throw new GatewayError(
             'request_id_conflict',
             `requestId "${job.requestId}" was already used for a different request. Use a new requestId for new work.`,
           );
         }
-        return { job: this.require(existing.job_id), created: false };
+        return { job: this.require(existing.jobId), created: false };
       }
       const now = this.#clock();
       this.#db
@@ -410,27 +410,31 @@ export class JobStore {
     return rows.map(toJob);
   }
 
-  idempotencyKey(clientId: string, requestId: string): IdempotencyKey | undefined {
+  idempotencyKey(clientId: string, tool: IdempotentTool, requestId: string): IdempotencyKey | undefined {
     const row = this.#db
-      .prepare('SELECT tool, input_hash, job_id, response FROM idempotency_keys WHERE client_id = ? AND request_id = ?')
-      .get(clientId, requestId) as { tool: string; input_hash: string; job_id: string; response: string | null } | undefined;
-    return row && { tool: row.tool, inputHash: row.input_hash, jobId: row.job_id, response: row.response };
+      .prepare('SELECT input_hash, job_id, response FROM idempotency_keys WHERE client_id = ? AND tool = ? AND request_id = ?')
+      .get(clientId, tool, requestId) as { input_hash: string; job_id: string; response: string | null } | undefined;
+    return row && { inputHash: row.input_hash, jobId: row.job_id, response: row.response };
   }
 
   /** Claim a request id for a tool before calling T3, so a retry can tell an earlier attempt happened. */
-  claimIdempotencyKey(clientId: string, requestId: string, key: Omit<IdempotencyKey, 'response'>): void {
+  claimIdempotencyKey(clientId: string, tool: IdempotentTool, requestId: string, key: Omit<IdempotencyKey, 'response'>): void {
     this.#db
       .prepare('INSERT INTO idempotency_keys (client_id, request_id, tool, input_hash, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(clientId, requestId, key.tool, key.inputHash, key.jobId, this.#clock());
+      .run(clientId, requestId, tool, key.inputHash, key.jobId, this.#clock());
   }
 
-  completeIdempotencyKey(clientId: string, requestId: string, response: string): void {
-    this.#db.prepare('UPDATE idempotency_keys SET response = ? WHERE client_id = ? AND request_id = ?').run(response, clientId, requestId);
+  completeIdempotencyKey(clientId: string, tool: IdempotentTool, requestId: string, response: string): void {
+    this.#db
+      .prepare('UPDATE idempotency_keys SET response = ? WHERE client_id = ? AND tool = ? AND request_id = ?')
+      .run(response, clientId, tool, requestId);
   }
 
   /** Release a request id whose call definitely did not happen, so the agent may retry with it. */
-  releaseIdempotencyKey(clientId: string, requestId: string): void {
-    this.#db.prepare('DELETE FROM idempotency_keys WHERE client_id = ? AND request_id = ? AND response IS NULL').run(clientId, requestId);
+  releaseIdempotencyKey(clientId: string, tool: IdempotentTool, requestId: string): void {
+    this.#db
+      .prepare('DELETE FROM idempotency_keys WHERE client_id = ? AND tool = ? AND request_id = ? AND response IS NULL')
+      .run(clientId, tool, requestId);
   }
 
   #write(id: string, changes: JobChanges, now: number, state?: JobState): void {

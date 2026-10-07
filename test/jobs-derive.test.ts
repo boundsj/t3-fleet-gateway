@@ -162,5 +162,26 @@ describe('timeline reading', () => {
     assert.equal(isWorkerMessage(item(0, { type: 'message', creationSource: 'provider' })), true);
     assert.equal(isWorkerMessage(item(0, { type: 'user_message', creationSource: 'mcp' })), false);
     assert.equal(isWorkerMessage(item(0, { type: 'message', createdBy: 'user', creationSource: 'web' })), false);
+    assert.equal(isWorkerMessage(item(0, { type: 'command_execution', creationSource: 'provider' })), false);
+    assert.equal(isWorkerMessage(item(0, { type: 'checkpoint', creationSource: 'provider' })), false);
+  });
+
+  test('a finished turn as a real T3 activity read shows it', () => {
+    // Observed from T3: the launch prompt is a user_message created by agent through mcp, workspace
+    // preparation a command_execution, the reply an assistant_message from the provider, then a checkpoint.
+    // Creators of the last two kinds were not recorded, so they take the worst case here: provider, with text.
+    const items = [
+      item(0, { type: 'user_message', createdBy: 'agent', creationSource: 'mcp', text: 'Synthetic task text' }),
+      item(1, { type: 'command_execution', createdBy: 'agent', creationSource: 'provider', text: 'git worktree add (synthetic output)' }),
+      item(2, { type: 'assistant_message', createdBy: 'agent', creationSource: 'provider', text: 'Synthetic worker reply' }),
+      item(3, { type: 'checkpoint', createdBy: 'agent', creationSource: 'provider', text: 'Synthetic checkpoint' }),
+    ];
+    const thread = { status: 'completed', activeRunId: null, latestRunId: 'run-1' };
+    const seen = observe(job(), read(thread, [{ runId: 'run-1', status: 'completed' }], items, 3), []);
+    assert.equal(seen.state, 'idle');
+    assert.equal(seen.reason, 'completed');
+    assert.equal(seen.excerpt, 'Synthetic worker reply');
+    assert.equal(seen.readPosition, 3, 'afterPosition is exclusive: continue from nextPosition');
+    assert.equal(seen.lastRunId, 'run-1');
   });
 });

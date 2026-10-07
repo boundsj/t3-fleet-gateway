@@ -78,7 +78,8 @@ describe('work_respond', () => {
 describe('work_continue', () => {
   test('continues an idle job: it runs again and its next turn ends idle with a new excerpt', async (t) => {
     const { fake, agent, tick } = await startJobHarness(t);
-    const job = await startJob(agent);
+    const TASK = 'Synthetic task: add a README section';
+    const job = await startJob(agent, TASK, { requestId: 'start-1' });
     await tick();
     const { threadId } = fake.threadForJob(job.jobId);
     fake.finishTurn(threadId, 'Synthetic first result');
@@ -97,6 +98,13 @@ describe('work_continue', () => {
     assert.equal(fake.sends.length, 1, 'a repeated requestId sends nothing');
     const conflict = await agent.callError('work_continue', { ...input, message: 'Something else' });
     assert.equal(conflict.code, 'request_id_conflict');
+
+    // Request ids are scoped per tool: the work_start id of this job is free for work_continue.
+    const reused = await agent.call<{ delivery: string; replayed: boolean }>('work_continue', { ...input, requestId: 'start-1', message: 'Synthetic steer' });
+    assert.deepEqual([reused.delivery, reused.replayed], ['steered', false]);
+    assert.equal(fake.sends.length, 2);
+    const restarted = await agent.call<{ job: JobView; created: boolean }>('work_start', { project: 'pilot', task: TASK, requestId: 'start-1' });
+    assert.deepEqual([restarted.created, restarted.job.jobId], [false, job.jobId], 'the work_start key is unaffected');
 
     const steer = await agent.call<{ delivery: string; job: JobView }>('work_continue', { ...input, requestId: 'follow-2', message: 'Synthetic steer' });
     assert.deepEqual([steer.delivery, steer.job.state], ['steered', 'running']);

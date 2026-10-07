@@ -124,7 +124,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'when its host has a free slot. Follow it with work_feed (recommended: poll with the last cursor) or work_status. ' +
       'Idempotent: always pass a unique requestId per new piece of work; retrying with the same requestId and the same input ' +
       'returns the same job (created=false) instead of starting another, and reusing a requestId with different input is ' +
-      'rejected. Write the task as a complete instruction for a coding agent that cannot ask you anything mid-way except ' +
+      'rejected. Request ids are scoped to this tool: one you also use with work_continue does not collide. Write the task as a complete instruction for a coding agent that cannot ask you anything mid-way except ' +
       'through questions you answer with work_respond. Use fleet_status to learn the project aliases.',
     scope: OPERATE_SCOPE,
     readOnly: false,
@@ -252,7 +252,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'job is idle (its turn finished; this starts a new turn and the job goes back to running). On a running or needs_input ' +
       'job T3 steers the active turn or queues the message behind it. Idempotent: pass a unique requestId per message; ' +
       'repeating a requestId returns the first result without sending again, and if a call fails with an uncertain outcome, ' +
-      'repeating it with the same requestId is safe. Not for answering a pending question: use work_respond.',
+      'repeating it with the same requestId is safe. Request ids are scoped to this tool, separate from work_start. Not for answering a pending question: use work_respond.',
     scope: OPERATE_SCOPE,
     readOnly: false,
     inputSchema: z.object({
