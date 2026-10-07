@@ -11,6 +11,7 @@ export type ErrorCode =
   | 'host_unreachable'
   | 't3_unauthorized'
   | 't3_timeout'
+  | 't3_response_lost'
   | 't3_tool_failed'
   | 't3_invalid_response'
   | 'pairing_command_failed'

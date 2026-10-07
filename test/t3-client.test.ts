@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import * as z from 'zod';
-import { T3Client } from '../src/t3/client.ts';
+import { T3Client, T3TransportError } from '../src/t3/client.ts';
 import { parseToolResult, T3ToolError } from '../src/t3/results.ts';
 import { startFakeT3 } from './helpers/fakeT3.ts';
 
@@ -21,6 +21,18 @@ async function setup(t: import('node:test').TestContext, options: Parameters<typ
 function rejectsWith(code: string) {
   return (error: unknown) => (error as { code?: string }).code === code;
 }
+
+function transportFailure(code: string, delivery: 'not_delivered' | 'unknown') {
+  return (error: unknown) => error instanceof T3TransportError && error.code === code && error.delivery === delivery;
+}
+
+const LAUNCH = {
+  projectId: 'project-1',
+  title: 'Synthetic job [job:abc123]',
+  workspaceStrategy: { type: 'worktree' as const, baseRef: 'main', branch: 'fleet/abc123', startFromOrigin: false },
+  runtimeMode: 'auto' as const,
+  message: 'Synthetic task text',
+};
 
 describe('T3 result parsing', () => {
   const schema = z.object({ value: z.number() });
@@ -97,3 +109,106 @@ describe('T3 client', () => {
     assert.ok(await client.environmentRead());
   });
 });
+
+describe('T3 thread tools', () => {
+  test('launch, read incrementally, list by marker, search, send and interrupt', async (t) => {
+    const { fake, client } = await setup(t);
+    const launched = await client.launchThread(LAUNCH);
+    assert.equal(launched.status, 'running');
+    assert.deepEqual(fake.launches[0]?.workspaceStrategy, LAUNCH.workspaceStrategy);
+
+    const first = await client.readThread({ threadId: launched.threadId, limit: 100, maxCharsPerItem: 10 });
+    assert.equal(first.thread.status, 'running');
+    assert.equal(first.thread.activeRunId, launched.runId);
+    assert.equal(first.items.length, 1);
+    assert.equal(first.items[0]?.text, 'Synthetic ');
+    assert.equal(first.items[0]?.textTruncated, true);
+    fake.finishTurn(launched.threadId, 'All done.');
+    const next = await client.readThread({ threadId: launched.threadId, afterPosition: first.nextPosition });
+    assert.deepEqual(next.items.map((item) => item.text), ['All done.'], 'only items after the position');
+    assert.equal(next.recentRuns[0]?.status, 'completed');
+
+    const listed = await client.listThreads({ projectId: 'project-1', titleContains: '[job:abc123]' });
+    assert.deepEqual(listed.threads.map((thread) => thread.threadId), [launched.threadId]);
+    assert.equal((await client.listThreads({ projectId: 'project-1', titleContains: '[job:other]' })).threads.length, 0);
+    assert.equal((await client.searchThreads({ projectId: 'project-1', query: 'abc123' })).matches[0]?.threadId, launched.threadId);
+
+    const sent = await client.sendToThread({ threadId: launched.threadId, message: 'Next step', clientRequestId: 'r1' });
+    const again = await client.sendToThread({ threadId: launched.threadId, message: 'Next step', clientRequestId: 'r1' });
+    assert.equal(sent.delivery, 'started');
+    assert.deepEqual(again, sent, 'T3 deduplicates by clientRequestId');
+    assert.equal(fake.sends.length, 1);
+    assert.equal((await client.interruptThread({ threadId: launched.threadId, clientRequestId: 'c1' })).status, 'interrupt_requested');
+    assert.equal((await client.interruptThread({ threadId: launched.threadId, clientRequestId: 'c2' })).status, 'no_active_run');
+  });
+
+  test('lists, reads and answers pending questions', async (t) => {
+    const { fake, client } = await setup(t);
+    const { threadId } = await client.launchThread(LAUNCH);
+    const requestId = fake.askQuestion(threadId, [{ id: 'q1', header: 'Choice', question: 'Which one?', options: [{ label: 'A', description: 'first' }] }]);
+    assert.deepEqual(await client.listPendingRequests(threadId), [requestId]);
+    assert.equal((await client.readPendingRequest(threadId, requestId)).questions[0]?.id, 'q1');
+    assert.equal(typeof (await client.respondToPendingRequest(threadId, requestId, { q1: 'A' })), 'number');
+    assert.deepEqual(await client.listPendingRequests(threadId), []);
+    await assert.rejects(client.respondToPendingRequest(threadId, requestId, { q1: 'A' }), { t3Code: 'not_found' });
+  });
+
+  test('T3 refuses thread listing without a project, like a client outside a T3 thread', async (t) => {
+    const { client } = await setup(t);
+    await assert.rejects(
+      client.callTool('t3_thread_list', {}, z.object({}).loose(), { readOnly: true }),
+      (error: unknown) => error instanceof T3ToolError && error.t3Code === 'target_required',
+    );
+  });
+});
+
+describe('T3 delivery classification', () => {
+  test('a host that refuses connections means the call was not delivered', async (t) => {
+    const { fake, client } = await setup(t);
+    await fake.stop();
+    await assert.rejects(client.launchThread(LAUNCH), transportFailure('host_unreachable', 'not_delivered'));
+    assert.equal(fake.threads.size, 0);
+  });
+
+  test('after a read finds the host gone, a launch is known not to be delivered', async (t) => {
+    const { fake, client } = await setup(t);
+    await client.environmentRead();
+    await fake.stop();
+    // A write on the stale keep-alive socket would fail with a reset, which is ambiguous; the dispatcher
+    // therefore probes with a read-only call first, which also drops the dead connection.
+    await assert.rejects(client.environmentRead(), transportFailure('host_unreachable', 'not_delivered'));
+    await assert.rejects(client.launchThread(LAUNCH), transportFailure('host_unreachable', 'not_delivered'));
+  });
+
+  test('a response lost after T3 ran the call is unknown and is not retried', async (t) => {
+    const { fake, client } = await setup(t);
+    await client.environmentRead();
+    fake.dropResponseOnce.add('t3_thread_launch');
+    await assert.rejects(client.launchThread(LAUNCH), transportFailure('t3_response_lost', 'unknown'));
+    assert.equal(fake.threads.size, 1, 'the launch happened exactly once');
+  });
+
+  test('a timeout after sending is unknown', async (t) => {
+    const { fake, client } = await setup(t);
+    await client.environmentRead();
+    fake.toolDelayMs = 300;
+    await assert.rejects(client.launchThread(LAUNCH, { timeoutMs: 100 }), transportFailure('t3_timeout', 'unknown'));
+  });
+
+  test('a bare 5xx is unknown; a 4xx was refused before handling', async (t) => {
+    const { fake, client } = await setup(t);
+    await client.environmentRead();
+    fake.statusOnce.set('t3_thread_launch', 502);
+    await assert.rejects(client.launchThread(LAUNCH), transportFailure('t3_response_lost', 'unknown'));
+    fake.statusOnce.set('t3_thread_launch', 400);
+    await assert.rejects(client.launchThread(LAUNCH), transportFailure('host_unreachable', 'not_delivered'));
+  });
+
+  test('read-only calls retry once after a lost response', async (t) => {
+    const { fake, client } = await setup(t);
+    const { threadId } = await client.launchThread(LAUNCH);
+    fake.dropResponseOnce.add('t3_thread_read');
+    assert.equal((await client.readThread({ threadId })).thread.threadId, threadId);
+  });
+});
+

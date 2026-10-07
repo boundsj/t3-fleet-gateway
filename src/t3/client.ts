@@ -7,10 +7,32 @@ import {
   UnauthorizedError,
 } from '@modelcontextprotocol/client';
 import type * as z from 'zod';
-import { GatewayError } from '../errors.ts';
+import { GatewayError, type ErrorCode } from '../errors.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
 import { parseToolResult } from './results.ts';
-import { environmentSchema, projectListSchema, type T3Environment, type T3Project } from './schemas.ts';
+import {
+  environmentSchema,
+  interruptResultSchema,
+  launchResultSchema,
+  pendingRequestListSchema,
+  pendingRequestSchema,
+  projectListSchema,
+  respondResultSchema,
+  sendResultSchema,
+  threadListSchema,
+  threadReadSchema,
+  threadSearchSchema,
+  type InterruptResult,
+  type LaunchResult,
+  type LaunchThreadInput,
+  type PendingRequest,
+  type SendResult,
+  type T3Environment,
+  type T3Project,
+  type ThreadList,
+  type ThreadRead,
+  type ThreadSearch,
+} from './schemas.ts';
 
 export const DEFAULT_T3_TIMEOUT_MS = 15_000;
 const MAX_PROJECT_PAGES = 20;
@@ -31,6 +53,38 @@ export interface CallOptions {
 
 function httpStatus(error: unknown): number | undefined {
   return error instanceof SdkHttpError ? error.status : undefined;
+}
+
+/**
+ * Whether T3 may have received a call that failed in transport. `not_delivered`: the request never
+ * reached T3's tool handler (no connection, refused, rejected before handling), so nothing happened.
+ * `unknown`: it may have run (timeout after sending, connection reset, 5xx), so a state-changing
+ * call has an unknown outcome.
+ */
+export type Delivery = 'not_delivered' | 'unknown';
+
+/** A transport-level failure talking to T3, with what is known about delivery. */
+export class T3TransportError extends GatewayError {
+  readonly delivery: Delivery;
+
+  constructor(code: ErrorCode, message: string, delivery: Delivery, options?: { cause?: unknown }) {
+    super(code, message, options);
+    this.name = 'T3TransportError';
+    this.delivery = delivery;
+  }
+}
+
+/** Socket errors that mean the request was never sent: nothing accepted the connection. */
+const CONNECT_FAILURES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'EADDRNOTAVAIL', 'UND_ERR_CONNECT_TIMEOUT']);
+
+function causeCode(error: unknown): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && typeof current === 'object' && current !== null; depth++) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string' && CONNECT_FAILURES.has(code)) return code;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
 }
 
 /**
@@ -55,19 +109,23 @@ export class T3Client {
    * Call a T3 tool. A 404 (T3 forgot the session, so it never handled the call) is retried once on
    * a new session. Other transport failures are retried once only for calls marked `readOnly`:
    * for anything that changes state, a lost response is ambiguous and the caller must decide.
+   * Transport failures are thrown as T3TransportError, whose `delivery` tells the two cases apart.
    */
   async callTool<T>(name: string, args: Record<string, unknown>, schema: z.ZodType<T>, options: CallOptions = {}): Promise<T> {
     const timeout = options.timeoutMs ?? this.#timeoutMs;
     for (let attempt = 0; ; attempt++) {
+      let sent = false;
       try {
         const client = await this.#client(timeout);
+        sent = true;
         const result = await client.callTool({ name, arguments: args }, { timeout });
         return parseToolResult(name, result, schema);
       } catch (error) {
         if (error instanceof GatewayError) throw error;
         await this.#reset();
-        const translated = this.#translate(error);
-        const retryable = httpStatus(error) === 404 || (options.readOnly === true && translated.code === 'host_unreachable');
+        const translated = this.#translate(error, sent);
+        const retryable =
+          httpStatus(error) === 404 || (options.readOnly === true && (translated.code === 'host_unreachable' || translated.code === 't3_response_lost'));
         if (retryable && attempt === 0) continue;
         throw translated;
       }
@@ -93,6 +151,49 @@ export class T3Client {
       if (cursor === null || cursor === undefined) break;
     }
     return projects.filter((project) => !project.deletedAt);
+  }
+
+  /** Create a thread. Not retried: T3 has no retry key for launches, so a lost response is ambiguous. */
+  launchThread(input: LaunchThreadInput, options: { timeoutMs?: number } = {}): Promise<LaunchResult> {
+    return this.callTool('t3_thread_launch', { ...input }, launchResultSchema, options);
+  }
+
+  /** One page of a thread's state and timeline. `afterPosition` continues from a previous `nextPosition`. */
+  readThread(input: { threadId: string; afterPosition?: number | null; limit?: number; runLimit?: number; maxCharsPerItem?: number }): Promise<ThreadRead> {
+    return this.callTool('t3_thread_read', withoutNulls(input), threadReadSchema, { readOnly: true });
+  }
+
+  /** Threads in a project, newest first. Outside clients must pass `projectId`. */
+  listThreads(input: { projectId: string; titleContains?: string; limit?: number; cursor?: number }): Promise<ThreadList> {
+    return this.callTool('t3_thread_list', withoutNulls(input), threadListSchema, { readOnly: true });
+  }
+
+  searchThreads(input: { projectId: string; query: string; limit?: number }): Promise<ThreadSearch> {
+    return this.callTool('t3_thread_search', withoutNulls(input), threadSearchSchema, { readOnly: true });
+  }
+
+  /** Send a message. `clientRequestId` makes T3 deduplicate retries, so callers may repeat it with the same id. */
+  sendToThread(input: { threadId: string; message: string; mode?: 'auto' | 'queue' | 'steer'; clientRequestId: string }): Promise<SendResult> {
+    return this.callTool('t3_thread_send', withoutNulls(input), sendResultSchema);
+  }
+
+  /** Request an interrupt of the thread's active turn. Idempotent per `clientRequestId`. */
+  interruptThread(input: { threadId: string; clientRequestId: string; reason?: string }): Promise<InterruptResult> {
+    return this.callTool('t3_thread_interrupt', withoutNulls(input), interruptResultSchema);
+  }
+
+  /** Ids of the thread's pending user questions. T3 does not include permission approvals here. */
+  async listPendingRequests(threadId: string): Promise<string[]> {
+    return (await this.callTool('t3_pending_request_list', { threadId }, pendingRequestListSchema, { readOnly: true })).requestIds;
+  }
+
+  readPendingRequest(threadId: string, requestId: string, options: { timeoutMs?: number } = {}): Promise<PendingRequest> {
+    return this.callTool('t3_pending_request_read', { threadId, requestId }, pendingRequestSchema, { ...options, readOnly: true });
+  }
+
+  /** Answer a pending user question. `answers` is passed through as T3 expects it. */
+  async respondToPendingRequest(threadId: string, requestId: string, answers: Record<string, unknown>): Promise<number> {
+    return (await this.callTool('t3_pending_request_respond', { threadId, requestId, answers }, respondResultSchema)).sequence;
   }
 
   async close(): Promise<void> {
@@ -125,15 +226,34 @@ export class T3Client {
     }
   }
 
-  #translate(error: unknown): GatewayError {
+  /**
+   * Map a transport failure to a stable code and a delivery verdict. Anything before the call was
+   * sent (connecting, initializing), a refused connection, and HTTP 4xx answers mean T3 never ran
+   * the tool. Timeouts, resets and 5xx answers after sending leave the outcome unknown.
+   */
+  #translate(error: unknown, sent: boolean): T3TransportError {
     const status = httpStatus(error);
     if (error instanceof UnauthorizedError || status === 401 || status === 403) {
-      return new GatewayError('t3_unauthorized', `T3 on host ${this.hostId} rejected the gateway's credential. Run: t3-fleet-gateway hosts enroll ${this.hostId}`, { cause: error });
+      return new T3TransportError(
+        't3_unauthorized',
+        `T3 on host ${this.hostId} rejected the gateway's credential. Run: t3-fleet-gateway hosts enroll ${this.hostId}`,
+        'not_delivered',
+        { cause: error },
+      );
     }
+    const delivery: Delivery = !sent || causeCode(error) !== undefined || (status !== undefined && status < 500) ? 'not_delivered' : 'unknown';
     if (error instanceof SdkError && error.code === SdkErrorCode.RequestTimeout) {
-      return new GatewayError('t3_timeout', `T3 on host ${this.hostId} did not answer in time`, { cause: error });
+      return new T3TransportError('t3_timeout', `T3 on host ${this.hostId} did not answer in time`, delivery, { cause: error });
     }
     const detail = status === undefined ? '' : ` (HTTP ${status})`;
-    return new GatewayError('host_unreachable', `Cannot reach T3 on host ${this.hostId}${detail}`, { cause: error });
+    if (delivery === 'unknown') {
+      return new T3TransportError('t3_response_lost', `Lost the response from T3 on host ${this.hostId}${detail}`, delivery, { cause: error });
+    }
+    return new T3TransportError('host_unreachable', `Cannot reach T3 on host ${this.hostId}${detail}`, delivery, { cause: error });
   }
+}
+
+/** Drop null and undefined fields so optional T3 inputs are omitted rather than sent as null. */
+function withoutNulls<T extends object>(input: T): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== null && value !== undefined));
 }
