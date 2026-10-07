@@ -129,7 +129,7 @@ describe('dispatcher', () => {
     assert.equal(after.hostUnreachableSince, null);
   });
 
-  test('a definite T3 rejection fails the job with the T3 code', async (t) => {
+  test('a T3 launch error fails the job with the T3 code once a lookup finds no thread', async (t) => {
     const { fake, agent, tick } = await startJobHarness(t);
     fake.failures.set('t3_thread_launch', { code: 'invalid_workspace', message: 'Base ref not found.' });
     const job = await startJob(agent);
@@ -141,6 +141,36 @@ describe('dispatcher', () => {
     assert.equal(status.lastError.code, 'invalid_workspace');
     assert.match(status.lastError.message, /Base ref not found/);
     assert.ok(status.finishedAt);
+    assert.ok(fake.calls.includes('t3_thread_list'), 'looked for the marker first');
+  });
+
+  test('a T3 launch error after the thread was created continues the job on that thread', async (t) => {
+    const { fake, agent, tick } = await startJobHarness(t);
+    fake.failuresAfterEffect.set('t3_thread_launch', { code: 'internal_error', message: 'Synthetic failure after creating the thread.' });
+    const job = await startJob(agent);
+    await tick();
+    const status = await agent.call<{ state: string; threadId: string; lastError: unknown; recentEvents: { reason: string | null }[] }>('work_status', {
+      jobId: job.jobId,
+    });
+    assert.equal(status.state, 'running');
+    assert.equal(status.threadId, fake.threadForJob(job.jobId).threadId);
+    assert.equal(status.lastError, null);
+    assert.equal(status.recentEvents.at(-1)?.reason, 'reconciled');
+    assert.equal(fake.launches.length, 1);
+  });
+
+  test('a refusal T3 makes before creating anything fails the job at once, without a lookup', async (t) => {
+    const { fake, agent, tick } = await startJobHarness(t);
+    fake.failures.set('t3_thread_launch', {
+      code: 'invalid_request',
+      message: 'Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.',
+    });
+    const job = await startJob(agent);
+    await tick();
+    const status = await agent.call<{ state: string; lastError: { code: string; message: string } }>('work_status', { jobId: job.jobId });
+    assert.equal(status.state, 'failed');
+    assert.equal(status.lastError.code, 'invalid_request');
+    assert.equal(fake.calls.includes('t3_thread_list'), false);
   });
 
   test('a lost launch response makes the job unknown and it is never relaunched automatically', async (t) => {
@@ -172,6 +202,13 @@ describe('job helpers', () => {
     assert.equal(threadTitle('abc', '\n  Fix   the bug \nmore', undefined), 'Fix the bug [job:abc]');
     const long = threadTitle('abc', 'x'.repeat(200), undefined);
     assert.equal(long, `${'x'.repeat(59)}… [job:abc]`);
+  });
+
+  test('thread titles drop anything shaped like a job marker from the agent text', () => {
+    assert.equal(threadTitle('abc', 'Task', 'Redo [job:other1] now'), 'Redo now [job:abc]');
+    assert.equal(threadTitle('abc', 'Task', '[ JOB : other1 ]'), 'Task [job:abc]', 'an empty title falls back to the task');
+    assert.equal(threadTitle('abc', '[job:other1]\nSecond line', undefined), 'Second line [job:abc]');
+    assert.equal(threadTitle('abc', '[job:other1]', undefined), 'Job [job:abc]');
   });
 
   test('input hashes ignore key order and distinguish values', () => {

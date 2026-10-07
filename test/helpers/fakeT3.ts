@@ -58,6 +58,8 @@ export interface FakeThread {
   items: FakeItem[];
   questions: Map<string, FakeQuestion[]>;
   approvalsPending: number;
+  /** Settled threads are listed only when t3_thread_list is asked for them (`settled: true`). */
+  settled: boolean;
   createdAt: string;
   updatedAt: string;
   launch: Record<string, unknown>;
@@ -151,6 +153,8 @@ export class FakeT3 {
   readonly projects: { id: string; title: string; deletedAt: string | null }[];
   /** Tool name to a T3 failure returned instead of a result. */
   readonly failures = new Map<string, { code: string; message: string }>();
+  /** Tool name to a T3 failure returned after the call has taken effect (for example a launch that created the thread). */
+  readonly failuresAfterEffect = new Map<string, { code: string; message: string }>();
   readonly calls: string[] = [];
   readonly validTokens = new Set<string>();
   readonly issuedTokens: string[] = [];
@@ -219,9 +223,9 @@ export class FakeT3 {
     return [...this.threads.values()].map((thread) => thread.launch);
   }
 
-  /** The thread whose title carries `[job:<jobId>]`. */
+  /** The thread whose title ends with `[job:<jobId>]`. */
   threadForJob(jobId: string): FakeThread {
-    const thread = [...this.threads.values()].find((candidate) => candidate.title.includes(`[job:${jobId}]`));
+    const thread = [...this.threads.values()].find((candidate) => candidate.title.endsWith(`[job:${jobId}]`));
     if (!thread) throw new Error(`no thread for job ${jobId}`);
     return thread;
   }
@@ -478,6 +482,8 @@ export class FakeT3 {
       if (failure) return fail(failure);
       try {
         const value = produce();
+        const after = this.failuresAfterEffect.get(tool);
+        if (after) return fail(after);
         return { content: [{ type: 'text' as const, text: JSON.stringify(value) }], structuredContent: value };
       } catch (error) {
         if (error instanceof FakeFailure) return fail({ code: error.code, message: error.message });
@@ -511,7 +517,12 @@ export class FakeT3 {
     tool('t3_thread_list', listInput, (input) => {
       const projectId = this.#target(input.projectId);
       const matching = [...this.threads.values()]
-        .filter((thread) => thread.projectId === projectId && (!input.titleContains || thread.title.includes(input.titleContains)))
+        .filter(
+          (thread) =>
+            thread.projectId === projectId &&
+            thread.settled === (input.settled ?? false) &&
+            (!input.titleContains || thread.title.includes(input.titleContains)),
+        )
         .reverse();
       const start = input.cursor ?? 0;
       const size = input.limit ?? 50;
@@ -668,6 +679,7 @@ export class FakeT3 {
       items: [],
       questions: new Map(),
       approvalsPending: 0,
+      settled: false,
       createdAt: now,
       updatedAt: now,
       launch: input,
@@ -722,8 +734,8 @@ export class FakeT3 {
       runtimeMode: thread.runtimeMode,
       interactionMode: 'default',
       linkedPullRequest: null,
-      settled: false,
-      settledAt: null,
+      settled: thread.settled,
+      settledAt: thread.settled ? thread.updatedAt : null,
       snoozed: false,
       snoozedUntil: null,
       parentThreadId: null,

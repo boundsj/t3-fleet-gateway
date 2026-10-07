@@ -347,12 +347,11 @@ describe('job links', () => {
   test('work_status, work_list and the feed attention list carry the link that opens the thread in T3', async (t) => {
     const { fake, gw, agent, tick } = await startJobHarness(t);
     const job = await startJob(agent);
-    await tick();
-    assert.equal((await status(agent, job.jobId)).link, null, 'launched, but the watcher has not read the thread yet');
+    assert.equal((await status(agent, job.jobId)).link, null, 'no thread yet');
     await tick();
     const { threadId } = fake.threadForJob(job.jobId);
     const link = `t3-thread://v1/${FAKE_ENVIRONMENT_ID}/${threadId}`;
-    assert.equal((await status(agent, job.jobId)).link, link);
+    assert.equal((await status(agent, job.jobId)).link, link, 'taken from the launch result');
     const summary = await agent.client.callTool({ name: 'work_status', arguments: { jobId: job.jobId } });
     assert.match(JSON.stringify(summary.content), new RegExp(`Open in T3: ${link}`));
     const listed = await agent.call<{ jobs: (JobView & { link: string | null })[] }>('work_list', {});

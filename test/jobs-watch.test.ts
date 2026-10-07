@@ -244,6 +244,39 @@ describe('reconciliation', () => {
     assert.equal(await jobState(agent, job.jobId), 'running');
   });
 
+  test('finds a thread that was already settled', async (t) => {
+    const { fake, agent, tick, tickAfter } = await startJobHarness(t);
+    const job = await startJob(agent);
+    fake.dropResponseOnce.add('t3_thread_launch');
+    await tick();
+    fake.threadForJob(job.jobId).settled = true;
+    fake.failures.set('t3_thread_search', { code: 'unavailable', message: 'synthetic' });
+    await tickAfter(MINUTE);
+    assert.equal(await jobState(agent, job.jobId), 'running');
+    assert.equal(fake.launches.length, 1);
+  });
+
+  test("a thread that only mentions a job's marker is never taken for that job's thread", async (t) => {
+    const { fake, agent, tick, tickAfter } = await startJobHarness(t, { watcher: { reconcileWindowMinutes: 10 } });
+    const lost = await startJob(agent);
+    fake.statusOnce.set('t3_thread_launch', 502);
+    await tick();
+    assert.equal(await jobState(agent, lost.jobId), 'unknown');
+    const marker = `[job:${lost.jobId}]`;
+    // Another job whose agent put the marker in its title, and a thread someone opened in T3.
+    const other = await startJob(agent, 'Synthetic other task', { title: `Follow up on ${marker}` });
+    assert.equal(other.title.includes(marker), false, 'agent text cannot carry a marker');
+    fake.launchDirect({ projectId: 'project-1', title: `Notes about ${marker} for later`, message: 'Synthetic' });
+    await tickAfter(MINUTE);
+    assert.equal(await jobState(agent, other.jobId), 'running');
+    assert.equal(await jobState(agent, lost.jobId), 'unknown', 'neither thread is attached');
+    await tickAfter(10 * MINUTE);
+    const status = await agent.call<Status>('work_status', { jobId: lost.jobId });
+    assert.equal(status.state, 'failed');
+    assert.equal(status.threadId, null);
+    assert.equal(status.lastError?.code, 'launch_not_confirmed');
+  });
+
   test('a launch that never happened fails with launch_not_confirmed after the window', async (t) => {
     const { fake, agent, tick, tickAfter } = await startJobHarness(t, { watcher: { reconcileWindowMinutes: 10 } });
     const job = await startJob(agent);

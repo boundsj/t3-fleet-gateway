@@ -41,7 +41,7 @@ const jobSchema = z.object({
   link: z
     .string()
     .nullable()
-    .describe('Opens the job thread in the T3 app: give it to the person when you mention the job. null until the gateway has read the thread'),
+    .describe('Opens the job thread in the T3 app: give it to the person when you mention the job. null until the thread exists'),
   createdAt: time,
   updatedAt: time,
   finishedAt: nullableTime,

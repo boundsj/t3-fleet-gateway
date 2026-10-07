@@ -103,9 +103,17 @@ export function inputHash(tool: string, input: Record<string, unknown>): string 
   return sha256Hex(JSON.stringify([tool, keys.map((key) => [key, input[key] ?? null])]));
 }
 
-/** A one-line thread title: the agent's title, or the task's first line, then the job marker. */
+/** Anything shaped like a job marker, in any case or spacing. */
+const MARKER_LIKE = /\[\s*job\s*:[^\]]*\]/gi;
+
+/**
+ * A one-line thread title: the agent's title, or the task's first line, then the job marker. Text
+ * shaped like a marker is removed from the agent's part first, so a title cannot carry another job's
+ * marker and be taken for that job's thread by reconciliation.
+ */
 export function threadTitle(jobId: string, task: string, title: string | undefined): string {
-  const source = (title ?? task.split('\n').find((line) => line.trim().length > 0) ?? 'Job').replaceAll(/\s+/g, ' ').trim();
+  const clean = (text: string) => text.replaceAll(MARKER_LIKE, ' ').replaceAll(/\s+/g, ' ').trim();
+  const source = clean(title ?? '') || task.split('\n').map(clean).find((line) => line.length > 0) || 'Job';
   const short = source.length > TITLE_FROM_TASK_CHARS ? `${source.slice(0, TITLE_FROM_TASK_CHARS - 1).trimEnd()}…` : source;
   return `${short} ${jobMarker(jobId)}`;
 }

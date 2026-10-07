@@ -295,6 +295,12 @@ export class JobStore {
     return row.n;
   }
 
+  /** Ids of every job that is not finished. */
+  openJobIds(): Set<string> {
+    const rows = this.#db.prepare("SELECT id FROM jobs WHERE state NOT IN ('cancelled', 'failed')").all() as { id: string }[];
+    return new Set(rows.map((row) => row.id));
+  }
+
   hasOpenJobs(hostId: string): boolean {
     const row = this.#db.prepare("SELECT 1 AS present FROM jobs WHERE host_id = ? AND state NOT IN ('cancelled', 'failed') LIMIT 1").get(hostId);
     return row !== undefined;

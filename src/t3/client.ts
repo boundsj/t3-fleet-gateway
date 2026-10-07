@@ -187,8 +187,8 @@ export class T3Client {
     return this.callTool('t3_thread_read', withoutNulls(input), threadReadSchema, { readOnly: true });
   }
 
-  /** Threads in a project, newest first. Outside clients must pass `projectId`. */
-  listThreads(input: { projectId: string; titleContains?: string; limit?: number; cursor?: number }): Promise<ThreadList> {
+  /** Threads in a project, newest first: unsettled ones, or settled ones with `settled: true`. Outside clients must pass `projectId`. */
+  listThreads(input: { projectId: string; titleContains?: string; settled?: boolean; limit?: number; cursor?: number }): Promise<ThreadList> {
     return this.callTool('t3_thread_list', withoutNulls(input), threadListSchema, { readOnly: true });
   }
 
