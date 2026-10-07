@@ -4,6 +4,8 @@ import type { Job } from './store.ts';
 
 /** The worker message excerpt kept per job, in characters. Also passed to T3 as `maxCharsPerItem`. */
 export const EXCERPT_CHARS = 2000;
+const MAX_LINK_CHARS = 2048;
+const LINK_SCHEMES = new Set(['t3-thread:', 'https:', 'http:']);
 
 /** Timeline item statuses that mean the item may still change (for example a message being streamed). */
 const UNSETTLED_ITEM_STATUSES = new Set(['pending', 'running', 'waiting']);
@@ -27,6 +29,24 @@ export interface Observation {
   readPosition: number | null;
   /** The job was already idle and another turn has finished since (someone continued it in T3). */
   anotherTurnFinished: boolean;
+  /** The thread's app link, when the job has none yet. */
+  link?: string;
+}
+
+/**
+ * The URL in a T3 thread link. T3 returns a markdown link, `[Title](t3-thread://v1/<environment>/<thread>)`,
+ * meant to be pasted for a person; the target opens the thread in the T3 app. A bare URL is accepted
+ * too. Returns null for anything else, including schemes other than t3-thread, https and http.
+ */
+export function threadLinkTarget(link: string): string | null {
+  const text = link.trim();
+  const target = /\]\(([^()\s]+)\)$/.exec(text)?.[1] ?? text;
+  if (target.length > MAX_LINK_CHARS) return null;
+  try {
+    return LINK_SCHEMES.has(new URL(target).protocol) ? target : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -104,6 +124,7 @@ export function observe(job: Job, read: ThreadRead, pendingQuestionIds: readonly
   else readPosition = read.nextPosition ?? items.at(-1)?.position ?? job.readPosition;
 
   const times = [parseTime(thread.updatedAt), ...items.map((item) => parseTime(item.updatedAt))].filter((value): value is number => value !== null);
+  const link = job.threadLink === null ? threadLinkTarget(thread.link) : null;
   const turnOver = state === 'idle' || state === 'failed' || state === 'cancelled';
   const lastRunId = turnOver ? (thread.latestRunId ?? job.lastRunId) : job.lastRunId;
 
@@ -117,5 +138,6 @@ export function observe(job: Job, read: ThreadRead, pendingQuestionIds: readonly
     activityAt: times.length > 0 ? Math.max(...times) : job.latestActivityAt,
     readPosition,
     anotherTurnFinished: job.state === 'idle' && state === 'idle' && lastRunId !== job.lastRunId,
+    ...(link ? { link } : {}),
   };
 }

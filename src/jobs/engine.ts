@@ -307,6 +307,7 @@ export class JobEngine {
       latestActivityAt: seen.activityAt,
       lastRunId: seen.lastRunId,
       ...(seen.excerpt === undefined ? {} : { latestMessageExcerpt: seen.excerpt }),
+      ...(seen.link === undefined ? {} : { threadLink: seen.link }),
       ...(seen.errorCode ? { lastErrorCode: seen.errorCode, lastErrorMessage: 'The T3 run failed. Open the thread in T3 for details.' } : {}),
     };
     // Both writes are guarded by the state the observation started from: an agent action that

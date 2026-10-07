@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { MINUTE } from '../src/time.ts';
+import { FAKE_ENVIRONMENT_ID } from './helpers/fakeT3.ts';
 import { connectAgent, jobState, startJob, startJobHarness, type Agent } from './helpers/jobs.ts';
 
 interface JobView {
@@ -9,6 +10,7 @@ interface JobView {
 }
 
 interface Status extends JobView {
+  link: string | null;
   pendingRequests: { requestId: string; questions: { id: string; question: string; options: { label: string }[] }[] | null }[];
   waitingForApproval: boolean;
   latestMessageExcerpt: string | null;
@@ -19,7 +21,7 @@ interface FeedPage {
   events: { cursor: string; jobId: string; type: string; toState: string | null; project: string }[];
   nextCursor: string;
   hasMore: boolean;
-  attention: (JobView & { why: string; startedByYou: boolean })[];
+  attention: (JobView & { why: string; startedByYou: boolean; link: string | null })[];
 }
 
 const status = (agent: Agent, jobId: string) => agent.call<Status>('work_status', { jobId });
@@ -321,5 +323,28 @@ describe('work_feed', () => {
       assert.equal(denied.code, 'insufficient_scope', tool);
     }
     assert.equal(await jobState(reader, job.jobId), 'running');
+  });
+});
+
+describe('job links', () => {
+  test('work_status, work_list and the feed attention list carry the link that opens the thread in T3', async (t) => {
+    const { fake, gw, agent, tick } = await startJobHarness(t);
+    const job = await startJob(agent);
+    await tick();
+    assert.equal((await status(agent, job.jobId)).link, null, 'launched, but the watcher has not read the thread yet');
+    await tick();
+    const { threadId } = fake.threadForJob(job.jobId);
+    const link = `t3-thread://v1/${FAKE_ENVIRONMENT_ID}/${threadId}`;
+    assert.equal((await status(agent, job.jobId)).link, link);
+    const summary = await agent.client.callTool({ name: 'work_status', arguments: { jobId: job.jobId } });
+    assert.match(JSON.stringify(summary.content), new RegExp(`Open in T3: ${link}`));
+    const listed = await agent.call<{ jobs: (JobView & { link: string | null })[] }>('work_list', {});
+    assert.equal(listed.jobs[0]?.link, link);
+    fake.finishTurn(threadId, 'Synthetic result');
+    await tick();
+    const feed = await agent.call<FeedPage>('work_feed', {});
+    assert.equal(feed.attention[0]?.state, 'idle');
+    assert.equal(feed.attention[0]?.link, link);
+    assert.equal(gw.logs.some((line) => line.includes('t3-thread://')), false, 'links are never logged');
   });
 });

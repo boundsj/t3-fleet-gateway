@@ -18,6 +18,8 @@ export interface Job {
   runtimeMode: string;
   threadId: string | null;
   threadTitle: string | null;
+  /** URL that opens the thread in the T3 app, from the first thread read. Never logged. */
+  threadLink: string | null;
   lastRunId: string | null;
   pendingRequestIds: string[];
   latestMessageExcerpt: string | null;
@@ -57,6 +59,7 @@ export type JobChanges = Partial<
     | 't3ProjectId'
     | 'threadId'
     | 'threadTitle'
+    | 'threadLink'
     | 'lastRunId'
     | 'pendingRequestIds'
     | 'latestMessageExcerpt'
@@ -73,6 +76,7 @@ const COLUMNS: Record<keyof JobChanges, string> = {
   t3ProjectId: 't3_project_id',
   threadId: 't3_thread_id',
   threadTitle: 't3_thread_title',
+  threadLink: 't3_thread_link',
   lastRunId: 'last_run_id',
   pendingRequestIds: 'pending_request_ids',
   latestMessageExcerpt: 'latest_message_excerpt',
@@ -98,6 +102,7 @@ interface JobRow {
   runtime_mode: string;
   t3_thread_id: string | null;
   t3_thread_title: string | null;
+  t3_thread_link: string | null;
   last_run_id: string | null;
   pending_request_ids: string;
   latest_message_excerpt: string | null;
@@ -146,6 +151,7 @@ function toJob(row: JobRow): Job {
     runtimeMode: row.runtime_mode,
     threadId: row.t3_thread_id,
     threadTitle: row.t3_thread_title,
+    threadLink: row.t3_thread_link,
     lastRunId: row.last_run_id,
     pendingRequestIds: parseIds(row.pending_request_ids),
     latestMessageExcerpt: row.latest_message_excerpt,

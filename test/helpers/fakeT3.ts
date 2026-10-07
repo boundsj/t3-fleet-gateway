@@ -63,6 +63,9 @@ export interface FakeThread {
   launch: Record<string, unknown>;
 }
 
+/** Made-up environment id, used in thread links the way T3 builds them. */
+export const FAKE_ENVIRONMENT_ID = 'env-synthetic';
+
 const RUN_STATUSES = ['preparing', 'queued', 'starting', 'running', 'waiting', 'completed', 'interrupted', 'failed', 'cancelled', 'rolled_back'] as const;
 const THREAD_STATUSES = ['idle', ...RUN_STATUSES] as const;
 const ACTIVE = new Set(['preparing', 'queued', 'starting', 'running', 'waiting']);
@@ -464,7 +467,7 @@ export class FakeT3 {
       server.registerTool(name, { inputSchema: input as z.ZodObject }, (args: unknown) => run(name, () => produce(args as z.output<S>)));
     server.registerTool('t3_environment_read', { inputSchema: z.object({}).loose() }, () =>
       run('t3_environment_read', () => ({
-        environmentId: 'env-synthetic',
+        environmentId: FAKE_ENVIRONMENT_ID,
         label: 'Synthetic host',
         serverVersion: this.serverVersion,
         platform: { os: 'linux', arch: 'x64' },
@@ -636,7 +639,7 @@ export class FakeT3 {
       threadId,
       projectId,
       title: input.title,
-      link: `${this.url}/threads/${threadId}`,
+      link: `[${input.title}](t3-thread://v1/${FAKE_ENVIRONMENT_ID}/${threadId})`,
       status: 'idle',
       runtimeMode: input.runtimeMode ?? 'full-access',
       branch: strategy && 'branch' in strategy ? (strategy.branch ?? null) : null,

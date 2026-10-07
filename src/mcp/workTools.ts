@@ -38,6 +38,10 @@ const jobSchema = z.object({
   title: z.string().describe('The T3 thread title; it ends with the marker [job:<jobId>]'),
   branch: z.string().describe('The git branch of the job worktree'),
   threadId: z.string().nullable().describe('The T3 thread, once it exists'),
+  link: z
+    .string()
+    .nullable()
+    .describe('Opens the job thread in the T3 app: give it to the person when you mention the job. null until the gateway has read the thread'),
   createdAt: time,
   updatedAt: time,
   finishedAt: nullableTime,
@@ -90,6 +94,7 @@ export function jobView(job: Job, context: ToolContext): JobView {
     title: job.title,
     branch: job.branch,
     threadId: job.threadId,
+    link: job.threadLink,
     createdAt: isoTime(job.createdAt),
     updatedAt: isoTime(job.updatedAt),
     finishedAt: job.finishedAt === null ? null : isoTime(job.finishedAt),
@@ -193,6 +198,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
         recentEvents: detail.recentEvents.map(eventView),
       };
       const lines = [describeJob(view), STATE_MEANINGS[job.state]];
+      if (view.link) lines.push(`Open in T3: ${view.link}`);
       if (view.pendingRequests.length > 0) lines.push(`Pending questions: ${view.pendingRequests.map((request) => request.requestId).join(', ')}`);
       if (view.waitingForApproval) lines.push('Waiting for an approval the operator must give in T3.');
       if (view.hostUnreachableSince) lines.push(`Host unreachable since ${view.hostUnreachableSince}.`);

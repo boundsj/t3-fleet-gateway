@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { isWorkerMessage, observe } from '../src/jobs/derive.ts';
+import { isWorkerMessage, observe, threadLinkTarget } from '../src/jobs/derive.ts';
 import type { Job } from '../src/jobs/store.ts';
 import type { ThreadItem, ThreadRead } from '../src/t3/schemas.ts';
 
@@ -21,6 +21,7 @@ function job(overrides: Partial<Job> = {}): Job {
     runtimeMode: 'auto',
     threadId: 'thread-1',
     threadTitle: 't [job:job1]',
+    threadLink: null,
     lastRunId: 'run-1',
     pendingRequestIds: [],
     latestMessageExcerpt: null,
@@ -62,7 +63,7 @@ function read(
   return {
     thread: {
       threadId: 'thread-1',
-      link: 'synthetic',
+      link: '[t [job:job1]](t3-thread://v1/env-synthetic/thread-1)',
       projectId: 'p',
       title: 't [job:job1]',
       status: thread.status,
@@ -127,6 +128,21 @@ describe('state derivation', () => {
     assert.equal(seen.anotherTurnFinished, true);
     const same = observe(job({ state: 'idle', lastRunId: 'run-2' }), read({ status: 'completed' }, [{ runId: 'run-2', status: 'completed' }]), []);
     assert.equal(same.anotherTurnFinished, false);
+  });
+});
+
+describe('thread links', () => {
+  test('takes the URL out of the markdown link T3 returns', () => {
+    assert.equal(threadLinkTarget('[Fix (the) parser [job:abc]](t3-thread://v1/env-synthetic/thread-1)'), 't3-thread://v1/env-synthetic/thread-1');
+    assert.equal(threadLinkTarget('https://t3.example.com/threads/thread-1'), 'https://t3.example.com/threads/thread-1');
+    for (const unusable of ['', 'synthetic', '[x](javascript:alert(1))', '[x](not a url)', `[x](t3-thread://v1/${'a'.repeat(3000)})`]) {
+      assert.equal(threadLinkTarget(unusable), null, unusable);
+    }
+  });
+
+  test('the first read records the link; later reads leave it', () => {
+    assert.equal(observe(job(), read({ status: 'running', activeRunId: 'run-1' }), []).link, 't3-thread://v1/env-synthetic/thread-1');
+    assert.equal(observe(job({ threadLink: 't3-thread://v1/env-synthetic/thread-1' }), read({ status: 'running', activeRunId: 'run-1' }), []).link, undefined);
   });
 });
 

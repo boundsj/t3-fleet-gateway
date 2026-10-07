@@ -137,7 +137,7 @@ Scopes: **read** = `fleet:read`, **operate** = `fleet:operate`.
 | --- | --- | --- |
 | `fleet_status` | read | Hosts (reachable, T3 version, credential expiry or `rejected` when T3 answers 401/403, running and queued job counts), configured projects (alias, description, host), gateway version. "Running" counts the states that hold a concurrency slot: `dispatching`, `running`, `needs_input`, `cancel_requested` and `unknown`. |
 | `work_list` | read | Jobs filtered by project and state, newest first, bounded. |
-| `work_status` | read | One job: state, project, host, T3 thread id and title, branch, timestamps, pending requests, latest worker message excerpt (bounded), last error. |
+| `work_status` | read | One job: state, project, host, T3 thread id, title and app link, branch, timestamps, pending requests, latest worker message excerpt (bounded), last error. |
 | `work_feed` | read | Events since a cursor (state changes, needs input, finished turns, failures) plus the list of jobs currently needing attention. Returns the next cursor. Designed for an agent's scheduled routine. |
 | `work_start` | operate | Start a job in a project from a task description. Idempotent on `requestId`. |
 | `work_continue` | operate | Send a follow-up instruction to a job's thread. Idempotent on `requestId`. |
@@ -227,7 +227,9 @@ The excerpt is the newest worker message among the items read, cut to 2,000 char
 
 **Feed.** `work_feed` returns events with ids greater than the cursor (default 0), oldest first, `limit` default 50 and at most 200, plus `nextCursor` (the last returned id, or the given cursor) and `hasMore`. `attention` lists, newest change first and at most 50: `needs_input` and `unknown` jobs of any age, and `idle` and `failed` jobs changed within 24 hours. There is no acknowledgement state; an idle job leaves the list when it is continued, cancelled or 24 hours old. `mine: true` limits events and attention to jobs the calling agent started.
 
-**Not stored.** The thread link T3 returns is not stored (no migration was needed for the job layer); the title marker finds the thread in T3. Backoff state, the reconciliation window start and idle poll times are in memory and restart conservatively.
+**Links.** T3 returns each thread's `link` as a markdown link, `[Title](t3-thread://v1/<environmentId>/<threadId>)`, which opens the thread in the T3 app. The first watcher read of a job's thread stores the target URL (`jobs.t3_thread_link`; only `t3-thread`, `https` and `http` URLs are kept), and every job view (`work_status`, `work_list` items, `work_feed` attention entries and the other tools' `job`) returns it as `link`, null until then, so an agent can hand the person a link to tap. It is never logged.
+
+**Not stored in the database.** Backoff state, the reconciliation window start and idle poll times are in memory and restart conservatively.
 
 ## Downstream T3 credentials
 

@@ -129,6 +129,7 @@ CREATE TABLE jobs (
   runtime_mode TEXT NOT NULL,
   t3_thread_id TEXT,
   t3_thread_title TEXT,
+  t3_thread_link TEXT,
   last_run_id TEXT,
   pending_request_ids TEXT NOT NULL DEFAULT '[]',
   latest_message_excerpt TEXT,
