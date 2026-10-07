@@ -31,7 +31,7 @@ No build step: Node 24+ runs `.ts` directly. There is no linter or formatter con
 | `src/jobs/` | Job layer: `store.ts` (ledger, guarded transitions, events, idempotency keys), `service.ts` (what the `work_*` tools do), `engine.ts` (dispatcher, watcher, reconciliation, host backoff), `derive.ts` (state from a thread read), `interrupt.ts`, `states.ts` |
 | `src/mcp/workTools.ts` | The `work_*` tool definitions and descriptions |
 | `src/hosts/` | `registry.ts` (clients, health cache, enroll and renew), `credentials.ts`, `renewal.ts`, `projects.ts` (project resolution and the model check used by `doctor` and at startup) |
-| `src/db/migrations.ts` | Schema, including `jobs`, `job_events`, `idempotency_keys` for the job layer |
+| `src/db/migrations.ts` | Schema, including `jobs`, `job_events`, `idempotency_keys` for the job layer; migration 2 adds `jobs.standing` and the `released` state |
 | `test/helpers/` | `fakeT3.ts` (fake T3: OAuth, an in-memory thread model driven by tests, failure injection, including held answers and launches that start no run; `stop()`/`start()` take the host down and back on the same port, `close()` releases it), `gateway.ts` (full gateway harness), `frontDoor.ts` (holds a test's public URL port in front of the gateway), `serveChild.ts` (runs `serve` in a child process that raises synthetic process errors), `jobs.ts` (gateway + fake T3 + Operate agent; `tick()` drives the engine), `oauthFlow.ts`, `agent.ts` (SDK OAuth provider) |
 | `scripts/e2e-live.ts` | Live end-to-end check, run by hand only |
 
@@ -48,7 +48,7 @@ Define it with `defineTool` (see `src/mcp/fleetStatus.ts`): name, LLM-oriented d
 - Job state changes go through `JobStore.transition` (guarded by the expected `from` states, event appended in the same transaction). Event details hold gateway-generated reasons and codes only.
 - The engine is driven by `tick()` in tests (`jobEngine: { autoStart: false }`); tests move time with the injected clock, never with sleeps, except the agent-path test that runs the engine on a short timer.
 - The fake T3 follows T3's published tool schemas (strict inputs). When T3's tools change, update `src/t3/schemas.ts` and the fake together; fixtures stay synthetic.
-- Migrations are append-only once released; until the first release (no deployed databases) migration 1 is corrected in place. `job_events` is append-only (enforced by triggers).
+- Migrations are append-only from now on: a deployment runs on a database that has applied them, so never edit a migration that is on `main`; add a new one. A change ALTER TABLE cannot make (a CHECK constraint, say) rebuilds the table with `rebuildsTables: true` (see migration 2). Test every migration on a database at the previous version that holds data (`test/storage.test.ts`). `job_events` is append-only (enforced by triggers).
 - Error codes in `src/errors.ts` and OAuth error strings are a stable contract.
 - Erasable TypeScript only; `.ts` import specifiers; `import type` for types.
 - No machine-specific values or secrets in the repo; tests use synthetic data and loopback ports.

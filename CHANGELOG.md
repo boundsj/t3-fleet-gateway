@@ -21,6 +21,7 @@ All notable changes are recorded here. The project follows [Semantic Versioning]
 - Config: `watcher.reconcileWindowMinutes`; `hosts[].defaultModelSelection`, the model for projects on that host that set no `modelSelection` (T3 refuses launches without a model when the T3 project has no default). `doctor` fails a project that would have no model, `serve` logs `project.model_missing` at startup (in the background: shutdown does not wait for it, and a host that fails is not asked again for its other projects), and `fleet_status` shows each project's `runtimeMode` and `modelConfigured`.
 - `config.example.json` enrolls its host with `access: "full-access"`: the host's access is only a ceiling, and each project's `runtimeMode` (default `approval-required`) is what limits a job.
 - `scripts/e2e-live.ts`: a live end-to-end check against a running gateway and a real T3 host (`npm run e2e:live`), outside the test suite. If the job it cancels has already finished, it starts one replacement and cancels that.
+- Schema migration 2: `jobs.standing` and the terminal job state `released`, for standing jobs. It rebuilds the `jobs` table to change its state constraint and keeps every row, event and request id. Migrations are append-only from here on. Back up the data directory before updating a deployed gateway (see docs/operations.md).
 - `doctor`'s public URL check requires this gateway's own metadata (`resource_name` `t3-fleet-gateway`), so another server's metadata for the same resource fails it.
 
 ### Fixed

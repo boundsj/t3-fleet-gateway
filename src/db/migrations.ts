@@ -2,12 +2,24 @@ export interface Migration {
   version: number;
   name: string;
   sql: string;
+  /**
+   * The migration rebuilds a table that others reference (SQLite cannot alter a CHECK constraint):
+   * it runs with foreign key enforcement off and must leave no violations (SQLite's documented
+   * procedure for schema changes ALTER TABLE cannot make).
+   */
+  rebuildsTables?: boolean;
 }
 
+/** Every column of `jobs` as created by migration 1, in order. */
+const JOBS_V1_COLUMNS = `id, client_id, request_id, project_alias, host_id, t3_project_id, state, task, title, branch, runtime_mode,
+  t3_thread_id, t3_thread_title, t3_thread_link, last_run_id, pending_request_ids, latest_message_excerpt, latest_activity_at,
+  read_position, host_unreachable_since, last_error_code, last_error_message, created_at, updated_at, state_changed_at,
+  dispatch_started_at, finished_at`;
+
 /**
- * Append-only list. Never edit a shipped migration; add a new one. Until the first release no
- * database has been deployed, so migration 1 is still corrected in place. Times are Unix milliseconds.
- * The jobs, job_events and idempotency_keys tables are used by the job layer.
+ * Append-only list. Never edit a migration once it is in a commit on main: databases in use have
+ * applied it. Add a new one. Times are Unix milliseconds. The jobs, job_events and idempotency_keys
+ * tables are used by the job layer.
  */
 export const MIGRATIONS: readonly Migration[] = [
   {
@@ -173,6 +185,56 @@ CREATE TABLE idempotency_keys (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (client_id, tool, request_id)
 ) STRICT;
+`,
+  },
+  {
+    version: 2,
+    name: 'standing jobs',
+    rebuildsTables: true,
+    // jobs gains `standing` (an existing T3 thread the operator adopted, rather than one the gateway
+    // launched) and the terminal state `released` (the operator stopped tracking a standing job).
+    // The state CHECK can only change by rebuilding the table; every row is copied as it is.
+    sql: `
+CREATE TABLE jobs_v2 (
+  id TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  project_alias TEXT NOT NULL,
+  host_id TEXT NOT NULL,
+  t3_project_id TEXT,
+  state TEXT NOT NULL CHECK (state IN (
+    'queued', 'dispatching', 'running', 'needs_input', 'idle',
+    'cancel_requested', 'cancelled', 'failed', 'unknown', 'released'
+  )),
+  task TEXT NOT NULL,
+  title TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  runtime_mode TEXT NOT NULL,
+  t3_thread_id TEXT,
+  t3_thread_title TEXT,
+  t3_thread_link TEXT,
+  last_run_id TEXT,
+  pending_request_ids TEXT NOT NULL DEFAULT '[]',
+  latest_message_excerpt TEXT,
+  latest_activity_at INTEGER,
+  read_position INTEGER,
+  host_unreachable_since INTEGER,
+  last_error_code TEXT,
+  last_error_message TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  state_changed_at INTEGER NOT NULL,
+  dispatch_started_at INTEGER,
+  finished_at INTEGER,
+  standing INTEGER NOT NULL DEFAULT 0 CHECK (standing IN (0, 1))
+) STRICT;
+INSERT INTO jobs_v2 (${JOBS_V1_COLUMNS}) SELECT ${JOBS_V1_COLUMNS} FROM jobs ORDER BY rowid;
+DROP TABLE jobs;
+ALTER TABLE jobs_v2 RENAME TO jobs;
+CREATE INDEX jobs_state ON jobs(state);
+CREATE INDEX jobs_host_state ON jobs(host_id, state);
+CREATE INDEX jobs_project_created ON jobs(project_alias, created_at DESC);
+CREATE INDEX jobs_thread ON jobs(t3_thread_id);
 `,
   },
 ];

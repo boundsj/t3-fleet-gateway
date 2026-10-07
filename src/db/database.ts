@@ -35,11 +35,28 @@ export function migrate(db: Database, migrations: readonly Migration[] = MIGRATI
   }
   for (const migration of migrations) {
     if (migration.version <= current) continue;
-    transaction(db, () => {
-      db.exec(migration.sql);
-      db.exec(`PRAGMA user_version = ${migration.version}`);
-    });
+    // PRAGMA foreign_keys cannot change inside a transaction, so it is switched around it.
+    const enforced = foreignKeysEnforced(db);
+    if (migration.rebuildsTables && enforced) db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      transaction(db, () => {
+        db.exec(migration.sql);
+        if (migration.rebuildsTables) {
+          const violations = db.prepare('PRAGMA foreign_key_check').all();
+          if (violations.length > 0) {
+            throw new GatewayError('database_error', `Migration ${migration.version} would leave ${violations.length} broken foreign key reference(s)`);
+          }
+        }
+        db.exec(`PRAGMA user_version = ${migration.version}`);
+      });
+    } finally {
+      if (migration.rebuildsTables && enforced) db.exec('PRAGMA foreign_keys = ON');
+    }
   }
+}
+
+function foreignKeysEnforced(db: Database): boolean {
+  return (db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number }).foreign_keys === 1;
 }
 
 export function openDatabase(path: string): Database {
