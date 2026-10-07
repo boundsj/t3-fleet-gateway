@@ -37,11 +37,21 @@ export interface ServiceOptions {
   runCommand?: HostRegistryOptions['runCommand'];
 }
 
+export interface Storage {
+  db: Database;
+  key: Buffer;
+}
+
+/** Open the data directory and database only: enough for commands that need no config. */
+export function openStorage(dataDir: string): Storage {
+  const data = openDataDir(dataDir);
+  return { db: openDatabase(data.databasePath), key: data.key };
+}
+
 export function openServices(options: ServiceOptions): GatewayServices {
   const { config, logger } = options;
   const clock = options.clock ?? systemClock;
-  const data = openDataDir(options.dataDir);
-  const db = openDatabase(data.databasePath);
+  const { db, key } = openStorage(options.dataDir);
   const registry = new HostRegistry({
     hosts: config.hosts,
     store: new CredentialStore(db),
@@ -53,11 +63,11 @@ export function openServices(options: ServiceOptions): GatewayServices {
   return {
     config,
     db,
-    key: data.key,
+    key,
     clock,
     logger,
     clients: new ClientStore(db, clock),
-    approvals: new ApprovalCodes(db, data.key, clock),
+    approvals: new ApprovalCodes(db, key, clock),
     tokens: new TokenService(db, clock, { resource: mcpResource(config), ...config.tokens }, logTokenEvent(logger)),
     registry,
     async close() {
@@ -96,6 +106,9 @@ export async function startGateway(options: ServiceOptions & { tools?: (services
   } catch (error) {
     await services.close();
     throw error;
+  }
+  for (const host of config.hosts) {
+    if (services.registry.credentialStatus(host.id).state === 'missing') logger.warn('host.not_enrolled', { hostId: host.id });
   }
   const renewal = startRenewalLoop(services.registry, config.renewal.checkEveryMinutes * MINUTE, logger);
   logger.info('gateway.started', { listen: `${config.listen.host}:${server.port}`, publicUrl: config.publicUrl, hosts: config.hosts.length });

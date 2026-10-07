@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Rendered by install.sh. Every __PLACEHOLDER__ is replaced with an absolute path or value. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_BIN__</string>
+    <string>__REPO_DIR__/bin/t3-fleet-gateway.js</string>
+    <string>serve</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO_DIR__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>T3FG_CONFIG</key>
+    <string>__CONFIG_PATH__</string>
+    <key>T3FG_DATA_DIR</key>
+    <string>__DATA_DIR__</string>
+    <!-- launchd starts with a minimal PATH; the pairing command (t3) must be found on it. -->
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/gateway.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/gateway.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,28 @@
+# systemd user unit for Linux. Install with:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/systemd/t3-fleet-gateway.service ~/.config/systemd/user/
+#   edit ExecStart and WorkingDirectory to point at your checkout, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now t3-fleet-gateway
+#   loginctl enable-linger "$USER"   # keep it running while you are logged out
+[Unit]
+Description=t3-fleet-gateway: MCP gateway from hosted agents to T3 Code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/t3-fleet-gateway
+ExecStart=/usr/bin/env node /path/to/t3-fleet-gateway/bin/t3-fleet-gateway.js serve
+Environment=T3FG_CONFIG=%h/.config/t3-fleet-gateway/config.json
+Environment=T3FG_DATA_DIR=%h/.local/share/t3-fleet-gateway
+# The pairing command (for example `t3`) must be on this PATH.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+UMask=0077
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target
