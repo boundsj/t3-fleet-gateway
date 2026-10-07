@@ -94,6 +94,13 @@ Config fields (validate on load with clear errors):
 
 `runtimeMode` defaults to `approval-required` when omitted. Operators choose looser modes per project deliberately.
 
+Validation rules beyond types (see `docs/configuration.md` for every field):
+
+- `publicUrl`, `t3Url` and `allowedOrigins` entries are origins only; `http` is accepted only for loopback hosts.
+- `listen.host` must be a loopback address.
+- T3 `access` is one of `read-only`, `approval-required`, `auto-accept-edits`, `auto`, `full-access`. T3 treats it as the ceiling for thread runtime modes, so a project's `runtimeMode` may not exceed its host's `access`, and a `read-only` host carries no projects.
+- Optional `allowedOrigins` (default empty) lists extra `Origin` values `/mcp` accepts besides `publicUrl`.
+
 ## Agent-facing authorization (gateway as OAuth server)
 
 Follow the MCP authorization spec (2025-06-18) and OAuth 2.1:
@@ -104,6 +111,8 @@ Follow the MCP authorization spec (2025-06-18) and OAuth 2.1:
 - `GET /oauth/authorize`: validate client, redirect URI exact match, PKCE S256, `resource` (if present) equals ours, scopes. Render the approval page. Never redirect for an invalid client or redirect URI.
 - Approval page: server-rendered HTML, no external assets, strict CSP, `X-Frame-Options: DENY`. Shows the client name, the redirect origin in full, and requested access. The operator enters a one-time approval code and chooses **Read** (`fleet:read`) or **Operate** (`fleet:read fleet:operate`). The form carries an HMAC of the authorization request to prevent tampering.
 - Approval codes: minted by the CLI (`t3-fleet-gateway pair --ttl 15m`), stored hashed, single use, expire. Throttle failures: per authorization request and globally (for example 5 per request, 20 per hour), then refuse new attempts for a cool-down and log it.
+  - As built: codes are 10 Crockford base32 characters (50 bits), shown as `XXXXX-XXXXX`, accepted in any case and spacing, stored as HMAC-SHA256 under the server key, TTL 15 minutes by default (1 minute to 24 hours). After 5 failures an authorization request is locked; after 20 failures in a rolling hour all approvals are refused until the hour clears (that window is the cool-down). The approval form expires 10 minutes after it is rendered.
+  - Registration is limited to 30 new clients per hour, and clients that never complete an approval are deleted after a day.
 - `POST /oauth/token`:
   - `authorization_code`: single-use codes (60 s), PKCE verification, redirect URI and client match, `resource` match. Issue an access token and a refresh token.
   - `refresh_token`: rotation. The new pair replaces the old. Reuse of a rotated refresh token after a short grace window (about 2 minutes, to absorb client retries) revokes the whole token family. Refresh tokens expire after `refreshIdleTtlDays` without use.
@@ -115,7 +124,7 @@ Follow the MCP authorization spec (2025-06-18) and OAuth 2.1:
 
 - Streamable HTTP on `POST /mcp`. Stateless mode with JSON responses (survives restarts, no session affinity). 2026-07-28 requests go to the SDK's `createMcpHandler`; 2025-era requests (classified with the SDK's `isLegacyRequest`) are served by a fresh stateless `WebStandardStreamableHTTPServerTransport` per request with `enableJsonResponse`, because the handler's built-in legacy fallback always answers with an SSE stream. `GET` and `DELETE` on `/mcp` answer `405`: there are no sessions to stream or end.
 - Must accept in-session requests that omit `MCP-Protocol-Version` (observed from Grok Bot's client). Add a regression test.
-- Origin header validation per the spec's DNS-rebinding guidance, without breaking server-to-server clients that send no Origin.
+- Origin header validation per the spec's DNS-rebinding guidance, without breaking server-to-server clients that send no Origin. As built: a request with an `Origin` other than `publicUrl` or an `allowedOrigins` entry gets `403`; no `Origin` is accepted. The `Host` header is not validated, because tunnels differ in what they forward and every `/mcp` request needs a bearer token anyway.
 - Tool results: `structuredContent` plus a short human-readable `text` summary. Errors as tool errors (`isError: true`) with a stable `code` and actionable message.
 
 ### Tools
@@ -124,7 +133,7 @@ Scopes: **read** = `fleet:read`, **operate** = `fleet:operate`.
 
 | Tool | Scope | Purpose |
 | --- | --- | --- |
-| `fleet_status` | read | Hosts (reachable, T3 version, credential expiry, running and queued job counts), configured projects (alias, description, host), gateway version. |
+| `fleet_status` | read | Hosts (reachable, T3 version, credential expiry, running and queued job counts), configured projects (alias, description, host), gateway version. "Running" counts the states that hold a concurrency slot: `dispatching`, `running`, `needs_input`, `cancel_requested` and `unknown`. |
 | `work_list` | read | Jobs filtered by project and state, newest first, bounded. |
 | `work_status` | read | One job: state, project, host, T3 thread id and title, branch, timestamps, pending requests, latest worker message excerpt (bounded), last error. |
 | `work_feed` | read | Events since a cursor (state changes, needs input, finished turns, failures) plus the list of jobs currently needing attention. Returns the next cursor. Designed for an agent's scheduled routine. |
@@ -175,13 +184,15 @@ Every transition appends to `job_events` (append-only) with a monotonically incr
 
 Per host, the gateway obtains a T3 MCP credential with T3's documented pairing-code approval, with no browser:
 
-1. `POST {t3Url}/oauth/mcp/register` with a loopback redirect URI (`http://127.0.0.1:<unused-port>/callback`); the redirect is never followed.
+1. `POST {t3Url}/oauth/mcp/register` with a loopback redirect URI (`http://127.0.0.1:<unused-port>/callback`); the redirect is never followed. The client is named `t3-fleet-gateway (<host id>)`, which is the label T3 shows for the resulting session.
 2. Run the host's `mintPairingCode` command (local `t3` CLI, or for a remote host, an operator-provided command such as `ssh other-host t3 auth pairing create …`) and parse `credential` from its JSON.
 3. `POST {t3Url}/oauth/mcp/decision` with `{ authorization: {response_type, client_id, redirect_uri, code_challenge, code_challenge_method: "S256", state, resource}, decision: { _tag: "pairing-code", access, code } }`, read `redirectTo`, extract `code`.
 4. `POST {t3Url}/oauth/mcp/token` (form-encoded, PKCE verifier, `resource = {t3Url}/mcp`). Store the access token and its expiry.
 5. Verify with `t3_environment_read`, then switch over.
 
-T3 issues no refresh tokens; credentials last 30 days. The renewal job re-enrolls when fewer than `renewWhenDaysLeft` days remain, keeps the old credential until the new one is verified, and alerts in logs and `fleet_status` if renewal fails. Old T3 sessions expire on their own; the operator can revoke them in T3's Settings → Connections.
+T3 issues no refresh tokens; credentials last 30 days. The renewal job re-enrolls when fewer than `renewWhenDaysLeft` days remain (or the credential has expired), keeps the old credential until the new one is verified, and alerts in logs and `fleet_status` if renewal fails. It does not enroll hosts that were never enrolled; `serve` logs `host.not_enrolled` for those.
+
+The T3 client keeps one MCP session per host and reconnects after failures or a credential change. A `404` (T3 forgot the session, so it never handled the call) is retried once on a new session. Other transport failures are retried once only for read-only tools; for state-changing tools a lost response is ambiguous, and the job layer must record it as `unknown` rather than retry. Old T3 sessions expire on their own; the operator can revoke them in T3's Settings → Connections.
 
 CLI: `hosts enroll <id>`, `hosts status`.
 
@@ -215,3 +226,8 @@ This automates T3's consent step using the operator's own machine access (the sa
 - Gateway terminates MCP itself instead of proxying T3's MCP: agents get a small job-level contract, and client quirks are absorbed by our server.
 - Downstream access level defaults to T3 "auto" (Full access) because the gateway enforces its own scopes and per-project runtime modes.
 - Polling instead of webhooks: T3 has no completion webhooks; the gateway is always on.
+- v2 MCP SDK split packages over 1.x: current stable line, far fewer dependencies, serves both protocol eras (see Runtime).
+- Own OAuth server on `node:http` instead of SDK helpers: v2 freezes its authorization-server helpers in a legacy package, and the rules here (approval codes, family revocation, grace window) need custom logic anyway.
+- 2025-era requests get a per-request stateless transport with JSON responses instead of the SDK handler's SSE-only legacy fallback, matching the JSON responses T3 itself sends to the same clients.
+- Refresh grace window semantics: a retry of a rotated refresh token within two minutes succeeds and retires the pair the client never received; presenting that retired token later, or replaying a token whose successor was already used, revokes the family.
+- The package is not published to npm: Node does not strip types under `node_modules`, so it runs from a checkout (or `npm link`).
