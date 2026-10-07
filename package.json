@@ -9,7 +9,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test --test-reporter=spec \"test/**/*.test.ts\"",
+    "test": "node --test --test-timeout=30000 --test-reporter=spec \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test"
   },
