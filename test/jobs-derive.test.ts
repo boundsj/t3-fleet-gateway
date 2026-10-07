@@ -32,6 +32,7 @@ function job(overrides: Partial<Job> = {}): Job {
     lastErrorMessage: null,
     createdAt: 0,
     updatedAt: 0,
+    stateChangedAt: 0,
     dispatchStartedAt: 0,
     finishedAt: null,
     ...overrides,

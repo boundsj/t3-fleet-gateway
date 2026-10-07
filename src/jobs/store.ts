@@ -30,7 +30,10 @@ export interface Job {
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
   createdAt: number;
+  /** When any field last changed. Writes that change nothing (an unchanged thread polled again) leave it. */
   updatedAt: number;
+  /** When the job entered its current state. */
+  stateChangedAt: number;
   dispatchStartedAt: number | null;
   finishedAt: number | null;
 }
@@ -113,6 +116,7 @@ interface JobRow {
   last_error_message: string | null;
   created_at: number;
   updated_at: number;
+  state_changed_at: number;
   dispatch_started_at: number | null;
   finished_at: number | null;
 }
@@ -162,6 +166,7 @@ function toJob(row: JobRow): Job {
     lastErrorMessage: row.last_error_message,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    stateChangedAt: row.state_changed_at,
     dispatchStartedAt: row.dispatch_started_at,
     finishedAt: row.finished_at,
   };
@@ -325,10 +330,10 @@ export class JobStore {
       const now = this.#clock();
       this.#db
         .prepare(
-          `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode, created_at, updated_at, state_changed_at)
+           VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(job.id, job.clientId, job.requestId, job.projectAlias, job.hostId, job.task, job.title, job.branch, job.runtimeMode, now, now);
+        .run(job.id, job.clientId, job.requestId, job.projectAlias, job.hostId, job.task, job.title, job.branch, job.runtimeMode, now, now, now);
       this.#insertEvent(job.id, 'created', null, 'queued', {}, now);
       this.#db
         .prepare('INSERT INTO idempotency_keys (client_id, request_id, tool, input_hash, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
@@ -341,13 +346,14 @@ export class JobStore {
   /**
    * Move a job to `to` if it is currently in one of `from`, applying `changes` and appending a
    * `state_changed` event. Returns the updated job, or undefined when the job was in another state.
+   * `to` may equal the current state: then only the changes are applied, guarded by that state.
    */
   transition(id: string, options: TransitionOptions): Job | undefined {
     return transaction(this.#db, () => {
       const current = this.get(id);
       if (!current || !options.from.includes(current.state)) return undefined;
       const now = this.#clock();
-      this.#write(id, options.changes ?? {}, now, options.to);
+      if (!this.#write(current, options.changes ?? {}, now, options.to)) return current;
       if (current.state !== options.to) {
         this.#insertEvent(id, 'state_changed', current.state, options.to, options.detail ?? {}, now);
         this.#logger.info('job.state_changed', {
@@ -364,8 +370,8 @@ export class JobStore {
 
   /** Change fields without changing state and without an event. */
   update(id: string, changes: JobChanges): void {
-    if (Object.keys(changes).length === 0) return;
-    this.#write(id, changes, this.#clock());
+    const current = this.get(id);
+    if (current) this.#write(current, changes, this.#clock());
   }
 
   /** Record an event that is not a state change (for example a follow-up sent to a running job). */
@@ -407,7 +413,7 @@ export class JobStore {
   }
 
   /**
-   * Jobs that want the agent's attention, most recently changed first: blocked or unconfirmed
+   * Jobs that want the agent's attention, most recent state change first: blocked or unconfirmed
    * jobs at any age, and jobs that went idle or failed within `recentMs`.
    */
   attention(now: number, recentMs: number, limit: number, clientId?: string): Job[] {
@@ -415,8 +421,8 @@ export class JobStore {
     const rows = this.#db
       .prepare(
         `SELECT * FROM jobs
-          WHERE (state IN ('needs_input', 'unknown') OR (state IN ('idle', 'failed') AND updated_at >= ?)) ${mine}
-          ORDER BY updated_at DESC, rowid DESC LIMIT ?`,
+          WHERE (state IN ('needs_input', 'unknown') OR (state IN ('idle', 'failed') AND state_changed_at >= ?)) ${mine}
+          ORDER BY state_changed_at DESC, rowid DESC LIMIT ?`,
       )
       .all(...(clientId === undefined ? [now - recentMs, limit] : [now - recentMs, clientId, limit])) as unknown as JobRow[];
     return rows.map(toJob);
@@ -449,19 +455,26 @@ export class JobStore {
       .run(clientId, tool, requestId);
   }
 
-  #write(id: string, changes: JobChanges, now: number, state?: JobState): void {
-    const sets: string[] = ['updated_at = ?'];
-    const params: (string | number | null)[] = [now];
-    if (state !== undefined) {
-      sets.push('state = ?', 'finished_at = ?');
-      params.push(state, isTerminal(state) ? now : null);
+  /** Write what differs from `current`. Returns false, writing nothing, when nothing differs. */
+  #write(current: Job, changes: JobChanges, now: number, state?: JobState): boolean {
+    const sets: string[] = [];
+    const params: (string | number | null)[] = [];
+    if (state !== undefined && state !== current.state) {
+      sets.push('state = ?', 'state_changed_at = ?', 'finished_at = ?');
+      params.push(state, now, isTerminal(state) ? now : null);
     }
     for (const [key, value] of Object.entries(changes) as [keyof JobChanges, JobChanges[keyof JobChanges]][]) {
       if (value === undefined) continue;
+      const next = columnValue(key, value);
+      if (next === columnValue(key, current[key])) continue;
       sets.push(`${COLUMNS[key]} = ?`);
-      params.push(columnValue(key, value));
+      params.push(next);
     }
-    this.#db.prepare(`UPDATE jobs SET ${sets.join(', ')} WHERE id = ?`).run(...params, id);
+    if (sets.length === 0) return false;
+    sets.push('updated_at = ?');
+    params.push(now);
+    this.#db.prepare(`UPDATE jobs SET ${sets.join(', ')} WHERE id = ?`).run(...params, current.id);
+    return true;
   }
 
   #insertEvent(jobId: string, type: string, from: JobState | null, to: JobState | null, detail: EventDetail, now: number): void {

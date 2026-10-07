@@ -48,8 +48,8 @@ test('fleet_status reports hosts, credentials, job counts and projects', async (
   await registry.renewDue();
   await down.stop();
   const insertJob = gw.services.db.prepare(
-    `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode, created_at, updated_at)
-     VALUES (?, 'c', ?, 'pilot', 'alpha', ?, 'synthetic task', 't', 'b', 'approval-required', 0, 0)`,
+    `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode, created_at, updated_at, state_changed_at)
+     VALUES (?, 'c', ?, 'pilot', 'alpha', ?, 'synthetic task', 't', 'b', 'approval-required', 0, 0, 0)`,
   );
   for (const [id, state] of [['j1', 'running'], ['j2', 'needs_input'], ['j3', 'queued'], ['j4', 'failed'], ['j5', 'idle']] as const) {
     insertJob.run(id, id, state);

@@ -140,6 +140,7 @@ CREATE TABLE jobs (
   last_error_message TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  state_changed_at INTEGER NOT NULL,
   dispatch_started_at INTEGER,
   finished_at INTEGER
 ) STRICT;

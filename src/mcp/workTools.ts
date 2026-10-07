@@ -43,7 +43,8 @@ const jobSchema = z.object({
     .nullable()
     .describe('Opens the job thread in the T3 app: give it to the person when you mention the job. null until the thread exists'),
   createdAt: time,
-  updatedAt: time,
+  updatedAt: time.describe('When anything about the job last changed'),
+  stateChangedAt: time.describe('When the job entered its current state'),
   finishedAt: nullableTime,
   startedByYou: z.boolean(),
 });
@@ -97,6 +98,7 @@ export function jobView(job: Job, context: ToolContext): JobView {
     link: job.threadLink,
     createdAt: isoTime(job.createdAt),
     updatedAt: isoTime(job.updatedAt),
+    stateChangedAt: isoTime(job.stateChangedAt),
     finishedAt: job.finishedAt === null ? null : isoTime(job.finishedAt),
     startedByYou: job.clientId === context.clientId,
   };

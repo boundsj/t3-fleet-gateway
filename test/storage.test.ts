@@ -86,8 +86,8 @@ describe('database', () => {
     const db = openDatabase(join(tempDir(t), 'test.db'));
     t.after(() => db.close());
     db.prepare(
-      `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode, created_at, updated_at)
-       VALUES ('j1', 'c', 'r', 'p', 'h', 'queued', 't', 't', 'b', 'approval-required', 0, 0)`,
+      `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode, created_at, updated_at, state_changed_at)
+       VALUES ('j1', 'c', 'r', 'p', 'h', 'queued', 't', 't', 'b', 'approval-required', 0, 0, 0)`,
     ).run();
     db.prepare("INSERT INTO job_events (job_id, type, to_state, created_at) VALUES ('j1', 'state', 'queued', 0)").run();
     assert.throws(() => db.prepare("UPDATE job_events SET type = 'x'").run(), /append-only/);

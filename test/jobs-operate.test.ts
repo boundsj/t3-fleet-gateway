@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { MINUTE } from '../src/time.ts';
+import { HOUR, MINUTE } from '../src/time.ts';
 import { FAKE_ENVIRONMENT_ID } from './helpers/fakeT3.ts';
 import { connectAgent, jobState, startJob, startJobHarness, type Agent } from './helpers/jobs.ts';
 
@@ -324,6 +324,24 @@ describe('work_feed', () => {
     const reader = await connectAgent(t, gw, 'read');
     assert.equal((await reader.call<FeedPage>('work_feed', { mine: true })).events.length, 0, 'mine filters to the caller');
     assert.ok((await reader.call<FeedPage>('work_feed', {})).events.length > 0);
+  });
+
+  test('an idle job leaves the attention list a day after it went idle, however often it is polled', async (t) => {
+    const { fake, gw, agent, tick, tickAfter } = await startJobHarness(t);
+    const job = await startJob(agent);
+    await tick();
+    fake.finishTurn(fake.threadForJob(job.jobId).threadId, 'Synthetic done');
+    await tick();
+    const idle = await agent.call<Status & { updatedAt: string; stateChangedAt: string }>('work_status', { jobId: job.jobId });
+    assert.equal(idle.state, 'idle');
+    assert.ok((await agent.call<FeedPage>('work_feed', {})).attention.some((entry) => entry.jobId === job.jobId));
+    for (let hour = 0; hour < 48; hour++) await tickAfter(HOUR);
+    const reader = await connectAgent(t, gw, 'read'); // the first agent's access token has expired by now
+    const later = await reader.call<Status & { updatedAt: string; stateChangedAt: string }>('work_status', { jobId: job.jobId });
+    assert.equal(later.state, 'idle');
+    assert.equal(later.stateChangedAt, idle.stateChangedAt);
+    assert.equal(later.updatedAt, idle.updatedAt, 'reading an unchanged thread again changes nothing');
+    assert.equal((await reader.call<FeedPage>('work_feed', {})).attention.some((entry) => entry.jobId === job.jobId), false);
   });
 
   test('read agents can follow work but not operate it', async (t) => {
