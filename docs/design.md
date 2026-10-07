@@ -267,8 +267,8 @@ This automates T3's consent step using the operator's own machine access (the sa
 ## Operations
 
 - `deploy/launchd/` template and installer for macOS (KeepAlive); a `systemd` user unit example for Linux.
-- `t3-fleet-gateway doctor`: config validity, file permissions, database health, each host's reachability and credential expiry, public URL metadata.
-- Graceful shutdown: stop accepting, finish in-flight requests, persist watcher state. As built: the HTTP server drains (up to 10 seconds), then the job engine stops after its current tick (a launch in progress completes or times out), then renewal stops and the database closes. Every job change is written when it happens, so there is nothing else to persist; a job left `dispatching` by a crash is reconciled at the next start.
+- `t3-fleet-gateway doctor`: config validity, file permissions, database health, each host's reachability and credential expiry, public URL metadata. As built, the public URL check requires this gateway's own metadata (`resource` `<publicUrl>/mcp` and `resource_name` `t3-fleet-gateway`), not any server's metadata for the same resource.
+- Graceful shutdown: stop accepting, finish in-flight requests, persist watcher state. As built: the HTTP server drains (up to 10 seconds), then the job engine stops after its current tick (a launch in progress completes or times out), then renewal stops and the database closes. The startup model check (`project.model_missing`) is not waited for: shutdown aborts it, and a T3 call it still has in flight ends when the T3 clients close. The check also skips a host's remaining projects after the host fails once. Every job change is written when it happens, so there is nothing else to persist; a job left `dispatching` by a crash is reconciled at the next start.
 
 ## Testing
 

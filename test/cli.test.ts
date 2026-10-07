@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, test, type TestContext } from 'node:test';
@@ -37,20 +39,27 @@ async function environment(t: TestContext, fake?: FakeT3, extra: Record<string, 
   return { dir, configPath, dataDir: join(dir, 'data'), door };
 }
 
-async function run(env: Env, args: string[], waitForShutdown?: () => Promise<void>) {
+/** `waitForShutdown` may wait for output with `until` before letting `serve` stop. */
+async function run(env: Env, args: string[], waitForShutdown?: (until: (pattern: RegExp) => Promise<void>) => Promise<void>) {
+  const out: string[] = [];
+  const err: string[] = [];
+  const waiters: { pattern: RegExp; resolve: () => void }[] = [];
+  const until = (pattern: RegExp) =>
+    out.some((text) => pattern.test(text)) ? Promise.resolve() : new Promise<void>((resolve) => waiters.push({ pattern, resolve }));
   const serving = waitForShutdown && {
     listenPort: 0,
     waitForShutdown: async (gateway: { port: number }) => {
       env.door.target = gateway.port;
-      await waitForShutdown();
+      await waitForShutdown(until);
       env.door.target = undefined;
     },
   };
-  const out: string[] = [];
-  const err: string[] = [];
   const code = await runCli(args, {
     env: { T3FG_CONFIG: env.configPath, T3FG_DATA_DIR: env.dataDir },
-    out: (text) => out.push(text),
+    out: (text) => {
+      out.push(text);
+      for (const waiter of waiters) if (waiter.pattern.test(text)) waiter.resolve();
+    },
     err: (text) => err.push(text),
     ...serving,
   });
@@ -196,6 +205,22 @@ describe('cli', () => {
     assert.match(served.out, /"event":"gateway.stopped"/);
   });
 
+  test("doctor fails a public URL that serves another server's metadata for the same resource", async (t) => {
+    const env = await environment(t);
+    // T3's own MCP server, say, behind a different proxy on the same URL.
+    const other = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ resource: `${env.door.url}/mcp`, authorization_servers: [env.door.url], resource_name: 'T3 Code' }));
+    });
+    await new Promise<void>((resolve) => other.listen(0, '127.0.0.1', resolve));
+    t.after(() => new Promise<void>((resolve) => other.close(() => resolve())));
+    env.door.target = (other.address() as AddressInfo).port;
+    const result = await run(env, ['doctor']);
+    env.door.target = undefined;
+    assert.equal(result.code, 1);
+    assert.match(result.out, /FAIL  public URL: .* serves a different server's metadata \(resource_name T3 Code, expected t3-fleet-gateway\)/);
+  });
+
   test('doctor fails a project whose launches T3 would refuse for want of a model, and serve warns about it', async (t) => {
     const fake = await startFakeT3();
     t.after(() => fake.close());
@@ -213,12 +238,8 @@ describe('cli', () => {
     assert.match(doctor.out, /Set projects\[\]\.modelSelection or hosts\[\]\.defaultModelSelection for host main/);
     assert.match(doctor.out, /OK    project docs: model from the default of T3 project project-2/);
 
-    let stop: () => void = () => {};
-    const stopped = new Promise<void>((resolve) => (stop = resolve));
-    const served = await run(env, ['serve'], () => {
-      stop();
-      return stopped;
-    });
+    // The check runs in the background; shutdown does not wait for it.
+    const served = await run(env, ['serve'], (until) => until(/"event":"project.model_missing"/));
     const warnings = served.out.split('\n').filter((line) => line.includes('"event":"project.model_missing"'));
     assert.equal(warnings.length, 1);
     assert.match(warnings[0] ?? '', /"project":"pilot"/);

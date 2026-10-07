@@ -44,15 +44,33 @@ export function checkProjectModel(config: GatewayConfig, project: ProjectConfig,
   };
 }
 
-/** At startup, warn about projects whose launches T3 would refuse for want of a model. Never throws. */
-export async function warnProjectsWithoutModel(config: GatewayConfig, registry: HostRegistry, logger: Logger): Promise<void> {
+/**
+ * At startup, warn about projects whose launches T3 would refuse for want of a model. Never throws.
+ * A host whose project list cannot be read is skipped for its remaining projects, and the check
+ * stops when `signal` aborts (shutdown does not wait for it).
+ */
+export async function warnProjectsWithoutModel(
+  config: GatewayConfig,
+  registry: HostRegistry,
+  logger: Logger,
+  signal?: AbortSignal,
+): Promise<void> {
+  const failedHosts = new Set<string>();
   for (const project of config.projects) {
-    if (configuredModel(config, project) || registry.credentialStatus(project.host).state === 'missing') continue;
+    if (signal?.aborted) return;
+    if (failedHosts.has(project.host) || configuredModel(config, project)) continue;
+    if (registry.credentialStatus(project.host).state === 'missing') continue;
     try {
-      if (!checkProjectModel(config, project, await resolveProject(registry, project)).ok) {
+      const t3Project = await resolveProject(registry, project);
+      if (signal?.aborted) return;
+      if (!checkProjectModel(config, project, t3Project).ok) {
         logger.warn('project.model_missing', { project: project.alias, hostId: project.host, fix: 'set modelSelection or the host defaultModelSelection; see doctor' });
       }
     } catch (error) {
+      if (signal?.aborted) return;
+      // not_found concerns this project only; any other failure is reading the host's project list,
+      // which every other project on the host would repeat.
+      if (!(error instanceof GatewayError && error.code === 'not_found')) failedHosts.add(project.host);
       logger.debug('project.model_check_failed', { project: project.alias, hostId: project.host, errorCode: describeError(error).code });
     }
   }

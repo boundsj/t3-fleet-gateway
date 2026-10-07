@@ -17,6 +17,9 @@ export function authorizationServerMetadata(publicUrl: string): Record<string, u
   };
 }
 
+/** Names this gateway in its protected-resource metadata; `doctor` relies on it to tell the gateway from other servers. */
+export const RESOURCE_NAME = 't3-fleet-gateway';
+
 /** RFC 9728 protected resource metadata for the MCP endpoint. */
 export function protectedResourceMetadata(publicUrl: string): Record<string, unknown> {
   return {
@@ -24,7 +27,7 @@ export function protectedResourceMetadata(publicUrl: string): Record<string, unk
     authorization_servers: [publicUrl],
     scopes_supported: SUPPORTED_SCOPES,
     bearer_methods_supported: ['header'],
-    resource_name: 't3-fleet-gateway',
+    resource_name: RESOURCE_NAME,
   };
 }
 

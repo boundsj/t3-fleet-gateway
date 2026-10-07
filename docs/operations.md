@@ -86,7 +86,7 @@ Agents with **Operate** start work with `work_start`; the gateway queues the job
 t3-fleet-gateway doctor
 ```
 
-Checks, in order: the config, data directory permissions, database integrity and schema version, each host's credential and live reachability, that each project resolves to a T3 project and has a model (its own `modelSelection`, its host's `defaultModelSelection`, or the T3 project's default model; without one T3 refuses every launch), and that `publicUrl` serves this gateway's protected resource metadata (which needs `serve` and the tunnel running). Each line is `OK`, `WARN` or `FAIL`; any `FAIL` exits `1`.
+Checks, in order: the config, data directory permissions, database integrity and schema version, each host's credential and live reachability, that each project resolves to a T3 project and has a model (its own `modelSelection`, its host's `defaultModelSelection`, or the T3 project's default model; without one T3 refuses every launch), and that `publicUrl` serves this gateway's protected resource metadata (which needs `serve` and the tunnel running): the `resource` must be `<publicUrl>/mcp` and `resource_name` must be `t3-fleet-gateway`, so another server behind the same URL (T3 itself behind a different proxy, say) fails with "serves a different server's metadata". Each line is `OK`, `WARN` or `FAIL`; any `FAIL` exits `1`.
 
 ## Run as a service
 

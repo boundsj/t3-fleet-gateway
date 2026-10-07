@@ -4,7 +4,7 @@ import { SCHEMA_VERSION, schemaVersion } from '../db/database.ts';
 import { describeError } from '../errors.ts';
 import type { GatewayServices } from '../gateway.ts';
 import { checkProjectModel, resolveProject } from '../hosts/projects.ts';
-import { resourceMetadataUrl } from '../oauth/metadata.ts';
+import { RESOURCE_NAME, resourceMetadataUrl } from '../oauth/metadata.ts';
 import { SECOND } from '../time.ts';
 
 export type CheckLevel = 'ok' | 'warn' | 'fail';
@@ -21,9 +21,14 @@ async function checkPublicUrl(config: GatewayConfig): Promise<CheckResult> {
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(5 * SECOND) });
     if (!response.ok) return { level: 'fail', name, detail: `${url} answered HTTP ${response.status}` };
-    const body = (await response.json()) as { resource?: unknown };
+    const body = (await response.json()) as { resource?: unknown; resource_name?: unknown };
     if (body.resource !== mcpResource(config)) {
       return { level: 'fail', name, detail: `${url} names resource ${String(body.resource)}, expected ${mcpResource(config)}` };
+    }
+    // Any MCP server behind the same URL (T3 itself, behind another proxy) names the same resource.
+    if (body.resource_name !== RESOURCE_NAME) {
+      const named = `resource_name ${String(body.resource_name)}, expected ${RESOURCE_NAME}`;
+      return { level: 'fail', name, detail: `${url} serves a different server's metadata (${named})` };
     }
     return { level: 'ok', name, detail: `${config.publicUrl} serves this gateway's metadata` };
   } catch (error) {

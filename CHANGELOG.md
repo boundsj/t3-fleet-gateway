@@ -18,9 +18,10 @@ All notable changes are recorded here. The project follows [Semantic Versioning]
 - Every job view carries `stateChangedAt` (when the job entered its current state; the feed's attention window and order use it) and `updatedAt` (the last real change, including the host-unreachable mark, not the last poll).
 - Every job view carries `link`, which opens the job's thread in the T3 app, from the launch result on.
 - Error codes `job_state_conflict` and `request_id_conflict`.
-- Config: `watcher.reconcileWindowMinutes`; `hosts[].defaultModelSelection`, the model for projects on that host that set no `modelSelection` (T3 refuses launches without a model when the T3 project has no default). `doctor` fails a project that would have no model, `serve` logs `project.model_missing` at startup, and `fleet_status` shows each project's `runtimeMode` and `modelConfigured`.
+- Config: `watcher.reconcileWindowMinutes`; `hosts[].defaultModelSelection`, the model for projects on that host that set no `modelSelection` (T3 refuses launches without a model when the T3 project has no default). `doctor` fails a project that would have no model, `serve` logs `project.model_missing` at startup (in the background: shutdown does not wait for it, and a host that fails is not asked again for its other projects), and `fleet_status` shows each project's `runtimeMode` and `modelConfigured`.
 - `config.example.json` enrolls its host with `access: "full-access"`: the host's access is only a ceiling, and each project's `runtimeMode` (default `approval-required`) is what limits a job.
 - `scripts/e2e-live.ts`: a live end-to-end check against a running gateway and a real T3 host (`npm run e2e:live`), outside the test suite.
+- `doctor`'s public URL check requires this gateway's own metadata (`resource_name` `t3-fleet-gateway`), so another server's metadata for the same resource fails it.
 
 ### Known limitations
 

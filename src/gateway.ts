@@ -139,17 +139,19 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   });
   services.jobs.wake = () => engine.wake();
   if (options.jobEngine?.autoStart !== false) engine.start();
-  // Checked in the background: an unreachable host must not delay startup. Logged as warnings.
-  const modelCheck = warnProjectsWithoutModel(config, services.registry, logger);
+  // Checked in the background: an unreachable host must not delay startup or shutdown. Logged as warnings.
+  const modelCheck = new AbortController();
+  void warnProjectsWithoutModel(config, services.registry, logger, modelCheck.signal);
   logger.info('gateway.started', { listen: `${config.listen.host}:${server.port}`, publicUrl: config.publicUrl, hosts: config.hosts.length });
   let closing: Promise<void> | undefined;
   const shutdown = async (): Promise<void> => {
     logger.info('gateway.stopping');
+    // Not awaited: a call still in flight ends when the T3 clients close below.
+    modelCheck.abort();
     await server.close();
     // The engine finishes its current tick; job state is already in the database.
     await engine.stop();
     await renewal.stop();
-    await modelCheck;
     await mcp.close();
     await services.close();
     logger.info('gateway.stopped');

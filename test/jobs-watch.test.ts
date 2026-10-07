@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
+import { warnProjectsWithoutModel } from '../src/hosts/projects.ts';
+import { createLogger } from '../src/log.ts';
+import { DEFAULT_T3_TIMEOUT_MS } from '../src/t3/client.ts';
 import { MINUTE } from '../src/time.ts';
 import { assertNotLogged, jobState, startJob, startJobHarness, type JobHarness } from './helpers/jobs.ts';
 import { tempDir } from './helpers/tmp.ts';
@@ -404,5 +407,34 @@ describe('restart recovery', () => {
       ],
     );
     assert.equal(first.fake.launches.length, 1);
+  });
+});
+
+describe('startup model check', () => {
+  test('shutdown does not wait for the model check of a host that does not answer', async (t) => {
+    const dataDir = join(tempDir(t), 'data');
+    const first = await startJobHarness(t, { dataDir });
+    await stopGateway(first);
+    // Project pilot sets no model, so the check reads the host's projects; T3 never answers.
+    first.fake.holdResponses.add('t3_project_list');
+    const second = await startJobHarness(t, { dataDir, door: first.gw.door, fake: first.fake });
+    await first.fake.whenHeld('t3_project_list');
+    const started = Date.now();
+    await second.agent.client.close();
+    await second.gw.gateway.close();
+    assert.ok(Date.now() - started < DEFAULT_T3_TIMEOUT_MS / 3, 'closed without waiting for the T3 call to time out');
+  });
+
+  test('a host that fails the check is not asked again for its other projects', async (t) => {
+    const { fake, gw } = await startJobHarness(t);
+    const { config, registry } = gw.services;
+    const pilot = config.projects.find((project) => project.alias === 'pilot')!;
+    await fake.stop();
+    const lines: string[] = [];
+    const logger = createLogger({ level: 'debug', sink: (line) => lines.push(line) });
+    await warnProjectsWithoutModel({ ...config, projects: [pilot, { ...pilot, alias: 'pilot-2' }] }, registry, logger);
+    const failed = lines.filter((line) => line.includes('"event":"project.model_check_failed"'));
+    assert.equal(failed.length, 1);
+    assert.match(failed[0] ?? '', /"project":"pilot"/);
   });
 });
