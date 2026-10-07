@@ -67,6 +67,8 @@ export interface JobHarnessOptions {
   launchTimeoutMs?: number;
   /** Extra fields for the host's config entry. */
   host?: Record<string, unknown>;
+  /** Extra fields for the pilot project's config entry. */
+  pilot?: Record<string, unknown>;
 }
 
 /**
@@ -80,7 +82,7 @@ export async function startJobHarness(t: TestContext, options: JobHarnessOptions
     config: {
       hosts: [{ id: 'main', t3Url: fake.url, mintPairingCode: fake.mintCommand(), maxConcurrentJobs: options.maxConcurrentJobs ?? 2, ...options.host }],
       projects: [
-        { alias: 'pilot', description: 'Synthetic pilot project', host: 'main', t3ProjectId: 'project-1', runtimeMode: 'auto', baseRef: 'main' },
+        { alias: 'pilot', description: 'Synthetic pilot project', host: 'main', t3ProjectId: 'project-1', runtimeMode: 'auto', baseRef: 'main', ...options.pilot },
         {
           alias: 'docs',
           host: 'main',

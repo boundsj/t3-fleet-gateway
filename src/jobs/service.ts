@@ -119,6 +119,16 @@ export function inputHash(tool: string, input: Record<string, unknown>): string 
   return sha256Hex(JSON.stringify([tool, keys.map((key) => [key, input[key] ?? null])]));
 }
 
+/** Why work_start is refused in a project, and where to send the work instead. */
+function startDisabledMessage(alias: string, standing: Job[]): string {
+  const where =
+    standing.length === 0
+      ? 'It has no standing job yet; ask the operator to adopt one (t3-fleet-gateway jobs adopt).'
+      : `Send the work to its standing job with work_continue instead: ${standing.map((job) => `${job.id} ("${job.title}", ${job.state})`).join(', ')}. ` +
+        'Follow it with work_feed and work_status.';
+  return `Project "${alias}" does not accept work_start (allowWorkStart is false). ${where}`;
+}
+
 /** Anything shaped like a job marker, in any case or spacing. */
 const MARKER_LIKE = /\[\s*job\s*:[^\]]*\]/gi;
 
@@ -171,6 +181,10 @@ export class JobService {
 
   start(caller: Caller, input: StartInput): { job: Job; created: boolean } {
     const project = this.project(input.project);
+    // A retry of a request made before the operator turned work_start off still gets its job back.
+    if (!project.allowWorkStart && !this.store.idempotencyKey(caller.clientId, 'work_start', input.requestId)) {
+      throw new GatewayError('start_disabled', startDisabledMessage(project.alias, this.store.standingJobs(project.alias)));
+    }
     const id = newJobId();
     const result = this.store.create({
       id,

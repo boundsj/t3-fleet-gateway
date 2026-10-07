@@ -18,7 +18,15 @@ interface FleetStatus {
     runningJobs: number;
     queuedJobs: number;
   }[];
-  projects: { alias: string; description: string; host: string; runtimeMode: string; modelConfigured: boolean }[];
+  projects: {
+    alias: string;
+    description: string;
+    host: string;
+    runtimeMode: string;
+    modelConfigured: boolean;
+    allowWorkStart: boolean;
+    standingJobs: { jobId: string; title: string; state: string; link: string | null }[];
+  }[];
 }
 
 test('fleet_status reports hosts, credentials, job counts and projects', async (t) => {
@@ -80,8 +88,8 @@ test('fleet_status reports hosts, credentials, job counts and projects', async (
   assert.equal(gamma?.reachable, null);
   assert.equal(gamma?.credential.state, 'missing');
   assert.deepEqual(status.projects, [
-    { alias: 'pilot', description: 'Scratch repository', host: 'alpha', runtimeMode: 'auto', modelConfigured: false },
-    { alias: 'docs', description: '', host: 'beta', runtimeMode: 'approval-required', modelConfigured: true },
+    { alias: 'pilot', description: 'Scratch repository', host: 'alpha', runtimeMode: 'auto', modelConfigured: false, allowWorkStart: true, standingJobs: [] },
+    { alias: 'docs', description: '', host: 'beta', runtimeMode: 'approval-required', modelConfigured: true, allowWorkStart: true, standingJobs: [] },
   ]);
   const text = JSON.stringify(result.content);
   assert.match(text, /alpha: reachable, T3 1\.2\.3; credential expires in 30 days; 2 running, 1 queued \(max 3\)/);

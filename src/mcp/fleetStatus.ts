@@ -3,6 +3,8 @@ import { configuredModel, RUNTIME_MODES, type GatewayConfig } from '../config.ts
 import type { Database } from '../db/database.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import { jobCountsByHost } from '../jobs/counts.ts';
+import type { JobService } from '../jobs/service.ts';
+import { JOB_STATES } from '../jobs/states.ts';
 import { READ_SCOPE } from '../oauth/scopes.ts';
 import { isoTime } from '../time.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
@@ -50,6 +52,22 @@ const outputSchema = z.object({
           "true when the gateway config sets the model for this project's jobs. false: T3 uses the project's own default model, " +
             'and refuses to launch (the job fails with invalid_request) if it has none; the operator fixes that in the gateway config.',
         ),
+      allowWorkStart: z
+        .boolean()
+        .describe('false: work_start is refused here (start_disabled); give the work to a standing job below with work_continue'),
+      standingJobs: z
+        .array(
+          z.object({
+            jobId: z.string(),
+            title: z.string(),
+            state: z.enum(JOB_STATES),
+            link: z.string().nullable().describe('Opens the thread in the T3 app'),
+          }),
+        )
+        .describe(
+          "Long-lived threads the operator registered in this project, such as a coordinator. Send them work with work_continue " +
+            '(jobId) and follow them with work_feed and work_status',
+        ),
     }),
   ),
 });
@@ -71,7 +89,7 @@ function describeHost(host: HostStatus): string {
   return `${host.id}: ${reach}; ${credential}${renewal}; ${host.runningJobs} running, ${host.queuedJobs} queued (max ${host.maxConcurrentJobs})`;
 }
 
-export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostRegistry; db: Database }) {
+export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostRegistry; db: Database; jobs: JobService }) {
   return defineTool({
     name: 'fleet_status',
     title: 'Fleet status',
@@ -81,8 +99,12 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
       'and how many jobs are running or queued against its concurrency limit. For each project: the alias to use when ' +
       'starting work, a description, the host it runs on, its runtime mode and whether a model is configured. A project ' +
       'whose runtimeMode is approval-required is not unattended: its jobs wait in needs_input until the operator approves in ' +
-      'T3, which you cannot do for them; auto and full-access projects run unattended. Use this first to learn the project ' +
-      'aliases, or to check why work is not progressing. Read-only; safe to call any time.',
+      'T3, which you cannot do for them; auto and full-access projects run unattended. A project may also list standingJobs: ' +
+      'long-lived T3 threads the operator registered there, such as a coordinator ("chief of staff") that plans and delegates ' +
+      'the work itself. For such a project, talk to the coordinator: send it instructions with work_continue on its jobId and ' +
+      'follow its replies with work_feed and work_status, rather than starting jobs. When allowWorkStart is false, work_start ' +
+      'is refused there and the standing jobs are the way in. Use this first to learn the project aliases and where to send ' +
+      'work, or to check why work is not progressing. Read-only; safe to call any time.',
     scope: READ_SCOPE,
     readOnly: true,
     inputSchema: z.object({}),
@@ -112,21 +134,28 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
           };
         }),
       );
+      const standing = deps.jobs.store.standingJobs();
       const projects = deps.config.projects.map((project) => ({
         alias: project.alias,
         description: project.description,
         host: project.host,
         runtimeMode: project.runtimeMode,
         modelConfigured: configuredModel(deps.config, project) !== null,
+        allowWorkStart: project.allowWorkStart,
+        standingJobs: standing
+          .filter((job) => job.projectAlias === project.alias)
+          .map((job) => ({ jobId: job.id, title: job.title, state: job.state, link: job.threadLink })),
       }));
       const summary = [
         `${GATEWAY_NAME} ${GATEWAY_VERSION}: ${hosts.length} host(s), ${projects.length} project(s).`,
         ...hosts.map(describeHost),
-        ...projects.map(
-          (project) =>
-            `project ${project.alias} on ${project.host} (${project.runtimeMode}${project.modelConfigured ? '' : ", T3's default model"})` +
-            `${project.description ? `: ${project.description}` : ''}`,
-        ),
+        ...projects.flatMap((project) => [
+          `project ${project.alias} on ${project.host} (${project.runtimeMode}${project.modelConfigured ? '' : ", T3's default model"}` +
+            `${project.allowWorkStart ? '' : ', work_start disabled'})${project.description ? `: ${project.description}` : ''}`,
+          ...project.standingJobs.map(
+            (job) => `  standing job ${job.jobId} [${job.state}] ${job.title}: send it work with work_continue${job.link ? `; open: ${job.link}` : ''}`,
+          ),
+        ]),
       ].join('\n');
       return { structured: { gateway: { name: GATEWAY_NAME, version: GATEWAY_VERSION }, hosts, projects }, summary };
     },

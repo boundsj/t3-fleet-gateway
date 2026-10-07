@@ -66,6 +66,7 @@ What agents can target. Each entry:
 | `branchPrefix` | `"fleet/"` | Job branches are `<branchPrefix><jobId>`. |
 | `runtimeMode` | `"approval-required"` | T3 runtime mode for job threads: `approval-required`, `auto-accept-edits`, `auto` or `full-access`. Must not exceed the host's `access`; projects cannot be placed on a `read-only` host. See "Approvals and unattended projects" below. |
 | `modelSelection` | `null` | T3 `modelSelection` object (must contain `model`) for this project's launches. Without it the host's `defaultModelSelection` is used, and without that the T3 project's own default model. |
+| `allowWorkStart` | `true` | Whether agents may start new jobs here with `work_start`. Set `false` for a project run by a standing coordinator thread: `work_start` then fails with `start_disabled`, naming the project's standing jobs, and agents send work to those with `work_continue`. See "Projects with a coordinator" below. |
 
 #### Models
 
@@ -74,6 +75,10 @@ T3 refuses to launch a thread without a model when the T3 project has no default
 #### Approvals and unattended projects
 
 The gateway cannot answer permission approvals: T3's tools do not expose them. In a project with `runtimeMode` `approval-required` (the default), every command or edit the worker needs approved waits until you approve it in T3; the job shows `needs_input` with `waitingForApproval` meanwhile, and agents see that state and the project's mode in `fleet_status`. A project that should run unattended needs `runtimeMode` `auto` or `full-access` (and a host `access` at least that high). Choose looser modes per project deliberately: the worker runs in its own worktree, but with the mode's permissions on your machine.
+
+#### Projects with a coordinator
+
+If you run a long-lived T3 thread that coordinates a project (it plans, delegates to child threads of its own and reports back), register it as a standing job (`t3-fleet-gateway jobs adopt <alias> <threadId>`, see [operations.md](operations.md#standing-jobs)) and set `allowWorkStart: false` on the project. Agents then find the coordinator in `fleet_status` (`projects[].standingJobs`, with its job id, title, state and link), give it work with `work_continue`, and follow it with `work_feed` and `work_status`; an attempt to start a separate job there is refused with an error that names the coordinator. Leave `allowWorkStart` at `true` if agents may also start their own jobs alongside it. Changing the setting takes a restart of `serve`, like any config change.
 
 ### `tokens`
 

@@ -72,6 +72,8 @@ const projectSchema = z
       .default('fleet/'),
     runtimeMode: z.enum(RUNTIME_MODES).default('approval-required'),
     modelSelection: modelSelectionSchema.nullable().default(null),
+    /** false: agents cannot start new jobs here, only drive the project's standing jobs with work_continue. */
+    allowWorkStart: z.boolean().default(true),
   })
   .refine((project) => (project.t3ProjectId === undefined) !== (project.t3ProjectTitle === undefined), {
     message: 'set exactly one of t3ProjectId or t3ProjectTitle',

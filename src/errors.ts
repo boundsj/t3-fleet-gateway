@@ -19,6 +19,7 @@ export type ErrorCode =
   | 'insufficient_scope'
   | 'job_state_conflict'
   | 'request_id_conflict'
+  | 'start_disabled'
   | 'internal_error';
 
 export class GatewayError extends Error {

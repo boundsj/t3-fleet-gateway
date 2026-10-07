@@ -355,3 +355,57 @@ describe('standing jobs: CLI', () => {
     assertNotLogged(gw, ['Synthetic Chief of Staff', 'Synthetic chief of staff', 'Synthetic report']);
   });
 });
+
+describe('standing jobs: where agents send work', () => {
+  test('allowWorkStart false refuses work_start and names the standing jobs to use instead', async (t) => {
+    const harness = await startJobHarness(t, { pilot: { allowWorkStart: false } });
+    const { fake, agent } = harness;
+    const none = await agent.callError('work_start', { project: 'pilot', task: 'Synthetic task', requestId: 'off-1' });
+    assert.equal(none.code, 'start_disabled');
+    assert.match(none.text, /Project "pilot" does not accept work_start \(allowWorkStart is false\)\. It has no standing job yet/);
+
+    const { job } = await adopt(harness, coordinatorThread(fake), 'pilot', 'Chief of Staff');
+    const refused = await agent.callError('work_start', { project: 'pilot', task: 'Synthetic task', requestId: 'off-2' });
+    assert.equal(refused.code, 'start_disabled');
+    assert.match(refused.text, new RegExp(`Send the work to its standing job with work_continue instead: ${job.id} \\("Chief of Staff", idle\\)`));
+    assert.equal(fake.launches.length, 1, 'only the synthetic coordinator thread exists');
+    const elsewhere = await agent.call<{ created: boolean }>('work_start', { project: 'docs', task: 'Synthetic task', requestId: 'off-3' });
+    assert.equal(elsewhere.created, true, 'other projects are unaffected');
+  });
+
+  test('a request made before work_start was turned off is still answered with its job', async (t) => {
+    const harness = await startJobHarness(t);
+    const { gw, agent } = harness;
+    const first = await agent.call<{ job: JobView }>('work_start', { project: 'pilot', task: 'Synthetic task', requestId: 'before-1' });
+    const pilot = gw.services.config.projects.find((project) => project.alias === 'pilot');
+    assert.ok(pilot);
+    pilot.allowWorkStart = false;
+    const replay = await agent.call<{ job: JobView; created: boolean }>('work_start', { project: 'pilot', task: 'Synthetic task', requestId: 'before-1' });
+    assert.deepEqual([replay.created, replay.job.jobId], [false, first.job.jobId]);
+    assert.equal((await agent.callError('work_start', { project: 'pilot', task: 'Synthetic task', requestId: 'before-2' })).code, 'start_disabled');
+  });
+
+  test('fleet_status lists each project\'s allowWorkStart and open standing jobs', async (t) => {
+    const harness = await startJobHarness(t, { pilot: { allowWorkStart: false } });
+    const { fake, gw, agent } = harness;
+    const { job } = await adopt(harness, coordinatorThread(fake), 'pilot', 'Chief of Staff');
+    const old = await adopt(harness, coordinatorThread(fake), 'pilot', 'Retired coordinator');
+    gw.services.jobs.release(old.job.id);
+    const result = await agent.client.callTool({ name: 'fleet_status', arguments: {} });
+    const { projects } = result.structuredContent as {
+      projects: { alias: string; allowWorkStart: boolean; standingJobs: { jobId: string; title: string; state: string; link: string | null }[] }[];
+    };
+    assert.deepEqual(
+      projects.map((project) => [project.alias, project.allowWorkStart, project.standingJobs]),
+      [
+        ['pilot', false, [{ jobId: job.id, title: 'Chief of Staff', state: 'idle', link: job.threadLink }]],
+        ['docs', true, []],
+      ],
+    );
+    assert.match(job.threadLink ?? '', /^t3-thread:/);
+    const text = JSON.stringify(result.content);
+    assert.match(text, /project pilot on main \(auto, T3's default model, work_start disabled\): Synthetic pilot project/);
+    assert.match(text, new RegExp(`standing job ${job.id} \\[idle\\] Chief of Staff: send it work with work_continue; open: t3-thread://`));
+    assert.doesNotMatch(text, /Retired coordinator/, 'released jobs are not listed');
+  });
+});

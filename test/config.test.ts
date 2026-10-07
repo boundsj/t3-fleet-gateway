@@ -30,6 +30,13 @@ describe('config', () => {
     assert.deepEqual(config.hosts[0]?.mintPairingCode, ['t3', 'auth', 'pairing', 'create', '--ttl', '5m', '--json']);
   });
 
+  test('projects allow work_start unless allowWorkStart is false', () => {
+    const project = { alias: 'pilot', host: 'main', t3ProjectId: 'project-1' };
+    assert.equal(parseConfig({ ...minimal, projects: [project] }).projects[0]?.allowWorkStart, true);
+    assert.equal(parseConfig({ ...minimal, projects: [{ ...project, allowWorkStart: false }] }).projects[0]?.allowWorkStart, false);
+    invalid({ ...minimal, projects: [{ ...project, allowWorkStart: 'no' }] }, /projects\[0\]\.allowWorkStart/);
+  });
+
   test('the committed example config is valid', () => {
     const config = loadConfig(join(import.meta.dirname, '..', 'config.example.json'));
     assert.equal(config.projects[0]?.runtimeMode, 'approval-required');

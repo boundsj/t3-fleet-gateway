@@ -80,7 +80,9 @@ By default an agent starts a new T3 thread for each piece of work. If you alread
 node bin/t3-fleet-gateway.js jobs adopt pilot <thread id> --title "Chief of Staff"
 ```
 
-The gateway checks that the thread belongs to project `pilot` and records it as a **standing job**. The agent sees it with `standing: true` in `work_list`, `work_feed` and `work_status`, sends it instructions with `work_continue`, and follows its turns with `work_feed` and `work_status`, just as for jobs it started. A standing job takes no concurrency slot, `work_cancel` only interrupts its current turn (it stays open), and the agent can never close it. `jobs release <job id>` stops the gateway from following it without touching the thread. Details: [docs/operations.md](docs/operations.md#standing-jobs).
+The gateway checks that the thread belongs to project `pilot` and records it as a **standing job**. The agent sees it with `standing: true` in `work_list`, `work_feed` and `work_status`, sends it instructions with `work_continue`, and follows its turns with `work_feed` and `work_status`, just as for jobs it started. A standing job takes no concurrency slot, `work_cancel` only interrupts its current turn (it stays open), and the agent can never close it. `jobs release <job id>` stops the gateway from following it without touching the thread.
+
+To make the coordinator the only way into the project, set `"allowWorkStart": false` on it in the config: `work_start` there then fails with `start_disabled`, naming the standing job to use instead, and `fleet_status` lists each project's standing jobs so the agent knows where to send work. Details: [docs/operations.md](docs/operations.md#standing-jobs) and [docs/configuration.md](docs/configuration.md#projects-with-a-coordinator).
 
 ## Security model, in short
 
