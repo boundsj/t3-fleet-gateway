@@ -317,9 +317,12 @@ export class JobService {
     }
     let status: string;
     try {
-      const result = await this.#registry.client(job.hostId).interruptThread({
+      const client = this.#registry.client(job.hostId);
+      // The interrupt's retry key names the run it stops, so learn which run is active first.
+      const { thread } = await client.readThread({ threadId: job.threadId, limit: 1, runLimit: 1, maxCharsPerItem: 1 });
+      const result = await client.interruptThread({
         threadId: job.threadId,
-        clientRequestId: cancelRequestId(job.id),
+        clientRequestId: cancelRequestId(job.id, thread.activeRunId ?? thread.latestRunId),
         reason: 'Cancelled through t3-fleet-gateway',
       });
       status = result.status;

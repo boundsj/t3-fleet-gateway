@@ -211,6 +211,24 @@ describe('work_cancel', () => {
     assert.equal((await agent.callError('work_continue', { jobId: job.jobId, message: 'x', requestId: 'late' })).code, 'job_state_conflict');
   });
 
+  test('a run that starts after the cancel is interrupted too, and the job is cancelled and frees its slot', async (t) => {
+    const { fake, agent, tick } = await startJobHarness(t, { maxConcurrentJobs: 1 });
+    const job = await startJob(agent);
+    const next = await startJob(agent);
+    await tick();
+    const { threadId } = fake.threadForJob(job.jobId);
+    const result = await agent.call<{ outcome: string; delivered: boolean }>('work_cancel', { jobId: job.jobId });
+    assert.deepEqual([result.outcome, result.delivered], ['cancel_requested', true]);
+    // Before the watcher confirms, another run starts on the thread (someone typed into it in T3).
+    fake.userTurn(threadId, 'Synthetic message typed in T3');
+    await tick();
+    assert.equal(await jobState(agent, job.jobId), 'cancel_requested');
+    assert.deepEqual(fake.threads.get(threadId)?.runs.map((run) => run.status), ['interrupted', 'interrupted'], 'the new run got its own interrupt');
+    await tick();
+    assert.equal(await jobState(agent, job.jobId), 'cancelled');
+    assert.equal(await jobState(agent, next.jobId), 'running', 'the slot is free again');
+  });
+
   test('a T3 refusal to interrupt is returned and the job keeps its state', async (t) => {
     const { fake, agent, tick } = await startJobHarness(t);
     const job = await startJob(agent);

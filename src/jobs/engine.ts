@@ -315,8 +315,11 @@ export class JobEngine {
     if (seen.state === job.state) {
       if (!store.transition(job.id, { from: [job.state], to: job.state, changes })) return;
       if (seen.anotherTurnFinished) store.appendEvent(job.id, 'turn_finished', 'idle', { reason: seen.reason });
-      // Still running after a cancel: the interrupt may never have arrived, so send it again.
-      if (job.state === 'cancel_requested') await this.#interrupt(job.id, job.hostId, threadId, registry);
+      // Still running after a cancel: the interrupt may never have arrived, or a new run started
+      // since (a queued follow-up, or someone in T3). Interrupt the run that is active now.
+      if (job.state === 'cancel_requested') {
+        await this.#interrupt(job.id, job.hostId, { threadId, runId: read.thread.activeRunId ?? read.thread.latestRunId }, registry);
+      }
       return;
     }
     store.transition(job.id, {
@@ -354,13 +357,13 @@ export class JobEngine {
     const job = store.get(jobId);
     if (job?.state !== 'cancel_requested') return;
     store.update(jobId, changes);
-    await this.#interrupt(jobId, job.hostId, thread.threadId, registry);
+    await this.#interrupt(jobId, job.hostId, { threadId: thread.threadId, runId: thread.lastRunId }, registry);
   }
 
-  /** Deliver (or re-deliver) a cancel_requested job's interrupt. T3 deduplicates repeats. */
-  async #interrupt(jobId: string, hostId: string, threadId: string, registry: HostRegistry): Promise<void> {
+  /** Deliver (or re-deliver) a cancel_requested job's interrupt for one run. T3 deduplicates repeats per run. */
+  async #interrupt(jobId: string, hostId: string, thread: { threadId: string; runId: string | null }, registry: HostRegistry): Promise<void> {
     try {
-      await deliverInterrupt(this.#options.store, registry.client(hostId), jobId, threadId);
+      await deliverInterrupt(this.#options.store, registry.client(hostId), jobId, thread);
     } catch (error) {
       if (!(error instanceof T3ToolError)) throw error;
       this.#options.logger.warn('jobs.interrupt_failed', { jobId, hostId, t3Code: error.t3Code });
