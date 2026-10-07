@@ -40,14 +40,30 @@ export function standardAuthorizeParams(clientId: string, challenge: string, ext
 }
 
 const ENTITIES: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
+const unescapeHtml = (value: string): string => value.replaceAll(/&(amp|lt|gt|quot|#39);/g, (entity) => ENTITIES[entity] ?? entity);
 
 /** Extract the approval form's hidden fields from the rendered page. */
 export function hiddenFields(html: string): Record<string, string> {
   const fields: Record<string, string> = {};
   for (const match of html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) {
-    fields[match[1] as string] = (match[2] as string).replaceAll(/&(amp|lt|gt|quot|#39);/g, (entity) => ENTITIES[entity] ?? entity);
+    fields[match[1] as string] = unescapeHtml(match[2] as string);
   }
   return fields;
+}
+
+/** The URLs a return page leads to: its meta refresh (absent on a repeated submission) and its Continue link. */
+export function returnPageTargets(html: string): { refresh: string | undefined; link: string | undefined } {
+  const refresh = /<meta http-equiv="refresh" content="0;url=([^"]*)">/.exec(html)?.[1];
+  const link = /<a href="([^"]*)">Continue to /.exec(html)?.[1];
+  return { refresh: refresh === undefined ? undefined : unescapeHtml(refresh), link: link === undefined ? undefined : unescapeHtml(link) };
+}
+
+/** Where the approval form's answer sends the browser: the return page's target, which its link must match. */
+export async function authorizationResponse(response: Response): Promise<URL> {
+  const html = await response.text();
+  const { refresh, link } = returnPageTargets(html);
+  if (response.status !== 200 || !refresh || refresh !== link) throw new Error(`not a return page: ${response.status} ${html.slice(0, 200)}`);
+  return new URL(refresh);
 }
 
 export async function loadApprovalPage(url: string): Promise<{ status: number; html: string; headers: Headers; fields: Record<string, string> }> {
@@ -95,10 +111,9 @@ export async function signIn(
   const { verifier, challenge } = pkcePair();
   const page = await loadApprovalPage(authorizeUrl(baseUrl, standardAuthorizeParams(clientId, challenge)));
   const approval = await submitApproval(baseUrl, page.fields, { approval_code: mintCode(), access: options.access ?? 'read' });
-  const location = approval.headers.get('location');
-  if (approval.status !== 303 || !location) throw new Error(`approval failed: ${approval.status}`);
-  const code = new URL(location).searchParams.get('code');
-  if (!code) throw new Error(`no code in redirect: ${location}`);
+  const location = await authorizationResponse(approval);
+  const code = location.searchParams.get('code');
+  if (!code) throw new Error(`no code in the authorization response: ${location.href}`);
   const response = await tokenRequest(baseUrl, {
     grant_type: 'authorization_code',
     code,

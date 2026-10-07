@@ -116,6 +116,7 @@ An uncaught exception or unhandled rejection in `serve` is logged as `process.fa
 | --- | --- |
 | `gateway.started`, `gateway.stopped` | Lifecycle |
 | `oauth.client_registered`, `oauth.approval_granted`, `oauth.approval_denied` | Agent onboarding |
+| `oauth.approval_repeated` | An approved form was submitted again (a double click, or Back and resubmit); `resent` says whether the same authorization response was still usable. Not a failure |
 | `oauth.approval_failed`, `oauth.approval_throttled`, `oauth.registration_throttled` (warn) | Wrong codes; throttling engaged (see Throttles) |
 | `oauth.token_issued`, `oauth.refresh_retry_accepted` | Token issue and rotation |
 | `oauth.token_family_revoked` (warn) | Refresh token or code replay: a grant was revoked |

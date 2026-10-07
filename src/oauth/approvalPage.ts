@@ -29,27 +29,44 @@ function escapeHtml(value: string): string {
     .replaceAll("'", '&#39;');
 }
 
-/** Strict headers for the only HTML the gateway serves. `formTarget` extends form-action for the redirect after submit. */
-function pageHeaders(formTarget?: string): Record<string, string> {
-  const formAction = formTarget ? `'self' ${formTarget}` : "'self'";
+/**
+ * Strict headers for the only HTML the gateway serves. form-action stays 'self': browsers apply it to every redirect that
+ * follows a form submission, so the approval form never redirects to the client; it answers with `renderReturnPage`.
+ */
+function pageHeaders(): Record<string, string> {
   return {
     'content-type': 'text/html; charset=utf-8',
-    'content-security-policy': `default-src 'none'; style-src 'sha256-${STYLE_HASH}'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`,
+    'content-security-policy': `default-src 'none'; style-src 'sha256-${STYLE_HASH}'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
     'x-frame-options': 'DENY',
     'referrer-policy': 'no-referrer',
     'cache-control': 'no-store',
   };
 }
 
-function layout(title: string, body: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>${STYLE}</style></head><body>${body}</body></html>`;
+function layout(title: string, body: string, head = ''): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${head}<title>${escapeHtml(title)}</title><style>${STYLE}</style></head><body>${body}</body></html>`;
 }
 
 export function renderErrorPage(message: string): RenderedPage {
-  return {
-    html: layout('Authorization failed', `<h1>Authorization failed</h1><p>${escapeHtml(message)}</p>`),
-    headers: pageHeaders(),
-  };
+  return renderNoticePage('Authorization failed', message);
+}
+
+/**
+ * The page the approval form answers with when the browser should go back to the client: it navigates to
+ * `responseUrl` (the authorization response or error, on the client's redirect URI) by meta refresh, with a
+ * link as a fallback. With `navigate: false` it shows only the link (a repeated submission).
+ */
+export function renderReturnPage(options: { title: string; message: string; responseUrl: string; navigate?: boolean }): RenderedPage {
+  const url = escapeHtml(options.responseUrl);
+  const origin = escapeHtml(new URL(options.responseUrl).origin);
+  const head = options.navigate === false ? '' : `<meta http-equiv="refresh" content="0;url=${url}">`;
+  const body = `<h1>${escapeHtml(options.title)}</h1><p>${escapeHtml(options.message)}</p><p><a href="${url}">Continue to ${origin}</a></p>`;
+  return { html: layout(options.title, body, head), headers: pageHeaders() };
+}
+
+/** A page with a heading and a message and nothing to follow. */
+export function renderNoticePage(title: string, message: string): RenderedPage {
+  return { html: layout(title, `<h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p>`), headers: pageHeaders() };
 }
 
 export function renderApprovalPage(options: {
@@ -97,5 +114,5 @@ ${error}
 <button type="submit" name="decision" value="approve">Approve</button>
 <button type="submit" name="decision" value="deny" formnovalidate>Deny</button>
 </form>`;
-  return { html: layout('Approve agent access', body), headers: pageHeaders(redirectOrigin) };
+  return { html: layout('Approve agent access', body), headers: pageHeaders() };
 }

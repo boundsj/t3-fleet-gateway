@@ -58,13 +58,21 @@ async function json(response: Response, what: string): Promise<Record<string, un
   }
 }
 
+const ENTITIES: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
+const unescapeHtml = (value: string): string => value.replaceAll(/&(amp|lt|gt|quot|#39);/g, (entity) => ENTITIES[entity] ?? entity);
+
 function hiddenFields(html: string): Record<string, string> {
-  const entities: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
   const fields: Record<string, string> = {};
   for (const match of html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) {
-    fields[match[1] as string] = (match[2] as string).replaceAll(/&(amp|lt|gt|quot|#39);/g, (entity) => entities[entity] ?? entity);
+    fields[match[1] as string] = unescapeHtml(match[2] as string);
   }
   return fields;
+}
+
+/** The authorization response URL on the page the approval form answers with (its meta refresh). */
+function returnPageTarget(html: string): URL | undefined {
+  const refresh = /<meta http-equiv="refresh" content="0;url=([^"]*)">/.exec(html)?.[1];
+  return refresh === undefined ? undefined : new URL(unescapeHtml(refresh));
 }
 
 type Tool = <T = Record<string, unknown>>(name: string, input: Record<string, unknown>) => Promise<T>;
@@ -156,9 +164,9 @@ async function main(): Promise<void> {
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ ...hiddenFields(await page.text()), approval_code: approvalCode, access: 'operate', decision: 'approve' }),
     });
-    const location = decision.headers.get('location');
-    const code = location ? new URL(location).searchParams.get('code') : null;
-    ensure(decision.status === 303 && code, `approval failed (HTTP ${decision.status}${location ? `, ${new URL(location).searchParams.get('error') ?? ''}` : ''})`);
+    const location = returnPageTarget(await decision.text());
+    const code = location?.searchParams.get('code') ?? null;
+    ensure(decision.status === 200 && code, `approval failed (HTTP ${decision.status}${location ? `, ${location.searchParams.get('error') ?? ''}` : ''})`);
     return { value: code };
   });
 

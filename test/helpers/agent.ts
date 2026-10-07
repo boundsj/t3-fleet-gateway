@@ -1,5 +1,5 @@
 import type { OAuthClientProvider } from '@modelcontextprotocol/client';
-import { CALLBACK, hiddenFields } from './oauthFlow.ts';
+import { authorizationResponse, CALLBACK, hiddenFields } from './oauthFlow.ts';
 
 type ProviderTypes = Parameters<OAuthClientProvider['saveTokens']>[0];
 type ClientInfo = Parameters<NonNullable<OAuthClientProvider['saveClientInformation']>>[0];
@@ -80,6 +80,6 @@ export class TestAgentProvider implements OAuthClientProvider {
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ ...fields, approval_code: this.#approve(), access: this.#access, decision: 'approve' }),
     });
-    this.callbackParams = new URL(decision.headers.get('location') ?? '').searchParams;
+    this.callbackParams = (await authorizationResponse(decision)).searchParams;
   }
 }

@@ -4,6 +4,7 @@ import { REFRESH_GRACE } from '../src/oauth/tokens.ts';
 import { DAY, MINUTE, SECOND } from '../src/time.ts';
 import { startOAuthHarness, type OAuthHarness } from './helpers/oauthHarness.ts';
 import {
+  authorizationResponse,
   authorizeUrl,
   CALLBACK,
   loadApprovalPage,
@@ -21,7 +22,7 @@ async function authorizationCode(h: OAuthHarness): Promise<{ clientId: string; c
   const { verifier, challenge } = pkcePair();
   const page = await loadApprovalPage(authorizeUrl(h.baseUrl, standardAuthorizeParams(clientId, challenge)));
   const approval = await submitApproval(h.baseUrl, page.fields, { approval_code: h.approvals.mint().code });
-  const code = new URL(approval.headers.get('location') ?? '').searchParams.get('code') ?? '';
+  const code = (await authorizationResponse(approval)).searchParams.get('code') ?? '';
   return { clientId, code, verifier };
 }
 

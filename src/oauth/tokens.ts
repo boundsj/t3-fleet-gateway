@@ -109,6 +109,14 @@ export class TokenService {
     return code;
   }
 
+  /** Whether a code can still be exchanged: known, unused and unexpired. */
+  authorizationCodePending(code: string): boolean {
+    const row = this.#db.prepare('SELECT used_at, expires_at FROM authorization_codes WHERE code_hash = ?').get(hashToken(code)) as
+      | { used_at: number | null; expires_at: number }
+      | undefined;
+    return row !== undefined && row.used_at === null && row.expires_at > this.#clock();
+  }
+
   exchangeAuthorizationCode(request: {
     code: string;
     clientId: string;

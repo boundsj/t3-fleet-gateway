@@ -4,7 +4,8 @@ import type { Route } from '../http/server.ts';
 import type { Logger } from '../log.ts';
 import type { Clock } from '../time.ts';
 import type { ApprovalCodes } from './approvalCodes.ts';
-import { renderApprovalPage, renderErrorPage } from './approvalPage.ts';
+import { renderApprovalPage, renderErrorPage, renderNoticePage, renderReturnPage } from './approvalPage.ts';
+import { ApprovedRequests } from './approvedRequests.ts';
 import {
   authorizationRedirect,
   parseAuthorizationRequest,
@@ -17,7 +18,7 @@ import type { ClientStore } from './clients.ts';
 import { OAuthError } from './errors.ts';
 import { authorizationServerMetadata, protectedResourceMetadata } from './metadata.ts';
 import { formatScope, scopesForChoice, type AccessChoice } from './scopes.ts';
-import type { TokenEvent, TokenService } from './tokens.ts';
+import { AUTHORIZATION_CODE_TTL, type TokenEvent, type TokenService } from './tokens.ts';
 
 const OAUTH_BODY_LIMIT = 16 * 1024;
 const NO_STORE = { 'cache-control': 'no-store', pragma: 'no-cache' };
@@ -43,23 +44,32 @@ export function logTokenEvent(logger: Logger): (event: TokenEvent) => void {
 
 export function oauthRoutes(deps: OAuthDependencies): Route[] {
   const { publicUrl, logger } = deps;
+  const approved = new ApprovedRequests(deps.clock);
 
-  const respondToParseFailure = (res: ServerResponse, result: Exclude<AuthorizationParseResult, { kind: 'ok' }>): void => {
+  /**
+   * Answer the approval form with a page that navigates to the client's redirect URI, never with a redirect: browsers
+   * apply the page's form-action to every redirect after a submission, and a callback that redirects on to another
+   * origin would be blocked silently, leaving the operator on the approval page.
+   */
+  const returnToClient = (res: ServerResponse, responseUrl: string, title: string, message: string): void => {
+    sendHtml(res, 200, renderReturnPage({ title, message, responseUrl }));
+  };
+
+  const respondToParseFailure = (res: ServerResponse, result: Exclude<AuthorizationParseResult, { kind: 'ok' }>, fromForm = false): void => {
     if (result.kind === 'fatal') {
       logger.warn('oauth.authorize_rejected', { reason: 'untrusted_client_or_redirect' });
       sendHtml(res, 400, renderErrorPage(result.message));
       return;
     }
     logger.info('oauth.authorize_error', { errorCode: result.error });
-    sendRedirect(
-      res,
-      authorizationRedirect(result.redirectUri, {
-        error: result.error,
-        error_description: result.description,
-        state: result.state,
-        iss: publicUrl,
-      }),
-    );
+    const location = authorizationRedirect(result.redirectUri, {
+      error: result.error,
+      error_description: result.description,
+      state: result.state,
+      iss: publicUrl,
+    });
+    if (fromForm) returnToClient(res, location, 'Authorization failed', 'The request was not valid. Returning to the agent with an error.');
+    else sendRedirect(res, location);
   };
 
   const showApprovalPage = (res: ServerResponse, request: AuthorizationRequest, status: number, error?: string, issuedAt = deps.clock()): void => {
@@ -77,7 +87,7 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
   const authorizePost = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const form = await readForm(req, OAUTH_BODY_LIMIT);
     const result = parseAuthorizationRequest(form, deps.clients, deps.tokens.resource);
-    if (result.kind !== 'ok') return respondToParseFailure(res, result);
+    if (result.kind !== 'ok') return respondToParseFailure(res, result, true);
     const { request } = result;
     const clientId = request.client.id;
     const issuedAt = Number(form.get('issued_at'));
@@ -89,10 +99,27 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
       sendHtml(res, 400, renderErrorPage('This approval page expired or was altered. Start the connection again from your agent.'));
       return;
     }
+    const repeated = approved.lookup(signature);
+    if (repeated) {
+      // The same form submitted again after it was approved: never a new code, and not a failed attempt.
+      const resend = repeated.kind === 'resend' && deps.tokens.authorizationCodePending(repeated.code);
+      logger.info('oauth.approval_repeated', { clientId, resent: resend });
+      const page = resend
+        ? renderReturnPage({
+            title: 'Already approved',
+            message: `This request was already approved for ${request.client.name}.`,
+            responseUrl: repeated.url,
+            navigate: false,
+          })
+        : renderNoticePage('Already approved', 'This request was already approved. Return to your agent, and retry the connection there if it did not complete.');
+      sendHtml(res, 200, page);
+      return;
+    }
     const decision = form.get('decision');
     if (decision === 'deny') {
       logger.info('oauth.approval_denied', { clientId });
-      sendRedirect(res, authorizationRedirect(request.redirectUri, { error: 'access_denied', state: request.state, iss: publicUrl }));
+      const location = authorizationRedirect(request.redirectUri, { error: 'access_denied', state: request.state, iss: publicUrl });
+      returnToClient(res, location, 'Access denied', `Access was denied for ${request.client.name}. Returning to the agent.`);
       return;
     }
     const access = form.get('access');
@@ -116,14 +143,18 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
       return;
     }
     const scopes = scopesForChoice(access as AccessChoice);
+    const issuedCodeAt = deps.clock();
     const code = deps.tokens.issueAuthorizationCode({
       clientId,
       redirectUri: request.redirectUri,
       codeChallenge: request.codeChallenge,
       scopes,
     });
+    const location = authorizationRedirect(request.redirectUri, { code, state: request.state, iss: publicUrl });
+    approved.remember(signature, { url: location, code, expiresAt: issuedCodeAt + AUTHORIZATION_CODE_TTL });
     logger.info('oauth.approval_granted', { clientId, scope: formatScope(scopes) });
-    sendRedirect(res, authorizationRedirect(request.redirectUri, { code, state: request.state, iss: publicUrl }));
+    const origin = new URL(location).origin;
+    returnToClient(res, location, 'Access approved', `Access was approved for ${request.client.name}. Returning you to ${origin}.`);
   };
 
   const register = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
