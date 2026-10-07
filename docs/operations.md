@@ -59,7 +59,7 @@ Throttling is logged as `oauth.approval_throttled` and `oauth.registration_throt
 
 ```sh
 t3-fleet-gateway clients list
-t3-fleet-gateway clients revoke <client id>
+t3-fleet-gateway clients revoke <client id>   # an id that starts with '-': clients revoke -- <client id>
 ```
 
 `list` shows each client's id, name, granted access, status (`pending` until approved, `active`, `revoked`), creation and last-use times, and the origins it redirects to. `revoke` takes effect immediately for every token the client holds; the agent must register and be approved again.

@@ -346,12 +346,11 @@ export class FakeT3 {
     this.#offline = false;
     if (this.#server) return this;
     const server = createServer((req, res) => {
+      // Reset once the request has arrived, not on accept: see the Invariants in AGENTS.md.
+      if (this.#offline) return void req.socket.resetAndDestroy();
       this.#handle(req, res).catch(() => {
         if (!res.headersSent) res.writeHead(500).end();
       });
-    });
-    server.on('connection', (socket) => {
-      if (this.#offline) socket.resetAndDestroy();
     });
     this.#server = server;
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -361,7 +360,7 @@ export class FakeT3 {
 
   /**
    * Simulate the host going away: drop every connection and session, and reset new connections
-   * before any request is read, until start() is called again. Nothing reaches the tools meanwhile.
+   * as soon as a request arrives, until start() is called again. Nothing reaches the tools meanwhile.
    */
   async stop(): Promise<void> {
     this.#offline = true;

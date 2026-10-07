@@ -23,6 +23,10 @@ All notable changes are recorded here. The project follows [Semantic Versioning]
 - `scripts/e2e-live.ts`: a live end-to-end check against a running gateway and a real T3 host (`npm run e2e:live`), outside the test suite. If the job it cancels has already finished, it starts one replacement and cancels that.
 - `doctor`'s public URL check requires this gateway's own metadata (`resource_name` `t3-fleet-gateway`), so another server's metadata for the same resource fails it.
 
+### Fixed
+
+- OAuth client ids could start with `-`, which `clients revoke <id>` read as an unknown option (exit 2); new ids never do, and `clients revoke -- <id>` revokes an earlier one.
+
 ### Known limitations
 
 - Permission approvals cannot be answered through T3's MCP tools; jobs waiting on one show `needs_input` with `waitingForApproval`, and the operator approves in T3. Projects that should run unattended need `runtimeMode` `auto` or `full-access`.

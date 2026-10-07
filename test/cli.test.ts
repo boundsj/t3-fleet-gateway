@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, test, type TestContext } from 'node:test';
 import { runCli } from '../src/cli/main.ts';
+import { randomId } from '../src/crypto.ts';
 import { openStorage } from '../src/gateway.ts';
 import { ApprovalCodes, MAX_FAILURES_PER_HOUR } from '../src/oauth/approvalCodes.ts';
 import { ClientStore, MAX_REGISTRATIONS_PER_HOUR } from '../src/oauth/clients.ts';
@@ -136,7 +137,10 @@ describe('cli', () => {
     assert.match(listed.out, new RegExp(`${client.id}\\s+Hosted agent\\s+-\\s+pending`));
     assert.match(listed.out, /https:\/\/agent\.example\.com/);
     const revoked = await run(env, ['clients', 'revoke', client.id]);
-    assert.equal(revoked.code, 0);
+    assert.equal(revoked.code, 0, revoked.err);
+    // Ids never start with '-', and `--` ends the options for one stored before that rule.
+    assert.equal((await run(env, ['clients', 'revoke', '--', client.id])).code, 0);
+    assert.ok(Array.from({ length: 2000 }, () => randomId()).every((id) => !id.startsWith('-')));
     assert.match((await run(env, ['clients', 'list'])).out, /revoked/);
     const unknown = await run(env, ['clients', 'revoke', 'nope']);
     assert.equal(unknown.code, 1);

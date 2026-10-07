@@ -5,9 +5,10 @@ export function randomToken(bytes = 32): string {
   return randomBytes(bytes).toString('base64url');
 }
 
-/** A short random id for display and correlation (not a secret). */
+/** A short random id for display and correlation (not a secret). Never starts with `-`, which a command line would read as an option. */
 export function randomId(bytes = 9): string {
-  return randomBytes(bytes).toString('base64url');
+  const id = randomBytes(bytes).toString('base64url');
+  return id.startsWith('-') ? `_${id.slice(1)}` : id;
 }
 
 export function sha256Hex(value: string): string {

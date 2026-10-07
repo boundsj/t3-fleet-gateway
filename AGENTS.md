@@ -51,6 +51,7 @@ Define it with `defineTool` (see `src/mcp/fleetStatus.ts`): name, LLM-oriented d
 - Error codes in `src/errors.ts` and OAuth error strings are a stable contract.
 - Erasable TypeScript only; `.ts` import specifiers; `import type` for types.
 - No machine-specific values or secrets in the repo; tests use synthetic data and loopback ports.
+- Fakes that simulate a host going away reset a connection once its first request arrives, never on accept (`fakeT3.ts`, `frontDoor.ts`). Node 26.0's fetch (undici) sets the socket's type of service while writing the request from the socket's `connect` handler; if the reset is already there, macOS fails that with `setTypeOfService EINVAL`, thrown as an uncaught exception that fails whichever test is running (a few in every thousand resets on accept). Resetting after the request arrives gives clients the same `ECONNRESET` without the race. Production `serve` ignores that error (`src/processErrors.ts`); tests deliberately do not filter it, so a new reset-on-accept shows up.
 - Tests never release a port and bind it again (test files run in parallel processes, and another one may take it in between): servers listen on port 0 and keep their socket; a gateway that restarts keeps its URL through `test/helpers/frontDoor.ts`.
 
 ## Status
