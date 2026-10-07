@@ -35,6 +35,7 @@ function job(overrides: Partial<Job> = {}): Job {
     stateChangedAt: 0,
     dispatchStartedAt: 0,
     finishedAt: null,
+    standing: false,
     ...overrides,
   };
 }
@@ -106,6 +107,11 @@ describe('state derivation', () => {
   test('a failed run fails the job', () => {
     const seen = observe(job(), read({ status: 'failed' }, [{ runId: 'run-1', status: 'failed' }]), []);
     assert.deepEqual([seen.state, seen.errorCode], ['failed', 't3_run_failed']);
+  });
+
+  test('a failed run leaves a standing job idle, with the error', () => {
+    const seen = observe(job({ standing: true }), read({ status: 'failed' }, [{ runId: 'run-1', status: 'failed' }]), []);
+    assert.deepEqual([seen.state, seen.reason, seen.errorCode, seen.lastRunId], ['idle', 'run_failed', 't3_run_failed', 'run-1']);
   });
 
   test('the run the gateway started keeps the job running even if the thread status lags', () => {

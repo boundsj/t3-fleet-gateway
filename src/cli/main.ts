@@ -2,6 +2,9 @@ import { parseArgs } from 'node:util';
 import { loadConfig, resolvePaths, type GatewayConfig, type Paths } from '../config.ts';
 import { describeError, GatewayError, isGatewayError } from '../errors.ts';
 import { openServices, openStorage, startGateway, type GatewayServices } from '../gateway.ts';
+import { MAX_TITLE_CHARS } from '../jobs/service.ts';
+import { TERMINAL_STATES } from '../jobs/states.ts';
+import type { Job } from '../jobs/store.ts';
 import { createLogger, isLogLevel, silentLogger, type Logger } from '../log.ts';
 import { ApprovalCodes, DEFAULT_APPROVAL_CODE_TTL, MAX_APPROVAL_CODE_TTL, MAX_FAILURES_PER_HOUR } from '../oauth/approvalCodes.ts';
 import { ClientStore, MAX_REGISTRATIONS_PER_HOUR } from '../oauth/clients.ts';
@@ -33,6 +36,10 @@ Commands:
   hosts status              Show each host's credential and reachability
   throttle status           Show failed approvals and registrations counting toward their limits
   throttle reset            Clear the approval and registration throttles
+  jobs adopt <project> <threadId> [--title <text>]
+                            Register an existing T3 thread as a standing job agents can drive
+  jobs list [--all]         List open jobs (--all: finished ones too)
+  jobs release <jobId>      Stop following a standing job; the T3 thread is left as it is
   doctor                    Check config, permissions, database, hosts and public URL
 
 Options:
@@ -197,6 +204,64 @@ async function hosts(paths: Paths, io: CliIo, action: string | undefined, id: st
   throw new UsageError('Use: hosts enroll <id> | hosts status');
 }
 
+function describeJobLine(job: Job): string {
+  return `${job.id}  ${job.projectAlias}  ${job.state}${job.standing ? '  standing' : ''}  ${job.title}${job.threadLink ? `  ${job.threadLink}` : ''}`;
+}
+
+const MAX_LISTED_JOBS = 1000;
+
+interface JobsOptions {
+  title?: string | undefined;
+  all?: boolean | undefined;
+}
+
+async function jobs(paths: Paths, io: CliIo, action: string | undefined, args: string[], options: JobsOptions): Promise<number> {
+  const logger = logLevelLogger(io.env, (line) => io.err(line), 'off');
+  if (action === 'adopt') {
+    const [project, threadId, ...extra] = args;
+    if (!project || !threadId) throw new UsageError('jobs adopt needs a project alias and a T3 thread id');
+    if (extra.length > 0) throw new UsageError(`Unexpected arguments: ${extra.join(' ')}`);
+    const title = options.title?.trim();
+    if (options.title !== undefined && (!title || title.length > MAX_TITLE_CHARS)) throw new UsageError(`--title must be 1 to ${MAX_TITLE_CHARS} characters`);
+    return withServices(paths, logger, async (services) => {
+      const { job, created } = await services.jobs.adopt({ project, threadId, title });
+      io.out(created ? `Adopted thread ${job.threadId} as standing job ${job.id}.` : `Thread ${job.threadId} is already standing job ${job.id}.`);
+      io.out(describeJobLine(job));
+      io.out(`Agents send it work with work_continue and follow it with work_feed and work_status. Stop following it with: jobs release ${job.id}`);
+      return 0;
+    });
+  }
+  if (action === 'list') {
+    if (args.length > 0) throw new UsageError(`Unexpected arguments: ${args.join(' ')}`);
+    return withServices(paths, logger, async (services) => {
+      const all = services.jobs.store.list({ limit: MAX_LISTED_JOBS });
+      const shown = options.all ? all : all.filter((job) => !TERMINAL_STATES.includes(job.state));
+      if (shown.length === 0) {
+        io.out(options.all ? 'No jobs.' : 'No open jobs. (--all shows finished ones too.)');
+        return 0;
+      }
+      const rows = shown.map((job) => [job.id, job.projectAlias, job.state, job.standing ? 'yes' : '-', job.title, job.threadLink ?? '-']);
+      io.out(table(['ID', 'PROJECT', 'STATE', 'STANDING', 'TITLE', 'LINK'], rows));
+      return 0;
+    });
+  }
+  if (action === 'release') {
+    const [jobId, ...extra] = args;
+    if (!jobId) throw new UsageError('jobs release needs a job id (see jobs list)');
+    if (extra.length > 0) throw new UsageError(`Unexpected arguments: ${extra.join(' ')}`);
+    return withServices(paths, logger, async (services) => {
+      const { job, released } = services.jobs.release(jobId);
+      io.out(
+        released
+          ? `Released standing job ${job.id}; agents can no longer send it work. The T3 thread was not touched.`
+          : `Job ${job.id} is already ${job.state}.`,
+      );
+      return 0;
+    });
+  }
+  throw new UsageError('Use: jobs adopt <project> <threadId> [--title <text>] | jobs list [--all] | jobs release <jobId>');
+}
+
 async function doctor(paths: Paths, io: CliIo): Promise<number> {
   let config: GatewayConfig;
   try {
@@ -226,6 +291,8 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         config: { type: 'string' },
         'data-dir': { type: 'string' },
         ttl: { type: 'string' },
+        title: { type: 'string' },
+        all: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -234,12 +301,14 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       io.out(GATEWAY_VERSION);
       return 0;
     }
-    const [command, action, id, ...extra] = positionals;
+    const [command, action, ...args] = positionals;
+    const id = args[0];
     if (values.help || command === undefined) {
       io.out(USAGE);
       return values.help ? 0 : 2;
     }
-    if (extra.length > 0) throw new UsageError(`Unexpected arguments: ${extra.join(' ')}`);
+    // `jobs` checks its own arguments: `jobs adopt` takes two.
+    if (command !== 'jobs' && args.length > 1) throw new UsageError(`Unexpected arguments: ${args.slice(1).join(' ')}`);
     const paths = resolvePaths(io.env, {
       ...(values.config ? { configPath: values.config } : {}),
       ...(values['data-dir'] ? { dataDir: values['data-dir'] } : {}),
@@ -256,6 +325,8 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       case 'throttle':
         if (id !== undefined) throw new UsageError(`Unexpected arguments: ${id}`);
         return throttle(paths, io, action);
+      case 'jobs':
+        return await jobs(paths, io, action, args, { title: values.title, all: values.all });
       case 'doctor':
         return await doctor(paths, io);
       default:

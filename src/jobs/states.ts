@@ -9,14 +9,21 @@ export const JOB_STATES = [
   'cancelled',
   'failed',
   'unknown',
+  'released',
 ] as const;
 export type JobState = (typeof JOB_STATES)[number];
 
-/** States that occupy one of a host's `maxConcurrentJobs` slots. `unknown` counts: a launch may have happened. */
+/**
+ * States that occupy one of a host's `maxConcurrentJobs` slots, for jobs the gateway launched.
+ * `unknown` counts: a launch may have happened. Standing jobs never hold a slot.
+ */
 export const RUNNING_STATES: readonly JobState[] = ['dispatching', 'running', 'needs_input', 'cancel_requested', 'unknown'];
 
 /** No further transitions happen from these states. */
-export const TERMINAL_STATES: readonly JobState[] = ['cancelled', 'failed'];
+export const TERMINAL_STATES: readonly JobState[] = ['cancelled', 'failed', 'released'];
+
+/** Every state that is not terminal. */
+export const OPEN_STATES: readonly JobState[] = JOB_STATES.filter((state) => !TERMINAL_STATES.includes(state));
 
 export function isTerminal(state: JobState): boolean {
   return TERMINAL_STATES.includes(state);
@@ -29,9 +36,13 @@ export const STATE_MEANINGS: Record<JobState, string> = {
   running: 'The worker is working on its turn.',
   needs_input:
     'The worker is blocked: it asked a question (answer with work_respond) or needs a permission approval that only the operator can give in T3 (projects with runtimeMode approval-required).',
-  idle: 'The worker finished its turn and is waiting: ready for review or the next instruction (work_continue). Not proof the task succeeded.',
+  idle:
+    'The worker finished its turn and is waiting: ready for review or the next instruction (work_continue). Not proof the task succeeded. ' +
+    'A standing job is idle between instructions.',
   cancel_requested: 'An interrupt was requested; waiting for T3 to confirm the thread stopped.',
   cancelled: 'Stopped by work_cancel. Terminal.',
+  released:
+    'A standing job the operator stopped tracking (t3-fleet-gateway jobs release). The T3 thread itself was not touched. Terminal.',
   failed: 'The job could not start or its run failed. Terminal; see lastError. Start a new job to retry.',
   unknown:
     'The gateway cannot tell yet whether the launch happened (for example the response was lost). It is checking T3; do not start a duplicate yet.',

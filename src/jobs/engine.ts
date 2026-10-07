@@ -438,7 +438,12 @@ export class JobEngine {
       lastRunId: seen.lastRunId,
       ...(seen.excerpt === undefined ? {} : { latestMessageExcerpt: seen.excerpt }),
       ...(seen.link === undefined ? {} : { threadLink: seen.link }),
-      ...(seen.errorCode ? { lastErrorCode: seen.errorCode, lastErrorMessage: 'The T3 run failed. Open the thread in T3 for details.' } : {}),
+      ...(seen.errorCode
+        ? { lastErrorCode: seen.errorCode, lastErrorMessage: 'The T3 run failed. Open the thread in T3 for details.' }
+        : // A standing job outlives a failed run: the error clears once a new turn runs.
+          seen.state === 'running' && job.lastErrorCode === 't3_run_failed'
+          ? { lastErrorCode: null, lastErrorMessage: null }
+          : {}),
     };
     // Both writes are guarded by the state the observation started from: an agent action that
     // landed while T3 was being read (a follow-up, an answer, a cancel) wins over this observation.

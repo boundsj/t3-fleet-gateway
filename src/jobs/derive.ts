@@ -10,6 +10,13 @@ const LINK_SCHEMES = new Set(['t3-thread:', 'https:', 'http:']);
 /** Timeline item statuses that mean the item may still change (for example a message being streamed). */
 const UNSETTLED_ITEM_STATUSES = new Set(['pending', 'running', 'waiting']);
 
+export function isUnsettled(item: ThreadItem): boolean {
+  return UNSETTLED_ITEM_STATUSES.has(item.status);
+}
+
+/** What `observe` needs to know about the job. */
+export type ObservedJob = Pick<Job, 'state' | 'lastRunId' | 'readPosition' | 'threadLink' | 'latestActivityAt' | 'standing'>;
+
 /** States the watcher can derive from a thread. */
 export type ObservedState = Extract<JobState, 'running' | 'needs_input' | 'idle' | 'failed' | 'cancel_requested' | 'cancelled'>;
 
@@ -17,7 +24,7 @@ export interface Observation {
   state: ObservedState;
   /** Why, for the event: the T3 status that decided it. */
   reason: string;
-  /** Set when the job moves to failed. */
+  /** Set when the turn ended with a failed run: the job moves to failed (a standing job to idle). */
   errorCode?: string;
   pendingRequestIds: string[];
   /** The run the job now follows: the thread's latest run once the turn is over. */
@@ -83,11 +90,13 @@ function parseTime(value: string | undefined): number | null {
  * 3. `running` while the thread has an `activeRunId`, its `status` is preparing, queued, starting,
  *    running or waiting, or the run the gateway started (`lastRunId` in `recentRuns`) is still in one
  *    of those statuses.
- * 4. `failed` when the turn ended with the latest run (or the thread) `failed`.
+ * 4. `failed` when the turn ended with the latest run (or the thread) `failed`. A standing job is a
+ *    long-lived thread that takes the next instruction after a failed run too, so it becomes `idle`
+ *    instead, with the same error code.
  * 5. Otherwise `idle`: the turn is over (completed, interrupted, cancelled, rolled back, or a thread
  *    with no run) and the thread is waiting for its next instruction.
  */
-export function observe(job: Job, read: ThreadRead, pendingQuestionIds: readonly string[]): Observation {
+export function observe(job: ObservedJob, read: ThreadRead, pendingQuestionIds: readonly string[]): Observation {
   const { thread, recentRuns } = read;
   const followed = job.lastRunId === null ? undefined : recentRuns.find((run) => run.runId === job.lastRunId);
   const latest = recentRuns.find((run) => run.runId === thread.latestRunId) ?? recentRuns[0];
@@ -107,7 +116,7 @@ export function observe(job: Job, read: ThreadRead, pendingQuestionIds: readonly
   } else if (active) {
     state = 'running';
   } else if ((latest?.status ?? thread.status) === 'failed' || thread.status === 'failed') {
-    state = 'failed';
+    state = job.standing ? 'idle' : 'failed';
     reason = 'run_failed';
     errorCode = 't3_run_failed';
   } else {
@@ -116,7 +125,7 @@ export function observe(job: Job, read: ThreadRead, pendingQuestionIds: readonly
   }
 
   const items = [...read.items].sort((a, b) => a.position - b.position);
-  const unsettled = items.find((item) => UNSETTLED_ITEM_STATUSES.has(item.status));
+  const unsettled = items.find(isUnsettled);
   const settled = unsettled ? items.filter((item) => item.position < unsettled.position) : items;
   const message = settled.findLast((item) => isWorkerMessage(item) && item.text !== null && item.text.trim().length > 0);
   // Items come back with positions after the stored one, so stopping before an unsettled item never goes backwards.

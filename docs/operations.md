@@ -78,7 +78,23 @@ Agents with **Operate** start work with `work_start`; the gateway queues the job
 - **Host down.** Jobs keep their state; `work_status` shows `hostUnreachableSince` and the gateway retries with backoff (up to every 5 minutes). Queued jobs launch when the host is back.
 - **Unknown launches.** If a launch's response is lost, the job is `unknown` and the gateway looks for `[job:<id>]` in the project's threads. Found: it continues, unless T3 created the thread but never started a run on it (the task was not delivered): then `failed` with `launch_not_started`, and the job keeps the thread's id and link so you can inspect it. Not found for `watcher.reconcileWindowMinutes` (default 10) while the host answers: `failed` with `launch_not_confirmed`. The gateway never launches twice; the agent decides whether to start again.
 - **Cleanup.** Cancelled, failed and finished jobs leave their T3 thread, worktree and branch in place for you. Remove them in T3 or with git when you no longer need them.
+- **Standing jobs.** Register a thread you already work in (for example a long-running coordinator thread) so agents can drive it; see below.
 - **Restarts** are safe at any time: job state is in the database, and the next start resumes watching every unfinished job and reconciles any launch that was in flight.
+
+### Standing jobs
+
+A standing job is a T3 thread you created and keep, which agents send work to with `work_continue` and follow with `work_feed` and `work_status`, instead of launching new threads. Typical use: a "chief of staff" thread that coordinates a project (and may delegate to child threads of its own), driven by Grok Bot. Only you can register one:
+
+```sh
+t3-fleet-gateway jobs adopt <project alias> <T3 thread id> [--title "Chief of Staff"]
+t3-fleet-gateway jobs list [--all]      # id, project, state, standing, title, link; --all includes finished jobs
+t3-fleet-gateway jobs release <job id>
+```
+
+- **Adopt** checks with the project's host that the thread exists and belongs to that project's T3 project, then records it and prints the job id, state and link. Copy the thread id from T3 (the thread's link ends with it). Its state comes from the thread now (`running`, `needs_input` or `idle`); earlier history is not reported to agents as new activity. Adopting the same thread again prints the existing job; a thread a launched job already follows is refused. `--title` is what agents see (default: the thread's T3 title). The running gateway starts following the job within one poll; no restart is needed.
+- **Agents** see it in `work_list`, `work_feed`, `work_status` with `standing: true`, and in `fleet_status` under its project. `work_cancel` only interrupts the current turn; the job returns to `idle` and stays open. A failed run also leaves it `idle`, with the error in `lastError`.
+- **Concurrency.** Standing jobs never hold one of the host's `maxConcurrentJobs` slots, running or not.
+- **Release** stops following it: the job becomes `released` (terminal) and agents can no longer send it work. The gateway makes no T3 call: the thread, and anything running on it, are left exactly as they are. You can adopt the thread again later as a new job.
 
 ## Doctor
 
@@ -137,7 +153,7 @@ An uncaught exception or unhandled rejection in `serve` is logged as `process.fa
 | `mcp.unauthorized`, `mcp.origin_rejected` | Rejected `/mcp` requests |
 | `host.enrollment_succeeded`, `host.enrollment_failed`, `host.renewal_due`, `host.not_enrolled` | T3 credentials |
 | `project.model_missing` (warn) | At startup: a project has no model from the config and its T3 project has no default model, so T3 would refuse its launches; see `doctor` |
-| `job.created`, `job.state_changed` | Job id, project, host, client id; `from`, `to`, `reason`, `errorCode` |
+| `job.created`, `job.adopted`, `job.state_changed` | Job id, project, host, client id; the adopted job's first state; `from`, `to`, `reason`, `errorCode` |
 | `jobs.host_unreachable` (warn), `jobs.host_reachable` | The job engine lost or regained a host; jobs keep their state |
 | `jobs.reconcile_failed`, `jobs.watch_failed`, `jobs.interrupt_failed`, `jobs.interrupt_deferred` (warn) | A T3 call for one job failed (job id, error code); the error is on the job and the call is retried next tick |
 | `jobs.tick_failed`, `jobs.host_tick_failed` (error) | Unexpected engine errors (with an error code and, per host, the step); the next step still runs |

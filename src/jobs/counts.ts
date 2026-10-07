@@ -6,13 +6,13 @@ export interface HostJobCounts {
   queued: number;
 }
 
-/** Running and queued job counts per host id. Hosts without jobs are absent. */
+/** Running and queued job counts per host id; running counts slot holders, so not standing jobs. Hosts without jobs are absent. */
 export function jobCountsByHost(db: Database): Map<string, HostJobCounts> {
   const placeholders = RUNNING_STATES.map(() => '?').join(', ');
   const rows = db
     .prepare(
       `SELECT host_id,
-              SUM(CASE WHEN state IN (${placeholders}) THEN 1 ELSE 0 END) AS running,
+              SUM(CASE WHEN standing = 0 AND state IN (${placeholders}) THEN 1 ELSE 0 END) AS running,
               SUM(CASE WHEN state = 'queued' THEN 1 ELSE 0 END) AS queued
          FROM jobs GROUP BY host_id`,
     )

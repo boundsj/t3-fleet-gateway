@@ -13,6 +13,7 @@ The first supported agent is Grok Bot; any MCP client with OAuth support should 
 - The agent-facing MCP server (Streamable HTTP) with its own OAuth 2.1 authorization server: dynamic client registration, an approval page gated by one-time codes, PKCE, rotating refresh tokens.
 - Downstream connections to one or more T3 Code servers, with credentials the gateway obtains and renews itself through T3's pairing-code approval.
 - The job layer: `work_start`, `work_continue`, `work_respond`, `work_cancel`, `work_status`, `work_list` and `work_feed`, with a durable job ledger, a dispatcher that respects each host's concurrency limit, a watcher that follows every job's T3 thread, and reconciliation for launches whose outcome was lost.
+- Standing jobs: a T3 thread you already work in (a long-running coordinator, say) that you register for agents to drive with the same tools.
 - The `fleet_status` tool, the operator CLI, and deploy templates for launchd and systemd.
 
 The automated suite uses a fake T3 built from T3's published tool schemas; [`scripts/e2e-live.ts`](scripts/e2e-live.ts) is the live check against a real T3 server (see [docs/operations.md](docs/operations.md#live-end-to-end-check)). A live run has confirmed starting a job in its own worktree and branch, following it to idle with the worker's reply, continuing it, the job links, and cancelling a running job (T3 interrupts the thread and the job becomes `cancelled`); the handling of questions, approvals and failed runs is not yet confirmed live. Known limits: permission approvals can only be given in T3 itself (T3's tools do not expose them), so jobs in projects with `runtimeMode` `approval-required` (the default) wait for you to approve in T3, and projects that should run unattended need `auto` or `full-access` (see [docs/configuration.md](docs/configuration.md#approvals-and-unattended-projects)); sign-in from browser-based MCP clients is not supported (no CORS on the OAuth endpoints, see [docs/security.md](docs/security.md#known-limitations)). See [docs/design.md](docs/design.md).
@@ -71,6 +72,16 @@ The package runs its TypeScript sources directly with Node's type stripping, so 
 
 `t3-fleet-gateway clients list` shows connected agents; `clients revoke <id>` disconnects one. If approvals or registrations are throttled (someone probing your URL), `pair` lifts an approval pause and `throttle reset` clears both limits; see [docs/operations.md](docs/operations.md#throttles).
 
+## Standing jobs: give an agent your coordinator thread
+
+By default an agent starts a new T3 thread for each piece of work. If you already run a long-lived thread that coordinates a project (a "chief of staff" that plans, delegates to child threads and reports back), you can let the agent talk to that thread instead:
+
+```sh
+node bin/t3-fleet-gateway.js jobs adopt pilot <thread id> --title "Chief of Staff"
+```
+
+The gateway checks that the thread belongs to project `pilot` and records it as a **standing job**. The agent sees it with `standing: true` in `work_list`, `work_feed` and `work_status`, sends it instructions with `work_continue`, and follows its turns with `work_feed` and `work_status`, just as for jobs it started. A standing job takes no concurrency slot, `work_cancel` only interrupts its current turn (it stays open), and the agent can never close it. `jobs release <job id>` stops the gateway from following it without touching the thread. Details: [docs/operations.md](docs/operations.md#standing-jobs).
+
 ## Security model, in short
 
 - Agents authenticate with tokens this gateway issues; approval needs a one-time code minted on the gateway machine. Codes and tokens are stored only as hashes.
@@ -82,7 +93,7 @@ Details: [docs/security.md](docs/security.md). To report a vulnerability, see [S
 ## Documentation
 
 - [docs/configuration.md](docs/configuration.md): every config field
-- [docs/operations.md](docs/operations.md): enroll, pair, revoke, renewal, doctor, logs, backup, uninstall
+- [docs/operations.md](docs/operations.md): enroll, pair, revoke, renewal, standing jobs, doctor, running as a service, logs, backup, uninstall
 - [docs/security.md](docs/security.md): threat model and what is stored where
 - [docs/design.md](docs/design.md): the design specification
 

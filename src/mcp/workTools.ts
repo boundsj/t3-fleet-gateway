@@ -28,15 +28,26 @@ const requestIdInput = z
   .regex(REQUEST_ID_PATTERN, 'use 1-128 letters, digits, dots, underscores, colons or hyphens')
   .describe('Your unique id for this request, for safe retries (for example a UUID)');
 
-const jobIdInput = z.string().regex(/^[0-9a-z]{6,32}$/, 'a job id as returned by work_start').describe('The jobId returned by work_start');
+const jobIdInput = z
+  .string()
+  .regex(/^[0-9a-z]{6,32}$/, 'a job id as returned by work_start')
+  .describe('The jobId returned by work_start, or listed by work_list or (for standing jobs) fleet_status');
 
 const jobSchema = z.object({
   jobId: z.string(),
   state: z.enum(JOB_STATES),
   project: z.string(),
   host: z.string(),
-  title: z.string().describe('The T3 thread title; it ends with the marker [job:<jobId>]'),
-  branch: z.string().describe('The git branch of the job worktree'),
+  title: z
+    .string()
+    .describe("The T3 thread title; a launched job's ends with the marker [job:<jobId>], a standing job's is the title the operator gave it"),
+  branch: z.string().describe("The git branch of the job worktree (a standing job: its thread's branch, or empty)"),
+  standing: z
+    .boolean()
+    .describe(
+      'true for a standing job: a long-lived T3 thread the operator registered (for example a coordinator), not one work_start ' +
+        'launched. Send it work with work_continue; work_cancel only interrupts its current turn, and it stays open',
+    ),
   threadId: z.string().nullable().describe('The T3 thread, once it exists'),
   link: z
     .string()
@@ -52,7 +63,7 @@ const jobSchema = z.object({
 const eventSchema = z.object({
   cursor: z.string().describe('Feed position of this event'),
   jobId: z.string(),
-  type: z.string().describe('created, state_changed, followup_sent, input_answered or turn_finished'),
+  type: z.string().describe('created, state_changed, followup_sent, input_answered, turn_finished or interrupt_requested'),
   fromState: z.enum(JOB_STATES).nullable(),
   toState: z.enum(JOB_STATES).nullable(),
   reason: z.string().nullable(),
@@ -94,6 +105,7 @@ export function jobView(job: Job, context: ToolContext): JobView {
     host: job.hostId,
     title: job.title,
     branch: job.branch,
+    standing: job.standing,
     threadId: job.threadId,
     link: job.threadLink,
     createdAt: isoTime(job.createdAt),
@@ -118,7 +130,7 @@ export function eventView(event: JobEvent): z.infer<typeof eventSchema> {
 }
 
 function describeJob(job: JobView): string {
-  return `${job.jobId} [${job.state}] ${job.project}: ${job.title}`;
+  return `${job.jobId} [${job.state}${job.standing ? ', standing' : ''}] ${job.project}: ${job.title}`;
 }
 
 export function workTools(jobs: JobService): GatewayTool[] {
@@ -217,7 +229,9 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'What changed since you last looked, plus the jobs that need you now. Designed for a scheduled routine: call it with ' +
       'the nextCursor from your previous call (omit cursor the first time), handle the events, store the new nextCursor, ' +
       'and call again with it while hasMore is true. The cursor is exclusive, so no event is returned twice. Events: ' +
-      'created, state_changed (fromState to toState, with a reason), followup_sent, input_answered, turn_finished. ' +
+      'created, state_changed (fromState to toState, with a reason), followup_sent, input_answered, turn_finished, ' +
+      'interrupt_requested (work_cancel on a standing job). Standing jobs (long-lived threads the operator registered) report ' +
+      'here like any job, so this is also how you follow a coordinator you send work to with work_continue. ' +
       '"attention" lists jobs in needs_input (answer with work_respond, or the operator must approve in T3) or unknown ' +
       `(the gateway is confirming the launch) at any age, and jobs that went idle (turn finished: review with work_status, ` +
       `then work_continue or work_cancel) or failed within the last ${ATTENTION_RECENT_MS / HOUR} hours. ` +
@@ -230,7 +244,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
         .optional()
         .describe('nextCursor from your previous work_feed call; omit to start from the beginning'),
       limit: z.int().min(1).max(MAX_FEED_LIMIT).optional().describe(`Events per page, default 50, at most ${MAX_FEED_LIMIT}`),
-      mine: z.boolean().optional().describe('Only events and jobs from work this agent started'),
+      mine: z.boolean().optional().describe('Only events and jobs from work this agent started (this leaves out standing jobs, which no agent started)'),
     }),
     outputSchema: z.object({
       events: z.array(eventSchema.extend({ project: z.string(), title: z.string() })),
@@ -241,7 +255,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     async run(input, context) {
       const feed = jobs.feed({ cursor: Number(input.cursor ?? 0), limit: input.limit ?? 50, mine: input.mine ?? false }, context);
       const events = feed.events.map((event) => ({ ...eventView(event), project: event.projectAlias, title: event.title }));
-      const attention = feed.attention.map((job) => ({ ...jobView(job, context), why: attentionReason(job.state, job.pendingRequestIds.length) }));
+      const attention = feed.attention.map((job) => ({ ...jobView(job, context), why: attentionReason(job) }));
       const lines = [
         `${events.length} event(s)${feed.hasMore ? ', more waiting' : ''}; nextCursor ${feed.nextCursor}.`,
         ...events.map((event) => `#${event.cursor} ${event.jobId} ${event.type}${event.toState ? ` -> ${event.toState}` : ''}${event.reason ? ` (${event.reason})` : ''}`),
@@ -258,7 +272,9 @@ export function workTools(jobs: JobService): GatewayTool[] {
     description:
       "Send a follow-up instruction to a job's T3 thread: review feedback, the next step, or a correction. Use it when the " +
       'job is idle (its turn finished; this starts a new turn and the job goes back to running). On a running or needs_input ' +
-      'job T3 steers the active turn or queues the message behind it. Idempotent: pass a unique requestId per message; ' +
+      'job T3 steers the active turn or queues the message behind it. This is also how you give work to a standing job ' +
+      '(standing: true, for example a coordinator thread the operator registered): send it the instruction here, then follow ' +
+      'it with work_feed and work_status. Idempotent: pass a unique requestId per message; ' +
       'repeating a requestId returns the first result without sending again, and if a call fails with an uncertain outcome, ' +
       'repeating it with the same requestId is safe. Request ids are scoped to this tool, separate from work_start. Not for answering a pending question: use work_respond.',
     scope: OPERATE_SCOPE,
@@ -321,24 +337,31 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'thread: outcome "cancelled" means it is confirmed stopped; "cancel_requested" means the interrupt is requested ' +
       '(delivered=true) or will be delivered when the host is reachable or the launch is confirmed (delivered=false), and ' +
       'the job moves to cancelled when the watcher sees the thread stop. Cancelled is terminal; the T3 thread and its ' +
-      'worktree stay for the operator. Safe to repeat.',
+      'worktree stay for the operator. A standing job (standing: true) is never closed by this tool: only its current turn ' +
+      'is interrupted. Outcome "interrupt_requested" means T3 is stopping the turn and the job returns to idle (still open, ' +
+      'ready for work_continue) once it has stopped; "not_running" means nothing was running. Safe to repeat.',
     scope: OPERATE_SCOPE,
     readOnly: false,
     inputSchema: z.object({ jobId: jobIdInput }),
     outputSchema: z.object({
       job: jobSchema,
-      outcome: z.enum(['cancelled', 'cancel_requested', 'already_finished']),
-      confirmed: z.boolean().describe('The job is stopped'),
+      outcome: z.enum(['cancelled', 'cancel_requested', 'already_finished', 'interrupt_requested', 'not_running']),
+      confirmed: z.boolean().describe('The job is stopped (a standing job: nothing is running on it)'),
       delivered: z.boolean().describe('T3 has the interrupt request, or none was needed'),
     }),
     async run(input, context) {
       const result = await jobs.cancel(input);
       const view = jobView(result.job, context);
-      const confirmed = view.state === 'cancelled' || view.state === 'failed';
-      const summary =
-        result.outcome === 'cancel_requested'
-          ? `Cancel requested${result.delivered ? '' : ' (will be delivered when possible)'}; waiting for T3 to confirm. ${describeJob(view)}`
-          : `${result.outcome === 'cancelled' ? 'Cancelled' : 'Already finished'}. ${describeJob(view)}`;
+      // A standing job is never closed: confirmed means its turn is not running.
+      const confirmed = view.standing ? result.outcome !== 'interrupt_requested' : ['cancelled', 'failed', 'released'].includes(view.state);
+      const summaries: Record<typeof result.outcome, string> = {
+        cancel_requested: `Cancel requested${result.delivered ? '' : ' (will be delivered when possible)'}; waiting for T3 to confirm.`,
+        cancelled: 'Cancelled.',
+        already_finished: 'Already finished.',
+        interrupt_requested: 'Interrupt requested; the standing job stays open and becomes idle once the turn has stopped.',
+        not_running: 'Nothing was running; the standing job stays open.',
+      };
+      const summary = `${summaries[result.outcome]} ${describeJob(view)}`;
       return { structured: { job: view, outcome: result.outcome, confirmed, delivered: result.delivered }, summary };
     },
   });
@@ -346,19 +369,23 @@ export function workTools(jobs: JobService): GatewayTool[] {
   return [workStart, workContinue, workRespond, workCancel, workStatus, workList, workFeed];
 }
 
-function attentionReason(state: string, pendingQuestions: number): string {
-  switch (state) {
+function attentionReason(job: Job): string {
+  switch (job.state) {
     case 'needs_input':
-      return pendingQuestions > 0
+      return job.pendingRequestIds.length > 0
         ? 'The worker asked a question: read it with work_status and answer with work_respond.'
         : 'The worker waits for a permission approval that only the operator can give in T3.';
     case 'unknown':
       return 'The launch outcome is unconfirmed; the gateway is checking T3. Do not start a duplicate yet.';
     case 'idle':
+      if (job.standing) {
+        const failed = job.lastErrorCode === 't3_run_failed' ? ' Its last run failed (see lastError).' : '';
+        return `Standing job finished its turn:${failed} read its reply with work_status, then send the next instruction with work_continue.`;
+      }
       return 'Turn finished: review with work_status, then work_continue or work_cancel.';
     case 'failed':
       return 'Failed: see lastError in work_status. Start a new job to retry.';
     default:
-      return STATE_MEANINGS[state as keyof typeof STATE_MEANINGS] ?? state;
+      return STATE_MEANINGS[job.state];
   }
 }

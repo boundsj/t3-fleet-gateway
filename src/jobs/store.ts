@@ -2,7 +2,7 @@ import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
 import type { Logger } from '../log.ts';
 import type { Clock } from '../time.ts';
-import { isTerminal, RUNNING_STATES, type JobState } from './states.ts';
+import { isTerminal, RUNNING_STATES, TERMINAL_STATES, type JobState } from './states.ts';
 
 export interface Job {
   id: string;
@@ -36,7 +36,15 @@ export interface Job {
   stateChangedAt: number;
   dispatchStartedAt: number | null;
   finishedAt: number | null;
+  /**
+   * An existing T3 thread the operator adopted (`jobs adopt`), not one the gateway launched. Never
+   * launched or reconciled, holds no concurrency slot, and stays open until the operator releases it.
+   */
+  standing: boolean;
 }
+
+/** The client id recorded on standing jobs: the operator adopted them, no agent started them. Real client ids are longer. */
+export const OPERATOR_CLIENT_ID = 'operator';
 
 /** Why an event happened. Gateway-generated values only: never task text or worker content. */
 export interface EventDetail {
@@ -119,6 +127,7 @@ interface JobRow {
   state_changed_at: number;
   dispatch_started_at: number | null;
   finished_at: number | null;
+  standing: number;
 }
 
 interface EventRow {
@@ -130,6 +139,9 @@ interface EventRow {
   detail: string | null;
   created_at: number;
 }
+
+/** Placeholders for TERMINAL_STATES in `state NOT IN (…)`. */
+const NOT_OPEN = TERMINAL_STATES.map(() => '?').join(', ');
 
 function parseIds(text: string): string[] {
   try {
@@ -169,6 +181,7 @@ function toJob(row: JobRow): Job {
     stateChangedAt: row.state_changed_at,
     dispatchStartedAt: row.dispatch_started_at,
     finishedAt: row.finished_at,
+    standing: row.standing === 1,
   };
 }
 
@@ -216,6 +229,28 @@ export interface NewJob {
   title: string;
   branch: string;
   runtimeMode: string;
+}
+
+/** An existing T3 thread the operator adopts as a standing job, with its state from a first read. */
+export interface NewStandingJob {
+  id: string;
+  projectAlias: string;
+  hostId: string;
+  t3ProjectId: string;
+  state: JobState;
+  title: string;
+  branch: string;
+  runtimeMode: string;
+  threadId: string;
+  threadTitle: string;
+  threadLink: string | null;
+  lastRunId: string | null;
+  pendingRequestIds: string[];
+  latestMessageExcerpt: string | null;
+  latestActivityAt: number | null;
+  readPosition: number | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
 }
 
 export interface TransitionOptions {
@@ -292,23 +327,40 @@ export class JobStore {
     return rows.map(toJob);
   }
 
-  /** Jobs holding one of the host's concurrency slots. */
+  /** Jobs holding one of the host's concurrency slots. Standing jobs never do. */
   slotHolders(hostId: string): number {
     const row = this.#db
-      .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE host_id = ? AND state IN (${RUNNING_STATES.map(() => '?').join(', ')})`)
+      .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE host_id = ? AND standing = 0 AND state IN (${RUNNING_STATES.map(() => '?').join(', ')})`)
       .get(hostId, ...RUNNING_STATES) as { n: number };
     return row.n;
   }
 
   /** Ids of every job that is not finished. */
   openJobIds(): Set<string> {
-    const rows = this.#db.prepare("SELECT id FROM jobs WHERE state NOT IN ('cancelled', 'failed')").all() as { id: string }[];
+    const rows = this.#db.prepare(`SELECT id FROM jobs WHERE state NOT IN (${NOT_OPEN})`).all(...TERMINAL_STATES) as { id: string }[];
     return new Set(rows.map((row) => row.id));
   }
 
   hasOpenJobs(hostId: string): boolean {
-    const row = this.#db.prepare("SELECT 1 AS present FROM jobs WHERE host_id = ? AND state NOT IN ('cancelled', 'failed') LIMIT 1").get(hostId);
+    const row = this.#db.prepare(`SELECT 1 AS present FROM jobs WHERE host_id = ? AND state NOT IN (${NOT_OPEN}) LIMIT 1`).get(hostId, ...TERMINAL_STATES);
     return row !== undefined;
+  }
+
+  /** The open job following a T3 thread, if any. */
+  openJobForThread(threadId: string): Job | undefined {
+    const row = this.#db
+      .prepare(`SELECT * FROM jobs WHERE t3_thread_id = ? AND state NOT IN (${NOT_OPEN}) ORDER BY created_at, rowid LIMIT 1`)
+      .get(threadId, ...TERMINAL_STATES) as JobRow | undefined;
+    return row && toJob(row);
+  }
+
+  /** Open standing jobs, oldest first; all of them, or one project's. */
+  standingJobs(projectAlias?: string): Job[] {
+    const project = projectAlias === undefined ? '' : 'AND project_alias = ?';
+    const rows = this.#db
+      .prepare(`SELECT * FROM jobs WHERE standing = 1 AND state NOT IN (${NOT_OPEN}) ${project} ORDER BY created_at, rowid`)
+      .all(...TERMINAL_STATES, ...(projectAlias === undefined ? [] : [projectAlias])) as unknown as JobRow[];
+    return rows.map(toJob);
   }
 
   /**
@@ -339,6 +391,59 @@ export class JobStore {
         .prepare('INSERT INTO idempotency_keys (client_id, request_id, tool, input_hash, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
         .run(job.clientId, job.requestId, 'work_start', job.inputHash, job.id, now);
       this.#logger.info('job.created', { jobId: job.id, project: job.projectAlias, hostId: job.hostId, clientId: job.clientId });
+      return { job: this.require(job.id), created: true };
+    });
+  }
+
+  /**
+   * Record an adopted T3 thread as a standing job, with a `created` event (reason `adopted`) in its
+   * first state. Adopting a thread that an open standing job of the same project already follows
+   * returns that job; a thread followed by any other open job is refused.
+   */
+  adopt(job: NewStandingJob): { job: Job; created: boolean } {
+    return transaction(this.#db, () => {
+      const existing = this.openJobForThread(job.threadId);
+      if (existing) {
+        if (existing.standing && existing.projectAlias === job.projectAlias) return { job: existing, created: false };
+        const what = existing.standing ? `standing job ${existing.id} in project "${existing.projectAlias}"` : `job ${existing.id}, which the gateway launched`;
+        throw new GatewayError('job_state_conflict', `Thread ${job.threadId} is already followed by ${what} (${existing.state}).`);
+      }
+      const now = this.#clock();
+      this.#db
+        .prepare(
+          `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, t3_project_id, state, task, title, branch, runtime_mode,
+             t3_thread_id, t3_thread_title, t3_thread_link, last_run_id, pending_request_ids, latest_message_excerpt, latest_activity_at,
+             read_position, last_error_code, last_error_message, created_at, updated_at, state_changed_at, finished_at, standing)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        )
+        .run(
+          job.id,
+          OPERATOR_CLIENT_ID,
+          'adopted',
+          job.projectAlias,
+          job.hostId,
+          job.t3ProjectId,
+          job.state,
+          job.title,
+          job.branch,
+          job.runtimeMode,
+          job.threadId,
+          job.threadTitle,
+          job.threadLink,
+          job.lastRunId,
+          JSON.stringify(job.pendingRequestIds),
+          job.latestMessageExcerpt,
+          job.latestActivityAt,
+          job.readPosition,
+          job.lastErrorCode,
+          job.lastErrorMessage,
+          now,
+          now,
+          now,
+          isTerminal(job.state) ? now : null,
+        );
+      this.#insertEvent(job.id, 'created', null, job.state, { reason: 'adopted' }, now);
+      this.#logger.info('job.adopted', { jobId: job.id, project: job.projectAlias, hostId: job.hostId, state: job.state });
       return { job: this.require(job.id), created: true };
     });
   }
@@ -384,9 +489,9 @@ export class JobStore {
     this.#db
       .prepare(
         'UPDATE jobs SET host_unreachable_since = ?, updated_at = ? ' +
-          "WHERE host_id = ? AND host_unreachable_since IS NULL AND state NOT IN ('cancelled', 'failed')",
+          `WHERE host_id = ? AND host_unreachable_since IS NULL AND state NOT IN (${NOT_OPEN})`,
       )
-      .run(since, this.#clock(), hostId);
+      .run(since, this.#clock(), hostId, ...TERMINAL_STATES);
   }
 
   clearHostUnreachable(hostId: string): void {

@@ -201,4 +201,22 @@ describe('job store', () => {
     assert.equal(store.idempotencyKey('c', 'work_continue', 'shared')?.inputHash, 'other');
     assert.deepEqual(store.create({ id: 'job2', ...job }), { job: store.require('job1'), created: false }, 'work_start replays unaffected');
   });
+
+  test('adopts a thread once per project; a thread followed by another open job is refused', (t) => {
+    const db = openDatabase(openDataDir(join(tempDir(t), 'data')).databasePath);
+    t.after(() => db.close());
+    const store = new JobStore(db, () => 1_000, silentLogger);
+    const standing = {
+      projectAlias: 'pilot', hostId: 'main', t3ProjectId: 'project-1', state: 'idle' as const, title: 'Synthetic coordinator', branch: '', runtimeMode: '',
+      threadId: 'thread-1', threadTitle: 'Synthetic coordinator', threadLink: null, lastRunId: null, pendingRequestIds: [], latestMessageExcerpt: null,
+      latestActivityAt: null, readPosition: 3, lastErrorCode: null, lastErrorMessage: null,
+    };
+    const first = store.adopt({ id: 'job1', ...standing });
+    assert.deepEqual([first.created, first.job.standing, first.job.clientId, first.job.readPosition], [true, true, 'operator', 3]);
+    assert.deepEqual(store.adopt({ id: 'job2', ...standing }), { job: first.job, created: false });
+    assert.throws(() => store.adopt({ id: 'job3', ...standing, projectAlias: 'other' }), { code: 'job_state_conflict', message: /standing job job1 in project "pilot"/ });
+    assert.deepEqual(store.recentEvents('job1', 5).map((event) => [event.type, event.fromState, event.toState, event.detail.reason]), [['created', null, 'idle', 'adopted']]);
+    assert.deepEqual(store.standingJobs('pilot').map((job) => job.id), ['job1']);
+    assert.deepEqual(store.standingJobs('other'), []);
+  });
 });

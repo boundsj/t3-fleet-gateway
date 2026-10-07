@@ -1,14 +1,17 @@
 import type { GatewayConfig, ProjectConfig } from '../config.ts';
 import { sha256Hex } from '../crypto.ts';
 import { describeError, GatewayError } from '../errors.ts';
+import { resolveProjectId } from '../hosts/projects.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import type { Logger } from '../log.ts';
-import { T3TransportError } from '../t3/client.ts';
+import { T3TransportError, type T3Client } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
+import type { ThreadItem, ThreadRead } from '../t3/schemas.ts';
 import { HOUR, SECOND, type Clock } from '../time.ts';
+import { EXCERPT_CHARS, isActiveStatus, isUnsettled, observe, threadLinkTarget } from './derive.ts';
 import { newJobId } from './ids.ts';
 import { cancelRequestId } from './interrupt.ts';
-import { isTerminal, type JobState } from './states.ts';
+import { isTerminal, OPEN_STATES, type JobState } from './states.ts';
 import type { FeedEvent, Job, JobEvent, JobStore } from './store.ts';
 
 /** Bounds on agent-supplied text. T3 accepts up to 120,000 characters per message. */
@@ -24,6 +27,8 @@ export const MAX_TITLE_CHARS = 80;
 export const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 const TITLE_FROM_TASK_CHARS = 60;
+/** Pages of 100 timeline items read to find the end of a thread being adopted. */
+const MAX_ADOPT_PAGES = 1000;
 
 export interface Caller {
   clientId: string;
@@ -56,13 +61,24 @@ export interface ContinueResult {
   replayed: boolean;
 }
 
-export type CancelOutcome = 'cancelled' | 'cancel_requested' | 'already_finished';
+/**
+ * `interrupt_requested` and `not_running` are for standing jobs, which work_cancel never closes: the
+ * run is interrupted (the job becomes idle once T3 confirms) or nothing was running.
+ */
+export type CancelOutcome = 'cancelled' | 'cancel_requested' | 'already_finished' | 'interrupt_requested' | 'not_running';
 
 export interface CancelResult {
   job: Job;
   outcome: CancelOutcome;
   /** T3 has the interrupt request (or no T3 call was needed). */
   delivered: boolean;
+}
+
+export interface AdoptInput {
+  project: string;
+  threadId: string;
+  /** Shown to agents instead of the thread's T3 title. */
+  title?: string | undefined;
 }
 
 export interface Feed {
@@ -216,6 +232,77 @@ export class JobService {
   }
 
   /**
+   * Adopt an existing T3 thread as a standing job (operator CLI only). The thread must belong to the
+   * project's T3 project. Its state comes from a read now, and the read position starts at the
+   * thread's current end, so the watcher follows only what happens from now on. Adopting a thread
+   * that is already a standing job of the project returns that job (`created: false`).
+   */
+  async adopt(input: AdoptInput): Promise<{ job: Job; created: boolean }> {
+    const project = this.project(input.project);
+    const existing = this.store.openJobForThread(input.threadId);
+    if (existing?.standing && existing.projectAlias === project.alias) return { job: existing, created: false };
+    const client = this.#registry.client(project.host);
+    const projectId = await resolveProjectId(this.#registry, project);
+    let read: ThreadRead;
+    let questions: string[];
+    try {
+      read = await readToEnd(client, input.threadId);
+      questions = await client.listPendingRequests(input.threadId);
+    } catch (error) {
+      if (error instanceof T3ToolError && /not_found/.test(error.t3Code)) {
+        throw new GatewayError('not_found', `Host ${project.host} has no T3 thread ${input.threadId} (${error.t3Code}).`);
+      }
+      throw error;
+    }
+    const { thread } = read;
+    if (thread.projectId !== projectId) {
+      throw new GatewayError(
+        'invalid_argument',
+        `Thread ${input.threadId} belongs to T3 project ${thread.projectId}, not to project "${project.alias}" (T3 project ${projectId}).`,
+      );
+    }
+    const lastRunId = thread.activeRunId ?? thread.latestRunId;
+    const seen = observe({ state: 'idle', lastRunId, readPosition: null, threadLink: null, latestActivityAt: null, standing: true }, read, questions);
+    const runtimeMode = (thread as { runtimeMode?: unknown }).runtimeMode;
+    return this.store.adopt({
+      id: newJobId(),
+      projectAlias: project.alias,
+      hostId: project.host,
+      t3ProjectId: projectId,
+      state: seen.state,
+      title: input.title ?? thread.title,
+      branch: thread.branch ?? '',
+      runtimeMode: typeof runtimeMode === 'string' ? runtimeMode : '',
+      threadId: thread.threadId,
+      threadTitle: thread.title,
+      threadLink: threadLinkTarget(thread.link),
+      lastRunId: seen.lastRunId,
+      pendingRequestIds: seen.pendingRequestIds,
+      latestMessageExcerpt: seen.excerpt ?? null,
+      latestActivityAt: seen.activityAt,
+      readPosition: seen.readPosition,
+      lastErrorCode: seen.errorCode ?? null,
+      lastErrorMessage: seen.errorCode ? 'The latest T3 run failed. Open the thread in T3 for details.' : null,
+    });
+  }
+
+  /**
+   * Stop following a standing job (operator CLI only): it becomes `released`. T3 is not contacted,
+   * so the thread and any run on it carry on untouched. `released` is false when it was already finished.
+   */
+  release(jobId: string): { job: Job; released: boolean } {
+    const job = this.store.require(jobId);
+    if (!job.standing) {
+      throw new GatewayError(
+        'invalid_argument',
+        `Job ${job.id} was started by an agent, not adopted; only standing jobs are released. Stop it with work_cancel instead.`,
+      );
+    }
+    const released = this.store.transition(job.id, { from: OPEN_STATES, to: 'released', detail: { reason: 'released' } });
+    return released ? { job: released, released: true } : { job: this.store.require(job.id), released: false };
+  }
+
+  /**
    * Send a follow-up instruction to the job's thread. Idempotent on requestId: a delivered request is
    * not sent again, and a request whose first attempt had an unknown outcome is re-sent with the same
    * T3 clientRequestId, which T3 deduplicates.
@@ -312,6 +399,7 @@ export class JobService {
    */
   async cancel(input: { jobId: string }): Promise<CancelResult> {
     const job = this.store.require(input.jobId);
+    if (job.standing) return this.#interruptStanding(job);
     if (job.state === 'queued') {
       const cancelled = this.store.transition(job.id, { from: ['queued'], to: 'cancelled', detail: { reason: 'cancelled_before_launch' } });
       return cancelled ? { job: cancelled, outcome: 'cancelled', delivered: true } : this.cancel(input);
@@ -350,6 +438,43 @@ export class JobService {
     return { job: requested, outcome: 'cancel_requested', delivered: true };
   }
 
+  /**
+   * work_cancel on a standing job: interrupt the run that is active now and leave the job open; the
+   * watcher moves it to idle when T3 reports the run stopped. Nothing is deferred: if T3 cannot be
+   * reached the agent is told to repeat the call, and a repeat for the same run reuses its T3
+   * clientRequestId, which T3 deduplicates. When nothing is active no interrupt is sent: T3 would
+   * answer a repeat for an already stopped run from its record of the first interrupt.
+   */
+  async #interruptStanding(job: Job): Promise<CancelResult> {
+    if (isTerminal(job.state) || job.threadId === null) return { job, outcome: 'already_finished', delivered: true };
+    const client = this.#registry.client(job.hostId);
+    let status: string;
+    try {
+      const { thread } = await client.readThread({ threadId: job.threadId, limit: 1, runLimit: 1, maxCharsPerItem: 1 });
+      if (thread.activeRunId === null && !isActiveStatus(thread.status)) {
+        this.wake();
+        return { job: this.store.require(job.id), outcome: 'not_running', delivered: true };
+      }
+      const result = await client.interruptThread({
+        threadId: job.threadId,
+        clientRequestId: cancelRequestId(job.id, thread.activeRunId ?? thread.latestRunId),
+        reason: 'Interrupted through t3-fleet-gateway',
+      });
+      status = result.status;
+    } catch (error) {
+      if (error instanceof T3ToolError || !(error instanceof GatewayError)) throw error;
+      throw new GatewayError(error.code, `${error.message}. The interrupt may not have reached T3: call work_cancel again; repeating it is safe.`);
+    }
+    if (status !== 'interrupt_requested') {
+      this.wake();
+      return { job: this.store.require(job.id), outcome: 'not_running', delivered: true };
+    }
+    const current = this.store.require(job.id);
+    if (!isTerminal(current.state)) this.store.appendEvent(job.id, 'interrupt_requested', current.state, { reason: 'interrupt_requested' });
+    this.wake();
+    return { job: this.store.require(job.id), outcome: 'interrupt_requested', delivered: true };
+  }
+
   /** Events after `cursor` (exclusive) and the jobs needing attention. */
   feed(input: { cursor: number; limit: number; mine: boolean }, caller: Caller): Feed {
     const clientId = input.mine ? caller.clientId : undefined;
@@ -362,4 +487,23 @@ export class JobService {
       attention: this.store.attention(this.#clock(), ATTENTION_RECENT_MS, MAX_ATTENTION, clientId),
     };
   }
+}
+
+/**
+ * Read a thread to the end of its timeline, for adoption: the last page (or everything from the first
+ * item that may still change, so a message being streamed is read again once settled) with the
+ * thread's state. Bounded by MAX_ADOPT_PAGES; a longer thread is caught up by the watcher.
+ */
+async function readToEnd(client: T3Client, threadId: string): Promise<ThreadRead> {
+  let afterPosition: number | null = null;
+  let read: ThreadRead | undefined;
+  let kept: ThreadItem[] = [];
+  for (let page = 0; page < MAX_ADOPT_PAGES; page++) {
+    read = await client.readThread({ threadId, afterPosition, limit: 100, runLimit: 5, maxCharsPerItem: EXCERPT_CHARS });
+    kept = kept.some(isUnsettled) ? [...kept, ...read.items] : read.items;
+    if (!read.hasMore || read.nextPosition === null || read.nextPosition === afterPosition) break;
+    afterPosition = read.nextPosition;
+  }
+  if (!read) throw new GatewayError('internal_error', 'No thread read');
+  return { ...read, items: kept, nextPosition: read.nextPosition ?? afterPosition };
 }
