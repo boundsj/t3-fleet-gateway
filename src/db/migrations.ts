@@ -5,7 +5,8 @@ export interface Migration {
 }
 
 /**
- * Append-only list. Never edit a shipped migration; add a new one. Times are Unix milliseconds.
+ * Append-only list. Never edit a shipped migration; add a new one. Until the first release no
+ * database has been deployed, so migration 1 is still corrected in place. Times are Unix milliseconds.
  * The jobs, job_events and idempotency_keys tables are used by the job layer.
  */
 export const MIGRATIONS: readonly Migration[] = [
@@ -70,11 +71,12 @@ CREATE TABLE refresh_tokens (
   scope TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,
+  parent_hash TEXT,
   rotated_at INTEGER,
-  replaced_by TEXT,
   superseded_at INTEGER
 ) STRICT;
 CREATE INDEX refresh_tokens_family ON refresh_tokens(family_id);
+CREATE INDEX refresh_tokens_parent ON refresh_tokens(parent_hash);
 
 CREATE TABLE access_tokens (
   token_hash TEXT PRIMARY KEY,

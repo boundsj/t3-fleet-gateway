@@ -126,17 +126,52 @@ describe('token endpoint: refresh_token', () => {
     assert.equal((await refresh(h, clientId, next.refresh_token)).status, 200, 'the new refresh token works');
   });
 
-  test('a retry within the grace window succeeds and supersedes the lost pair', async (t) => {
+  test('a retry within the grace window gets a sibling pair and leaves the first pair valid', async (t) => {
     const h = await startOAuthHarness(t);
     const { clientId, tokens } = await signIn(h.baseUrl, mintFor(h));
-    const lost = (await (await refresh(h, clientId, tokens.refresh_token)).json()) as IssuedTokens;
+    const first = (await (await refresh(h, clientId, tokens.refresh_token)).json()) as IssuedTokens;
     h.clock.advance(REFRESH_GRACE - SECOND);
     const retried = await refresh(h, clientId, tokens.refresh_token);
     assert.equal(retried.status, 200);
-    const current = (await retried.json()) as IssuedTokens;
-    assert.ok(h.tokens.verifyAccessToken(current.access_token));
-    assert.equal(h.tokens.verifyAccessToken(lost.access_token), undefined, 'the pair the client never received is retired');
-    assert.equal((await refresh(h, clientId, current.refresh_token)).status, 200);
+    const second = (await retried.json()) as IssuedTokens;
+    assert.ok(h.tokens.verifyAccessToken(second.access_token));
+    assert.ok(h.tokens.verifyAccessToken(first.access_token), 'the client may have kept the first pair');
+    assert.equal((await refresh(h, clientId, first.refresh_token)).status, 200, 'either sibling can be rotated');
+    assert.ok(h.logs.some((line) => line.includes('"event":"oauth.refresh_retry_accepted"')));
+  });
+
+  test('concurrent refreshes with the same token both succeed, and the client is never logged out by the race', async (t) => {
+    for (const kept of [0, 1] as const) {
+      const h = await startOAuthHarness(t);
+      const { clientId, tokens } = await signIn(h.baseUrl, mintFor(h));
+      const responses = await Promise.all([refresh(h, clientId, tokens.refresh_token), refresh(h, clientId, tokens.refresh_token)]);
+      assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+      const pairs = (await Promise.all(responses.map((response) => response.json()))) as IssuedTokens[];
+      for (const pair of pairs) assert.ok(h.tokens.verifyAccessToken(pair.access_token), 'both access tokens work');
+      // The client keeps whichever pair it saved last and rotates that one; the other sibling is then superseded.
+      const keptPair = pairs[kept]!;
+      const otherPair = pairs[1 - kept]!;
+      const rotated = await refresh(h, clientId, keptPair.refresh_token);
+      assert.equal(rotated.status, 200, `sibling ${kept} can be rotated`);
+      const next = (await rotated.json()) as IssuedTokens;
+      assert.equal((await refresh(h, clientId, next.refresh_token)).status, 200, 'the chain continues normally');
+      await expectError(await refresh(h, clientId, otherPair.refresh_token), 'invalid_grant');
+      assert.ok(h.logs.some((line) => line.includes('"event":"oauth.token_family_revoked"') && line.includes('refresh_token_reuse')));
+    }
+  });
+
+  test('after concurrent refreshes, reusing the original token after the grace window revokes the family', async (t) => {
+    const h = await startOAuthHarness(t);
+    const { clientId, tokens } = await signIn(h.baseUrl, mintFor(h));
+    const pairs = (await Promise.all(
+      [refresh(h, clientId, tokens.refresh_token), refresh(h, clientId, tokens.refresh_token)].map(async (response) => (await response).json()),
+    )) as IssuedTokens[];
+    h.clock.advance(REFRESH_GRACE + SECOND);
+    await expectError(await refresh(h, clientId, tokens.refresh_token), 'invalid_grant');
+    for (const pair of pairs) {
+      assert.equal(h.tokens.verifyAccessToken(pair.access_token), undefined);
+      await expectError(await refresh(h, clientId, pair.refresh_token), 'invalid_grant');
+    }
   });
 
   test('reuse after the grace window revokes the whole family', async (t) => {
@@ -159,13 +194,15 @@ describe('token endpoint: refresh_token', () => {
     assert.equal(h.tokens.verifyAccessToken(third.access_token), undefined);
   });
 
-  test('presenting a superseded token revokes the family', async (t) => {
+  test('once one sibling is rotated, presenting another (superseded) sibling revokes the family', async (t) => {
     const h = await startOAuthHarness(t);
     const { clientId, tokens } = await signIn(h.baseUrl, mintFor(h));
-    const lost = (await (await refresh(h, clientId, tokens.refresh_token)).json()) as IssuedTokens;
-    const current = (await (await refresh(h, clientId, tokens.refresh_token)).json()) as IssuedTokens;
-    await expectError(await refresh(h, clientId, lost.refresh_token), 'invalid_grant');
+    const first = (await (await refresh(h, clientId, tokens.refresh_token)).json()) as IssuedTokens;
+    const second = (await (await refresh(h, clientId, tokens.refresh_token)).json()) as IssuedTokens;
+    const current = (await (await refresh(h, clientId, second.refresh_token)).json()) as IssuedTokens;
+    await expectError(await refresh(h, clientId, first.refresh_token), 'invalid_grant');
     assert.equal(h.tokens.verifyAccessToken(current.access_token), undefined);
+    await expectError(await refresh(h, clientId, current.refresh_token), 'invalid_grant');
   });
 
   test('refresh tokens expire after the idle period; access tokens after their TTL', async (t) => {

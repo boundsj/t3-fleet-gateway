@@ -5,7 +5,10 @@ import { OAuthError } from './errors.ts';
 import { formatScope, parseScope, type Scope } from './scopes.ts';
 
 export const AUTHORIZATION_CODE_TTL = 60 * SECOND;
-/** A rotated refresh token presented again within this window is treated as a client retry. */
+/**
+ * A rotated refresh token presented again within this window is a client retry (a lost response, or
+ * concurrent requests refreshing with the same token): it gets another pair alongside the first.
+ */
 export const REFRESH_GRACE = 2 * MINUTE;
 
 export interface TokenSettings {
@@ -42,8 +45,8 @@ interface RefreshRow {
   family_id: string;
   scope: string;
   expires_at: number;
+  parent_hash: string | null;
   rotated_at: number | null;
-  replaced_by: string | null;
   superseded_at: number | null;
   client_id: string;
   resource: string;
@@ -59,8 +62,13 @@ function resourceMatches(candidate: string, resource: string): boolean {
 
 /**
  * Authorization codes, access tokens and rotating refresh tokens. Only SHA-256 hashes of codes and
- * tokens are stored. Refresh tokens rotate on every use; replaying a rotated token after the grace
- * window, or a superseded one at any time, revokes the whole family.
+ * tokens are stored. Refresh tokens rotate on every use and remember the token they were issued
+ * from (`parent_hash`). Presenting a rotated token again within the grace window issues another pair
+ * from it, a sibling of the first; siblings stay valid side by side, because a client that refreshed
+ * twice concurrently keeps whichever pair it saved last. The first time any sibling is rotated, the
+ * client has settled on it: the other siblings are superseded and the parent can no longer be
+ * retried. Presenting a superseded token, or a rotated one after the grace window or after one of
+ * its children was rotated, revokes the whole family.
  */
 export class TokenService {
   readonly #db: Database;
@@ -185,7 +193,7 @@ export class TokenService {
       }
       const replay =
         row.superseded_at !== null ||
-        (row.rotated_at !== null && (now - row.rotated_at > REFRESH_GRACE || this.#successorWasUsed(row)));
+        (row.rotated_at !== null && (now - row.rotated_at > REFRESH_GRACE || this.#childWasRotated(row.token_hash)));
       if (replay) {
         this.#revokeFamily(row.family_id, 'refresh_token_reuse', now);
         return {
@@ -206,17 +214,22 @@ export class TokenService {
         }
         scope = formatScope(requested);
       }
+      // A retry leaves the pairs already issued from this token alone: the client may have kept any of them.
       const isRetry = row.rotated_at !== null;
-      if (isRetry && row.replaced_by) {
-        // The client never saw the successor pair (that is why it retried): retire it quietly.
-        this.#db.prepare('UPDATE refresh_tokens SET superseded_at = ? WHERE token_hash = ?').run(now, row.replaced_by);
-        this.#db.prepare('UPDATE access_tokens SET revoked_at = ? WHERE refresh_token_hash = ? AND revoked_at IS NULL').run(now, row.replaced_by);
+      if (!isRetry) {
+        this.#db.prepare('UPDATE access_tokens SET revoked_at = ? WHERE refresh_token_hash = ? AND revoked_at IS NULL').run(now, row.token_hash);
+        this.#db.prepare('UPDATE refresh_tokens SET rotated_at = ? WHERE token_hash = ?').run(now, row.token_hash);
+        if (row.parent_hash !== null) {
+          // The client settled on this token, so its siblings will not be used again.
+          this.#db
+            .prepare(
+              `UPDATE refresh_tokens SET superseded_at = ?
+                 WHERE parent_hash = ? AND token_hash != ? AND rotated_at IS NULL AND superseded_at IS NULL`,
+            )
+            .run(now, row.parent_hash, row.token_hash);
+        }
       }
-      this.#db.prepare('UPDATE access_tokens SET revoked_at = ? WHERE refresh_token_hash = ? AND revoked_at IS NULL').run(now, row.token_hash);
-      const response = this.#issuePair(row.family_id, scope, now);
-      this.#db
-        .prepare('UPDATE refresh_tokens SET rotated_at = COALESCE(rotated_at, ?), replaced_by = ? WHERE token_hash = ?')
-        .run(now, hashToken(response.refresh_token), row.token_hash);
+      const response = this.#issuePair(row.family_id, scope, now, row.token_hash);
       const event: TokenEvent = isRetry
         ? { type: 'refresh_retry', clientId: row.client_id, familyId: row.family_id }
         : { type: 'issued', clientId: row.client_id, familyId: row.family_id, grant: 'refresh_token' };
@@ -260,21 +273,17 @@ export class TokenService {
     };
   }
 
-  #successorWasUsed(row: RefreshRow): boolean {
-    if (!row.replaced_by) return false;
-    const successor = this.#db.prepare('SELECT rotated_at FROM refresh_tokens WHERE token_hash = ?').get(row.replaced_by) as
-      | { rotated_at: number | null }
-      | undefined;
-    return successor?.rotated_at != null;
+  #childWasRotated(tokenHash: string): boolean {
+    return this.#db.prepare('SELECT 1 AS present FROM refresh_tokens WHERE parent_hash = ? AND rotated_at IS NOT NULL LIMIT 1').get(tokenHash) !== undefined;
   }
 
-  #issuePair(familyId: string, scope: string, now: number): TokenResponse {
+  #issuePair(familyId: string, scope: string, now: number, parentHash: string | null = null): TokenResponse {
     const accessToken = randomToken();
     const refreshToken = randomToken();
     const accessTtlMs = this.#settings.accessTtlSeconds * SECOND;
     this.#db
-      .prepare('INSERT INTO refresh_tokens (token_hash, family_id, scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?)')
-      .run(hashToken(refreshToken), familyId, scope, now, now + this.#settings.refreshIdleTtlDays * DAY);
+      .prepare('INSERT INTO refresh_tokens (token_hash, family_id, parent_hash, scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(hashToken(refreshToken), familyId, parentHash, scope, now, now + this.#settings.refreshIdleTtlDays * DAY);
     this.#db
       .prepare(
         `INSERT INTO access_tokens (token_hash, family_id, refresh_token_hash, scope, created_at, expires_at)

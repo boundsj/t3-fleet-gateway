@@ -46,7 +46,7 @@ Define it with `defineTool` (see `src/mcp/fleetStatus.ts`): name, LLM-oriented d
 - Job state changes go through `JobStore.transition` (guarded by the expected `from` states, event appended in the same transaction). Event details hold gateway-generated reasons and codes only.
 - The engine is driven by `tick()` in tests (`jobEngine: { autoStart: false }`); tests move time with the injected clock, never with sleeps, except the agent-path test that runs the engine on a short timer.
 - The fake T3 follows T3's published tool schemas (strict inputs). When T3's tools change, update `src/t3/schemas.ts` and the fake together; fixtures stay synthetic.
-- Migrations are append-only; `job_events` is append-only (enforced by triggers).
+- Migrations are append-only once released; until the first release (no deployed databases) migration 1 is corrected in place. `job_events` is append-only (enforced by triggers).
 - Error codes in `src/errors.ts` and OAuth error strings are a stable contract.
 - Erasable TypeScript only; `.ts` import specifiers; `import type` for types.
 - No machine-specific values or secrets in the repo; tests use synthetic data and loopback ports.
