@@ -204,6 +204,36 @@ describe('standing jobs: driving them', () => {
     assert.equal(resumed.job.state, 'running', 'the standing job still takes work');
   });
 
+  test('interrupting a standing job that asked a question: a question T3 keeps still needs work_respond', async (t) => {
+    const harness = await startJobHarness(t);
+    const { fake, agent, tick } = harness;
+    fake.keepQuestionsOnInterrupt = true;
+    const threadId = coordinatorThread(fake);
+    const { job } = await adopt(harness, threadId);
+    await agent.call('work_continue', { jobId: job.id, message: 'Synthetic: pick a release date', requestId: 'cos-ask' });
+    const question = [{ id: 'q', header: 'Date', question: 'Synthetic: which day?', options: [{ label: 'Monday', description: '' }] }];
+    const requestId = fake.askQuestion(threadId, question);
+    await tick();
+    assert.equal(await jobState(agent, job.id), 'needs_input');
+
+    type Cancel = { outcome: string; confirmed: boolean; pendingQuestions: string[]; job: JobView };
+    const first = await agent.call<Cancel>('work_cancel', { jobId: job.id });
+    assert.deepEqual([first.outcome, first.pendingQuestions], ['interrupt_requested', []]);
+    await tick();
+    assert.equal(fake.threads.get(threadId)?.status, 'interrupted');
+    assert.equal(await jobState(agent, job.id), 'needs_input', 'T3 still lists the question');
+    const result = await agent.client.callTool({ name: 'work_cancel', arguments: { jobId: job.id } });
+    const again = result.structuredContent as Cancel;
+    assert.deepEqual([again.outcome, again.confirmed, again.pendingQuestions, again.job.state], ['not_running', true, [requestId], 'needs_input']);
+    assert.match(JSON.stringify(result.content), new RegExp(`question is still pending \\(${requestId}\\): answer it with work_respond`));
+
+    // Once T3 lists no question for the stopped thread, the job is idle.
+    fake.threads.get(threadId)?.questions.clear();
+    await tick();
+    assert.equal(await jobState(agent, job.id), 'idle');
+    assert.deepEqual((await agent.call<Cancel>('work_cancel', { jobId: job.id })).pendingQuestions, []);
+  });
+
   test('a failed run leaves a standing job idle with the error, cleared by the next turn', async (t) => {
     const harness = await startJobHarness(t);
     const { fake, agent, tick } = harness;

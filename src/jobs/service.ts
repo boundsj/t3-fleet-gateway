@@ -72,6 +72,11 @@ export interface CancelResult {
   outcome: CancelOutcome;
   /** T3 has the interrupt request (or no T3 call was needed). */
   delivered: boolean;
+  /**
+   * A standing job with nothing running whose thread T3 still lists questions for: interrupting does
+   * not withdraw them, so they still need an answer (work_respond).
+   */
+  pendingQuestionIds?: string[];
 }
 
 export interface AdoptInput {
@@ -462,7 +467,10 @@ export class JobService {
    * watcher moves it to idle when T3 reports the run stopped. Nothing is deferred: if T3 cannot be
    * reached the agent is told to repeat the call, and a repeat for the same run reuses its T3
    * clientRequestId, which T3 deduplicates. When nothing is active no interrupt is sent: T3 would
-   * answer a repeat for an already stopped run from its record of the first interrupt.
+   * answer a repeat for an already stopped run from its record of the first interrupt. The questions
+   * T3 still lists for the thread are returned then: if T3 keeps a question after the interrupt, the job
+   * stays needs_input (the watcher derives it from that list) until it is answered with work_respond;
+   * once T3 lists none, the stopped thread is idle.
    */
   async #interruptStanding(job: Job): Promise<CancelResult> {
     if (isTerminal(job.state) || job.threadId === null) return { job, outcome: 'already_finished', delivered: true };
@@ -471,8 +479,10 @@ export class JobService {
     try {
       const { thread } = await client.readThread({ threadId: job.threadId, limit: 1, runLimit: 1, maxCharsPerItem: 1 });
       if (thread.activeRunId === null && !isActiveStatus(thread.status)) {
+        // T3 may keep a question listed after its turn was interrupted; only an answer clears it.
+        const pendingQuestionIds = await client.listPendingRequests(job.threadId);
         this.wake();
-        return { job: this.store.require(job.id), outcome: 'not_running', delivered: true };
+        return { job: this.store.require(job.id), outcome: 'not_running', delivered: true, pendingQuestionIds };
       }
       const result = await client.interruptThread({
         threadId: job.threadId,

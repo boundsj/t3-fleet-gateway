@@ -183,6 +183,8 @@ export class FakeT3 {
   launchWithoutRun = false;
   /** When set, interrupts are accepted but take effect only on completeInterrupts(). */
   deferInterrupts = false;
+  /** When set, an interrupt leaves the thread's pending questions listed (T3 may keep them). */
+  keepQuestionsOnInterrupt = false;
   readonly threads = new Map<string, FakeThread>();
   readonly sends: { threadId: string; message: string; clientRequestId: string | null }[] = [];
   readonly responses: { threadId: string; requestId: string; answers: Record<string, unknown> }[] = [];
@@ -724,7 +726,7 @@ export class FakeT3 {
   #interrupt(thread: FakeThread): void {
     const run = this.#activeRun(thread);
     if (run) this.#endRun(run, 'interrupted');
-    thread.questions.clear();
+    if (!this.keepQuestionsOnInterrupt) thread.questions.clear();
     thread.approvalsPending = 0;
     thread.status = 'interrupted';
     this.#touch(thread);

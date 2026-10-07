@@ -362,8 +362,10 @@ export function workTools(jobs: JobService): GatewayTool[] {
       '(delivered=true) or will be delivered when the host is reachable or the launch is confirmed (delivered=false), and ' +
       'the job moves to cancelled when the watcher sees the thread stop. Cancelled is terminal; the T3 thread and its ' +
       'worktree stay for the operator. A standing job (standing: true) is never closed by this tool: only its current turn ' +
-      'is interrupted. Outcome "interrupt_requested" means T3 is stopping the turn and the job returns to idle (still open, ' +
-      'ready for work_continue) once it has stopped; "not_running" means nothing was running. Safe to repeat.',
+      'is interrupted, which may be a turn the operator started in the T3 app. Outcome "interrupt_requested" means T3 is ' +
+      'stopping the turn and the job returns to idle (still open, ready for work_continue) once it has stopped; ' +
+      '"not_running" means nothing was running. Interrupting does not withdraw a question the worker asked: if T3 still ' +
+      'lists it (pendingQuestions), the job stays needs_input until you answer it with work_respond. Safe to repeat.',
     scope: OPERATE_SCOPE,
     readOnly: false,
     inputSchema: z.object({ jobId: jobIdInput }),
@@ -372,6 +374,9 @@ export function workTools(jobs: JobService): GatewayTool[] {
       outcome: z.enum(['cancelled', 'cancel_requested', 'already_finished', 'interrupt_requested', 'not_running']),
       confirmed: z.boolean().describe('The job is stopped (a standing job: nothing is running on it)'),
       delivered: z.boolean().describe('T3 has the interrupt request, or none was needed'),
+      pendingQuestions: z
+        .array(z.string())
+        .describe('Standing job with nothing running: questions T3 still lists for it. They need an answer with work_respond'),
     }),
     async run(input, context) {
       const result = await jobs.cancel(input);
@@ -385,8 +390,13 @@ export function workTools(jobs: JobService): GatewayTool[] {
         interrupt_requested: 'Interrupt requested; the standing job stays open and becomes idle once the turn has stopped.',
         not_running: 'Nothing was running; the standing job stays open.',
       };
-      const summary = `${summaries[result.outcome]} ${describeJob(view)}`;
-      return { structured: { job: view, outcome: result.outcome, confirmed, delivered: result.delivered }, summary };
+      const pendingQuestions = result.pendingQuestionIds ?? [];
+      const pending =
+        pendingQuestions.length > 0
+          ? ` The worker's question is still pending (${pendingQuestions.join(', ')}): answer it with work_respond; the job stays needs_input until then.`
+          : '';
+      const summary = `${summaries[result.outcome]}${pending} ${describeJob(view)}`;
+      return { structured: { job: view, outcome: result.outcome, confirmed, delivered: result.delivered, pendingQuestions }, summary };
     },
   });
 
