@@ -2,7 +2,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import { parseConfig } from '../../src/config.ts';
-import { startGateway, type GatewayServices, type RunningGateway } from '../../src/gateway.ts';
+import { startGateway, type GatewayOptions, type GatewayServices, type RunningGateway } from '../../src/gateway.ts';
 import { createLogger } from '../../src/log.ts';
 import type { GatewayTool } from '../../src/mcp/tools.ts';
 import { testClock, type TestClock } from './clock.ts';
@@ -29,9 +29,18 @@ export interface TestGateway {
 /** A full gateway on a loopback port whose publicUrl is that port. Config fields can be overridden. */
 export async function startTestGateway(
   t: TestContext,
-  options: { config?: Record<string, unknown>; tools?: (services: GatewayServices) => GatewayTool[] } = {},
+  options: {
+    config?: Record<string, unknown>;
+    tools?: (services: GatewayServices) => GatewayTool[];
+    /** Reuse a data directory (restart tests). */
+    dataDir?: string;
+    /** Reuse a port, so publicUrl and issued tokens stay valid across a restart. */
+    port?: number;
+    clock?: TestClock;
+    jobEngine?: GatewayOptions['jobEngine'];
+  } = {},
 ): Promise<TestGateway> {
-  const port = await freePort();
+  const port = options.port ?? (await freePort());
   const baseUrl = `http://127.0.0.1:${port}`;
   const config = parseConfig({
     publicUrl: baseUrl,
@@ -39,11 +48,18 @@ export async function startTestGateway(
     hosts: [{ id: 'main', t3Url: 'http://127.0.0.1:9' }],
     ...options.config,
   });
-  const dataDir = join(tempDir(t), 'data');
-  const clock = testClock(Date.now());
+  const dataDir = options.dataDir ?? join(tempDir(t), 'data');
+  const clock = options.clock ?? testClock(Date.now());
   const logs: string[] = [];
   const logger = createLogger({ level: 'debug', sink: (line) => logs.push(line), clock });
-  const gateway = await startGateway({ config, dataDir, logger, clock, ...(options.tools ? { tools: options.tools } : {}) });
+  const gateway = await startGateway({
+    config,
+    dataDir,
+    logger,
+    clock,
+    ...(options.tools ? { tools: options.tools } : {}),
+    ...(options.jobEngine ? { jobEngine: options.jobEngine } : {}),
+  });
   t.after(() => gateway.close());
   return {
     baseUrl,

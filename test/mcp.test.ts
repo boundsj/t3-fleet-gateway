@@ -87,7 +87,8 @@ describe('MCP protocol handling', () => {
     const list = await mcpPost(gw.baseUrl, tokens.access_token, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     assert.equal(list.status, 200);
     const tools = ((await list.json()) as { result: { tools: { name: string }[] } }).result.tools.map((tool) => tool.name);
-    assert.deepEqual(tools, ['fleet_status']);
+    assert.deepEqual(tools, gatewayTools(gw.services).map((tool) => tool.name));
+    assert.equal(tools[0], 'fleet_status');
     const call = await mcpPost(gw.baseUrl, tokens.access_token, {
       jsonrpc: '2.0',
       id: 3,
@@ -128,7 +129,7 @@ describe('scope enforcement', () => {
     for (const mode of [undefined, 'auto'] as const) {
       const client = await connect(t, gw, tokens.access_token, mode);
       const names = (await client.listTools()).tools.map((tool) => tool.name);
-      assert.deepEqual(names.sort(), ['fleet_status', 'test_operate']);
+      assert.deepEqual(names.sort(), [...gatewayTools(gw.services).map((tool) => tool.name), 'test_operate'].sort());
       const result = await client.callTool({ name: 'test_operate', arguments: { value: 'x' } });
       assert.equal(result.isError, true);
       assert.match(JSON.stringify(result.content), /insufficient_scope: test_operate requires the fleet:operate scope/);

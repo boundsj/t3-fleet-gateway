@@ -5,10 +5,14 @@ import { CredentialStore } from './hosts/credentials.ts';
 import { HostRegistry, type HostRegistryOptions } from './hosts/registry.ts';
 import { startRenewalLoop } from './hosts/renewal.ts';
 import { createRouter, listen } from './http/server.ts';
+import { JobEngine } from './jobs/engine.ts';
+import { JobService } from './jobs/service.ts';
+import { JobStore } from './jobs/store.ts';
 import type { Logger } from './log.ts';
 import { createMcpEndpoint } from './mcp/endpoint.ts';
 import { fleetStatusTool } from './mcp/fleetStatus.ts';
 import type { GatewayTool } from './mcp/tools.ts';
+import { workTools } from './mcp/workTools.ts';
 import { ApprovalCodes } from './oauth/approvalCodes.ts';
 import { ClientStore } from './oauth/clients.ts';
 import { logTokenEvent, oauthRoutes } from './oauth/routes.ts';
@@ -26,6 +30,7 @@ export interface GatewayServices {
   approvals: ApprovalCodes;
   tokens: TokenService;
   registry: HostRegistry;
+  jobs: JobService;
   close(): Promise<void>;
 }
 
@@ -70,6 +75,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
     approvals: new ApprovalCodes(db, key, clock),
     tokens: new TokenService(db, clock, { resource: mcpResource(config), ...config.tokens }, logTokenEvent(logger)),
     registry,
+    jobs: new JobService({ config, store: new JobStore(db, clock, logger) }),
     async close() {
       await registry.close();
       db.close();
@@ -78,17 +84,25 @@ export function openServices(options: ServiceOptions): GatewayServices {
 }
 
 export function gatewayTools(services: GatewayServices): GatewayTool[] {
-  return [fleetStatusTool(services)];
+  return [fleetStatusTool(services), ...workTools(services.jobs)];
 }
 
 export interface RunningGateway {
   services: GatewayServices;
+  /** The dispatcher and watcher. */
+  engine: JobEngine;
   port: number;
   close(): Promise<void>;
 }
 
-/** Start the HTTP server (OAuth + MCP) and the credential renewal loop. */
-export async function startGateway(options: ServiceOptions & { tools?: (services: GatewayServices) => GatewayTool[] }): Promise<RunningGateway> {
+export interface GatewayOptions extends ServiceOptions {
+  tools?: (services: GatewayServices) => GatewayTool[];
+  /** Tests drive the job engine by hand (`autoStart: false`) or with a short interval. */
+  jobEngine?: { autoStart?: boolean; intervalMs?: number };
+}
+
+/** Start the HTTP server (OAuth + MCP), the job engine and the credential renewal loop. */
+export async function startGateway(options: GatewayOptions): Promise<RunningGateway> {
   const services = openServices(options);
   const { config, logger } = services;
   const mcp = createMcpEndpoint({
@@ -111,13 +125,25 @@ export async function startGateway(options: ServiceOptions & { tools?: (services
     if (services.registry.credentialStatus(host.id).state === 'missing') logger.warn('host.not_enrolled', { hostId: host.id });
   }
   const renewal = startRenewalLoop(services.registry, config.renewal.checkEveryMinutes * MINUTE, logger);
+  const engine = new JobEngine({
+    config,
+    store: services.jobs.store,
+    registry: services.registry,
+    clock: services.clock,
+    logger,
+    ...(options.jobEngine?.intervalMs === undefined ? {} : { intervalMs: options.jobEngine.intervalMs }),
+  });
+  services.jobs.wake = () => engine.wake();
+  if (options.jobEngine?.autoStart !== false) engine.start();
   logger.info('gateway.started', { listen: `${config.listen.host}:${server.port}`, publicUrl: config.publicUrl, hosts: config.hosts.length });
   return {
     services,
+    engine,
     port: server.port,
     async close() {
       logger.info('gateway.stopping');
       await server.close();
+      await engine.stop();
       await renewal.stop();
       await mcp.close();
       await services.close();

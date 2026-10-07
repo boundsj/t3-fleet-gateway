@@ -17,6 +17,8 @@ export type ErrorCode =
   | 'pairing_command_failed'
   | 'enrollment_failed'
   | 'insufficient_scope'
+  | 'job_state_conflict'
+  | 'request_id_conflict'
   | 'internal_error';
 
 export class GatewayError extends Error {
