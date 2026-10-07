@@ -15,7 +15,7 @@ The first supported agent is Grok Bot; any MCP client with OAuth support should 
 - The job layer: `work_start`, `work_continue`, `work_respond`, `work_cancel`, `work_status`, `work_list` and `work_feed`, with a durable job ledger, a dispatcher that respects each host's concurrency limit, a watcher that follows every job's T3 thread, and reconciliation for launches whose outcome was lost.
 - The `fleet_status` tool, the operator CLI, and deploy templates for launchd and systemd.
 
-Not yet verified against a real T3 server: the automated suite uses a fake T3 built from T3's published tool schemas, and [`scripts/e2e-live.ts`](scripts/e2e-live.ts) is the live check (see [docs/operations.md](docs/operations.md#live-end-to-end-check)). Known limits: permission approvals can only be given in T3 itself (T3's tools do not expose them), so projects that use `approval-required` may wait for you there. See [docs/design.md](docs/design.md).
+Not yet verified against a real T3 server: the automated suite uses a fake T3 built from T3's published tool schemas, and [`scripts/e2e-live.ts`](scripts/e2e-live.ts) is the live check (see [docs/operations.md](docs/operations.md#live-end-to-end-check)). Known limits: permission approvals can only be given in T3 itself (T3's tools do not expose them), so projects that use `approval-required` may wait for you there; sign-in from browser-based MCP clients is not supported (no CORS on the OAuth endpoints, see [docs/security.md](docs/security.md#known-limitations)). See [docs/design.md](docs/design.md).
 
 ## How it works
 

@@ -114,6 +114,18 @@ describe('MCP protocol handling', () => {
     }
   });
 
+  test('serves clients whose Accept header lists only JSON, anything, or nothing', async (t) => {
+    const gw = await startTestGateway(t);
+    const { tokens } = await signIn(gw.baseUrl, gw.mintApprovalCode);
+    for (const accept of ['application/json', '*/*', '']) {
+      const response = await mcpPost(gw.baseUrl, tokens.access_token, INITIALIZE, { accept });
+      assert.equal(response.status, 200, `Accept: ${accept}`);
+      assert.match(response.headers.get('content-type') ?? '', /^application\/json/);
+      const call = await mcpPost(gw.baseUrl, tokens.access_token, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'fleet_status', arguments: {} } }, { accept });
+      assert.equal(call.status, 200, `Accept: ${accept}`);
+    }
+  });
+
   test('bounds request bodies', async (t) => {
     const gw = await startTestGateway(t);
     const { tokens } = await signIn(gw.baseUrl, gw.mintApprovalCode);

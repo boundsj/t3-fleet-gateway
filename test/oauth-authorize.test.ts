@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { MAX_FAILURES_PER_HOUR, MAX_FAILURES_PER_REQUEST } from '../src/oauth/approvalCodes.ts';
+import { redirectUriMatches } from '../src/oauth/redirectUris.ts';
 import { HOUR, MINUTE } from '../src/time.ts';
 import { startOAuthHarness, type OAuthHarness } from './helpers/oauthHarness.ts';
 import {
@@ -11,6 +12,7 @@ import {
   registerClient,
   standardAuthorizeParams,
   submitApproval,
+  tokenRequest,
 } from './helpers/oauthFlow.ts';
 
 async function openPage(h: OAuthHarness, clientId?: string, extra: Record<string, string | undefined> = {}) {
@@ -46,6 +48,46 @@ describe('authorization endpoint', () => {
     assert.match(page.html, /fleet:read fleet:operate/);
     assert.doesNotMatch(page.html, /\b(src|href)="http/i, 'no external assets');
     assert.ok(page.fields.signature);
+  });
+
+  test('loopback redirect URIs match with any port; everything else matches exactly', async (t) => {
+    const registered = 'http://127.0.0.1/callback';
+    assert.ok(redirectUriMatches(registered, 'http://127.0.0.1:54321/callback'));
+    assert.ok(redirectUriMatches('http://127.0.0.1:8080/callback', 'http://127.0.0.1:9090/callback'));
+    assert.ok(redirectUriMatches('http://[::1]/cb?x=1', 'http://[::1]:5000/cb?x=1'));
+    for (const requested of [
+      'http://localhost:54321/callback',
+      'http://127.0.0.1:54321/other',
+      'http://127.0.0.1:54321/callback?extra=1',
+      'http://127.0.0.1:54321/callback#fragment',
+      'http://user@127.0.0.1:54321/callback',
+      'https://127.0.0.1:54321/callback',
+    ]) {
+      assert.equal(redirectUriMatches(registered, requested), false, requested);
+    }
+    assert.equal(redirectUriMatches('https://agent.example.com/cb', 'https://agent.example.com:8443/cb'), false, 'https stays exact');
+
+    const h = await startOAuthHarness(t);
+    const clientId = await registerClient(h.baseUrl, { redirect_uris: [registered] });
+    const redirectUri = 'http://127.0.0.1:54321/callback';
+    const { verifier, challenge } = pkcePair();
+    const page = await loadApprovalPage(authorizeUrl(h.baseUrl, standardAuthorizeParams(clientId, challenge, { redirect_uri: redirectUri })));
+    assert.equal(page.status, 200);
+    const approval = await submitApproval(h.baseUrl, page.fields, { approval_code: h.approvals.mint().code });
+    const location = new URL(approval.headers.get('location') ?? '');
+    assert.equal(`${location.origin}${location.pathname}`, redirectUri, 'redirects to the port the client asked for');
+    const exchanged = await tokenRequest(h.baseUrl, {
+      grant_type: 'authorization_code',
+      code: location.searchParams.get('code') ?? '',
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      code_verifier: verifier,
+    });
+    assert.equal(exchanged.status, 200);
+    const otherPath = await fetch(authorizeUrl(h.baseUrl, standardAuthorizeParams(clientId, challenge, { redirect_uri: 'http://127.0.0.1:54321/elsewhere' })), {
+      redirect: 'manual',
+    });
+    assert.equal(otherPath.status, 400);
   });
 
   test('never redirects for an unknown client or unregistered redirect URI', async (t) => {

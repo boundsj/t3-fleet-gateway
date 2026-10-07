@@ -22,3 +22,23 @@ export function redirectUriProblem(uri: string): string | undefined {
   if (url.protocol === 'http:') return isLoopbackHostname(url.hostname) ? undefined : 'http is allowed only for loopback hosts';
   return `scheme ${url.protocol} is not allowed`;
 }
+
+/**
+ * Whether a requested redirect URI matches a registered one. Exact string match, except that an
+ * http loopback URI matches with any port (RFC 8252 section 7.3: native clients listen on a port
+ * chosen at request time); scheme, host, path and query must still be equal. https URIs match exactly.
+ */
+export function redirectUriMatches(registered: string, requested: string): boolean {
+  if (registered === requested) return true;
+  if (redirectUriProblem(requested) !== undefined) return false;
+  let expected: URL;
+  let actual: URL;
+  try {
+    expected = new URL(registered);
+    actual = new URL(requested);
+  } catch {
+    return false;
+  }
+  if (expected.protocol !== 'http:' || actual.protocol !== 'http:' || !isLoopbackHostname(expected.hostname)) return false;
+  return expected.hostname === actual.hostname && expected.pathname === actual.pathname && expected.search === actual.search;
+}

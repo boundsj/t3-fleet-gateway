@@ -20,8 +20,10 @@ export interface CredentialStatus {
 }
 
 export interface HostHealth {
-  /** null when the gateway cannot ask (no credential yet). */
+  /** null when the gateway cannot ask (no credential yet). True when T3 answered, even with a refusal. */
   reachable: boolean | null;
+  /** T3 answered 401 or 403: the host is up but the stored credential no longer works. */
+  credentialRejected: boolean;
   t3Version: string | null;
   checkedAt: number;
   error: { code: ErrorCode; message: string } | null;
@@ -109,11 +111,12 @@ export class HostRegistry {
     const checkedAt = this.#options.clock();
     try {
       const environment = await this.client(id).environmentRead({ timeoutMs: HEALTH_TIMEOUT_MS });
-      return { reachable: true, t3Version: environment.serverVersion, checkedAt, error: null };
+      return { reachable: true, credentialRejected: false, t3Version: environment.serverVersion, checkedAt, error: null };
     } catch (error) {
       const described = describeError(error);
-      const reachable = described.code === 'host_not_enrolled' ? null : described.code === 't3_unauthorized';
-      return { reachable, t3Version: null, checkedAt, error: described };
+      const credentialRejected = described.code === 't3_unauthorized';
+      const reachable = described.code === 'host_not_enrolled' ? null : credentialRejected;
+      return { reachable, credentialRejected, t3Version: null, checkedAt, error: described };
     }
   }
 

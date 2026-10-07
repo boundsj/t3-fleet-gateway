@@ -2,6 +2,7 @@ import { hmacBase64Url, safeEqual } from '../crypto.ts';
 import { MINUTE } from '../time.ts';
 import type { ClientStore, OAuthClient } from './clients.ts';
 import type { OAuthErrorCode } from './errors.ts';
+import { redirectUriMatches } from './redirectUris.ts';
 import { formatScope, parseScope, type Scope } from './scopes.ts';
 
 /** How long an approval page stays valid after it was rendered. */
@@ -39,7 +40,7 @@ export function parseAuthorizationRequest(params: URLSearchParams, clients: Clie
   const client = clients.getActive(clientId);
   if (!client) return { kind: 'fatal', message: 'Unknown or revoked client. Reconnect from your agent to register again.' };
   const redirectUri = params.get('redirect_uri');
-  if (!redirectUri || params.getAll('redirect_uri').length > 1 || !client.redirectUris.includes(redirectUri)) {
+  if (!redirectUri || params.getAll('redirect_uri').length > 1 || !client.redirectUris.some((registered) => redirectUriMatches(registered, redirectUri))) {
     return { kind: 'fatal', message: 'The redirect URI does not match one registered for this client.' };
   }
   const state = params.get('state');

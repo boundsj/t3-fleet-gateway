@@ -64,7 +64,9 @@ export async function runDoctor(services: GatewayServices, dataDir: string): Pro
       results.push({ level: 'warn', name, detail: `last renewal failed: ${credential.renewalError.code}: ${credential.renewalError.message}` });
     }
     const health = await registry.health(host.id, { fresh: true });
-    if (health.reachable === true) {
+    if (health.credentialRejected) {
+      results.push({ level: 'fail', name, detail: `T3 at ${host.t3Url} rejected the stored credential. Run: t3-fleet-gateway hosts enroll ${host.id}` });
+    } else if (health.reachable === true) {
       reachable.add(host.id);
       results.push({ level: 'ok', name, detail: `T3 ${health.t3Version} reachable at ${host.t3Url}` });
     } else {

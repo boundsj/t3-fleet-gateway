@@ -161,10 +161,15 @@ async function hosts(paths: Paths, io: CliIo, action: string | undefined, id: st
         const credential = registry.credentialStatus(host.id);
         const health = await registry.health(host.id, { fresh: true });
         io.out(`${host.id}${host.label ? ` (${host.label})` : ''}  ${host.t3Url}`);
-        const reach = health.reachable ? `yes, T3 ${health.t3Version}` : `no (${health.error?.code}: ${health.error?.message})`;
+        const reach = health.credentialRejected
+          ? 'yes'
+          : health.reachable
+            ? `yes, T3 ${health.t3Version}`
+            : `no (${health.error?.code}: ${health.error?.message})`;
         io.out(`  reachable:  ${reach}`);
         const expiry = credential.expiresAt === null ? '' : `, expires ${shortTime(credential.expiresAt)} (${relative(credential.expiresAt - Date.now())})`;
-        io.out(`  credential: ${credential.state}${expiry}`);
+        io.out(`  credential: ${health.credentialRejected ? 'rejected by T3' : credential.state}${expiry}`);
+        if (health.credentialRejected) io.out(`  error:      ${health.error?.code}: ${health.error?.message}`);
         if (credential.renewalError) {
           io.out(`  renewal:    failed ${shortTime(credential.renewalError.at)}: ${credential.renewalError.code}: ${credential.renewalError.message}`);
         }

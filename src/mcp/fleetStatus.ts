@@ -13,12 +13,14 @@ const errorSchema = z.object({ code: z.string(), message: z.string() });
 const hostSchema = z.object({
   id: z.string(),
   label: z.string().nullable(),
-  reachable: z.boolean().nullable().describe('null when the gateway has no credential to ask with'),
+  reachable: z.boolean().nullable().describe('null when the gateway has no credential to ask with; true when T3 answered, even if it refused the credential'),
   t3Version: z.string().nullable(),
   checkedAt: z.string(),
   error: errorSchema.nullable(),
   credential: z.object({
-    state: z.enum(['missing', 'active', 'renewal_due', 'expired']),
+    state: z
+      .enum(['missing', 'active', 'renewal_due', 'expired', 'rejected'])
+      .describe('rejected: T3 answered but refused the credential; the operator must re-enroll the host'),
     expiresAt: z.string().nullable(),
     daysLeft: z.number().int().nullable(),
     renewalError: errorSchema.extend({ at: z.string() }).nullable(),
@@ -37,13 +39,16 @@ const outputSchema = z.object({
 type HostStatus = z.infer<typeof hostSchema>;
 
 function describeHost(host: HostStatus): string {
-  const reach = host.reachable === true ? `reachable, T3 ${host.t3Version}` : host.reachable === false ? 'unreachable' : 'not enrolled';
+  const reach =
+    host.reachable === null ? 'not enrolled' : !host.reachable ? 'unreachable' : host.t3Version === null ? 'reachable' : `reachable, T3 ${host.t3Version}`;
   const credential =
     host.credential.state === 'missing'
       ? 'no credential'
       : host.credential.state === 'expired'
         ? 'credential expired'
-        : `credential expires in ${host.credential.daysLeft} ${host.credential.daysLeft === 1 ? 'day' : 'days'}`;
+        : host.credential.state === 'rejected'
+          ? `credential rejected by T3 (the operator must run: t3-fleet-gateway hosts enroll ${host.id})`
+          : `credential expires in ${host.credential.daysLeft} ${host.credential.daysLeft === 1 ? 'day' : 'days'}`;
   const renewal = host.credential.renewalError ? `, last renewal failed (${host.credential.renewalError.code})` : '';
   return `${host.id}: ${reach}; ${credential}${renewal}; ${host.runningJobs} running, ${host.queuedJobs} queued (max ${host.maxConcurrentJobs})`;
 }
@@ -76,7 +81,7 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
             checkedAt: isoTime(health.checkedAt),
             error: health.error,
             credential: {
-              state: credential.state,
+              state: health.credentialRejected ? 'rejected' : credential.state,
               expiresAt: credential.expiresAt === null ? null : isoTime(credential.expiresAt),
               daysLeft: credential.daysLeft,
               renewalError: credential.renewalError && { ...credential.renewalError, at: isoTime(credential.renewalError.at) },

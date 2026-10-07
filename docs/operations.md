@@ -22,7 +22,7 @@ Re-running it replaces the credential (the old one keeps working until it expire
 t3-fleet-gateway hosts status
 ```
 
-For each host: reachability and T3 version (checked live), credential state (`missing`, `active`, `renewal_due`, `expired`) with its expiry, and the last renewal failure if there is one.
+For each host: reachability and T3 version (checked live), credential state (`missing`, `active`, `renewal_due`, `expired`) with its expiry, and the last renewal failure if there is one. If T3 answers but refuses the stored credential (for example after its session was revoked in T3), the credential shows as `rejected by T3` with the error; run `hosts enroll <id>` again. Agents see the same as `credential.state: "rejected"` in `fleet_status`.
 
 ## Connect an agent
 

@@ -28,6 +28,11 @@ export interface McpEndpointDependencies {
 }
 
 const BEARER = /^Bearer\s+([A-Za-z0-9\-._~+/]+=*)$/i;
+/**
+ * The transports refuse a POST whose Accept header does not list both types (406). The gateway
+ * always answers JSON, so clients that send only `application/json`, a wildcard, or no Accept are served too.
+ */
+const POST_ACCEPT = 'application/json, text/event-stream';
 
 /**
  * POST /mcp: bearer-authenticated Streamable HTTP, stateless, JSON responses. 2026-era requests go
@@ -107,6 +112,7 @@ export function createMcpEndpoint(deps: McpEndpointDependencies): { route: Route
     };
     const body = req.method === 'POST' ? await readBody(req, MCP_BODY_LIMIT) : undefined;
     const request = toWebRequest(req, body, publicUrl);
+    if (req.method === 'POST') request.headers.set('accept', POST_ACCEPT);
     if (await isLegacyRequest(request, undefined, { maxRequestBodySize: MCP_BODY_LIMIT })) {
       if (req.method !== 'POST') {
         // Stateless: no standalone SSE stream to open and no session to delete.

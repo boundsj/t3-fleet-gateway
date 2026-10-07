@@ -22,7 +22,7 @@ The gateway can make T3 Code start and steer coding agents on your machines. A s
 
 **Someone exhausts the throttles to lock you out.** Both global limits can be filled by anyone who can reach the public URL, so both are recoverable by you. `t3-fleet-gateway pair` starts a fresh approval-failure window whenever it mints a code (it says so when approvals were paused); 20 more guesses against a 50-bit code are negligible. Unapproved registrations stop counting after 10 minutes, so a burst of junk registrations blocks new ones for at most that long, and `t3-fleet-gateway throttle reset` clears both limits at once, including locked approval pages. `throttle status` shows how full they are. An attacker who keeps registering faster than the limit allows can still keep registration saturated; the gateway has no per-source limit, because the tunnel in front of it may not forward client addresses. If that happens, find the source in your tunnel's logs and block it there.
 
-**A malicious page tricks you into approving.** The approval page shows the client name, the full origin it will redirect to, and the requested access; read them before approving. The form is bound to the exact request by an HMAC with a server key and expires after 10 minutes, so its hidden fields (redirect URI, PKCE challenge, state) cannot be swapped. Redirect URIs must match a registered one exactly and must be `https` (or `http` to a loopback host); the gateway never redirects to an unregistered URI. The page loads no external resources, forbids framing, and has a strict Content Security Policy.
+**A malicious page tricks you into approving.** The approval page shows the client name, the full origin it will redirect to, and the requested access; read them before approving. The form is bound to the exact request by an HMAC with a server key and expires after 10 minutes, so its hidden fields (redirect URI, PKCE challenge, state) cannot be swapped. Redirect URIs must match a registered one exactly and must be `https` (or `http` to a loopback host); the gateway never redirects to an unregistered URI. The one relaxation is RFC 8252 section 7.3: an `http` loopback URI matches with any port, because native clients listen on a port chosen at request time; scheme, host, path and query must still match exactly. The page loads no external resources, forbids framing, and has a strict Content Security Policy.
 
 **An authorization code is intercepted.** Codes live 60 seconds, need the PKCE verifier (S256 only), and work once. Replaying a used code revokes every token issued from it.
 
@@ -35,6 +35,11 @@ The gateway can make T3 Code start and steer coding agents on your machines. A s
 **Oversized or malformed input.** Request bodies are bounded (16 KiB for OAuth endpoints, 1 MiB for `/mcp`), strings in registration are length-limited, and tool inputs are validated against schemas: tasks and follow-ups at most 20,000 characters, answers at most 16,000 characters of JSON, list and feed pages at most 100 and 200 items.
 
 **An Operate agent misbehaves.** It can start and steer work only in the configured projects, each job in its own worktree and branch, at the project's `runtimeMode` (capped by the host's `access`), and at most `maxConcurrentJobs` per host at once; more jobs wait in the queue, which you can see with `work_list` or in `fleet_status`. Every job is an ordinary T3 thread you can read and stop. Revoke the client to cut it off.
+
+## Known limitations
+
+- **No CORS on registration and token endpoints.** `/oauth/register` and `/oauth/token` send no CORS headers, so an MCP client running as a web page in a browser cannot complete sign-in. Server-side agents (Grok Bot and other hosted or native clients) are unaffected; the metadata documents do allow any origin.
+- **No per-source rate limits.** The OAuth throttles are global (see above), because the tunnel in front of the gateway may not forward client addresses.
 
 ## What is stored, and where
 

@@ -140,6 +140,11 @@ describe('cli', () => {
     assert.match(status.out, /credential: active, expires/);
     for (const token of fake.issuedTokens) assert.equal(enrolled.out.includes(token) || status.out.includes(token), false);
     assert.equal((await run(env, ['hosts', 'enroll', 'other'])).code, 1);
+    fake.revokeAllTokens();
+    const rejected = await run(env, ['hosts', 'status']);
+    assert.match(rejected.out, /reachable:  yes\n  credential: rejected by T3, expires/);
+    assert.match(rejected.out, /error:      t3_unauthorized: .*hosts enroll main/);
+    assert.doesNotMatch(rejected.out, /T3 null/);
   });
 
   test('a failing enrollment exits nonzero with the reason', async (t) => {
