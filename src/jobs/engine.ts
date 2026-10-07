@@ -1,4 +1,4 @@
-import type { GatewayConfig, HostConfig, ProjectConfig, RuntimeMode } from '../config.ts';
+import { configuredModel, type GatewayConfig, type HostConfig, type ProjectConfig, type RuntimeMode } from '../config.ts';
 import { describeError, GatewayError } from '../errors.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import { resolveProjectId } from '../hosts/projects.ts';
@@ -225,7 +225,8 @@ export class JobEngine {
 
   /** Launch one job's thread. Returns false when no further job should be launched this tick. */
   async #launch(job: Job, project: ProjectConfig, projectId: string): Promise<boolean> {
-    const { store, registry } = this.#options;
+    const { store, registry, config } = this.#options;
+    const model = configuredModel(config, project);
     this.#inFlight.add(job.id);
     try {
       let launched: LaunchResult;
@@ -236,7 +237,7 @@ export class JobEngine {
             title: job.title,
             workspaceStrategy: { type: 'worktree', baseRef: project.baseRef, branch: job.branch, startFromOrigin: false },
             runtimeMode: job.runtimeMode as RuntimeMode,
-            ...(project.modelSelection ? { modelSelection: project.modelSelection } : {}),
+            ...(model ? { modelSelection: model.selection } : {}),
             message: launchMessage(job),
           },
           { timeoutMs: this.#launchTimeoutMs },
@@ -276,9 +277,14 @@ export class JobEngine {
    * T3's code. If the lookup cannot be done, the job is unknown and reconciliation takes over.
    */
   async #launchRefused(job: Job, project: ProjectConfig, projectId: string, error: T3ToolError): Promise<boolean> {
-    const { store } = this.#options;
+    const { store, config } = this.#options;
     if (/project/.test(error.t3Code)) this.#projectIds.delete(project.alias);
-    const failure = { lastErrorCode: error.t3Code, lastErrorMessage: error.message };
+    // T3 refuses a launch without a model when the project has no default (T3's message says so).
+    const hint =
+      error.t3Code === 'invalid_request' && !configuredModel(config, project)
+        ? ` If T3 asks for a model: the operator sets modelSelection for project "${project.alias}" or defaultModelSelection for host "${project.host}" in the gateway config.`
+        : '';
+    const failure = { lastErrorCode: error.t3Code, lastErrorMessage: `${error.message}${hint}` };
     if (!REFUSED_BEFORE_CREATION.has(error.t3Code)) {
       let found: FoundThread | undefined;
       try {

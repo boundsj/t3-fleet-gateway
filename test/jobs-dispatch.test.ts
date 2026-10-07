@@ -159,18 +159,30 @@ describe('dispatcher', () => {
     assert.equal(fake.launches.length, 1);
   });
 
-  test('a refusal T3 makes before creating anything fails the job at once, without a lookup', async (t) => {
+  test('a launch T3 refuses for want of a model fails at once, without a lookup, and says how to fix it', async (t) => {
     const { fake, agent, tick } = await startJobHarness(t);
-    fake.failures.set('t3_thread_launch', {
-      code: 'invalid_request',
-      message: 'Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.',
-    });
+    fake.projects[0]!.defaultModelSelection = null;
     const job = await startJob(agent);
     await tick();
     const status = await agent.call<{ state: string; lastError: { code: string; message: string } }>('work_status', { jobId: job.jobId });
     assert.equal(status.state, 'failed');
     assert.equal(status.lastError.code, 'invalid_request');
-    assert.equal(fake.calls.includes('t3_thread_list'), false);
+    assert.match(status.lastError.message, /Pass modelSelection/);
+    assert.match(status.lastError.message, /modelSelection for project "pilot" or defaultModelSelection for host "main"/);
+    assert.equal(fake.calls.includes('t3_thread_list'), false, 'refused before anything was created');
+    assert.equal(fake.threads.size, 0);
+  });
+
+  test("the host's defaultModelSelection is used when a project sets none; a project's own selection wins", async (t) => {
+    const hostModel = { instanceId: 'synthetic-provider', model: 'synthetic-host-model' };
+    const { fake, agent, tick } = await startJobHarness(t, { host: { defaultModelSelection: hostModel } });
+    fake.projects[0]!.defaultModelSelection = null;
+    const pilot = await startJob(agent);
+    const docs = await agent.call<{ job: { jobId: string } }>('work_start', { project: 'docs', task: 'Synthetic docs', requestId: 'docs-1' });
+    await tick();
+    assert.equal(await jobState(agent, pilot.jobId), 'running');
+    assert.deepEqual(fake.threadForJob(pilot.jobId).launch.modelSelection, hostModel);
+    assert.deepEqual(fake.threadForJob(docs.job.jobId).launch.modelSelection, { model: 'synthetic-large' });
   });
 
   test('a lost launch response makes the job unknown and it is never relaunched automatically', async (t) => {

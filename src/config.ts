@@ -44,6 +44,9 @@ const originUrl = (what: string) =>
     return url.origin;
   });
 
+/** A T3 `modelSelection` object, passed through as T3 expects it, for example `{ instanceId, model }`. */
+const modelSelectionSchema = z.looseObject({ model: z.unknown() });
+
 const hostSchema = z.strictObject({
   id: slug(32),
   label: z.string().min(1).max(80).optional(),
@@ -51,6 +54,7 @@ const hostSchema = z.strictObject({
   mintPairingCode: z.array(z.string().min(1)).min(1).default(DEFAULT_MINT_COMMAND),
   access: z.enum(T3_ACCESS_LEVELS).default('auto'),
   maxConcurrentJobs: z.int().min(1).max(32).default(2),
+  defaultModelSelection: modelSelectionSchema.nullable().default(null),
 });
 
 const projectSchema = z
@@ -67,7 +71,7 @@ const projectSchema = z
       .regex(/^[A-Za-z0-9._/-]*$/, 'use letters, digits, dots, underscores, hyphens and slashes')
       .default('fleet/'),
     runtimeMode: z.enum(RUNTIME_MODES).default('approval-required'),
-    modelSelection: z.looseObject({ model: z.unknown() }).nullable().default(null),
+    modelSelection: modelSelectionSchema.nullable().default(null),
   })
   .refine((project) => (project.t3ProjectId === undefined) !== (project.t3ProjectTitle === undefined), {
     message: 'set exactly one of t3ProjectId or t3ProjectTitle',
@@ -137,6 +141,13 @@ const configSchema = z
 export type GatewayConfig = z.infer<typeof configSchema>;
 export type HostConfig = GatewayConfig['hosts'][number];
 export type ProjectConfig = GatewayConfig['projects'][number];
+
+/** Where a project's launches get their model in the gateway config, or null to leave it to the T3 project's default. */
+export function configuredModel(config: GatewayConfig, project: ProjectConfig): { source: 'project' | 'host'; selection: Record<string, unknown> } | null {
+  if (project.modelSelection) return { source: 'project', selection: project.modelSelection };
+  const host = config.hosts.find((candidate) => candidate.id === project.host);
+  return host?.defaultModelSelection ? { source: 'host', selection: host.defaultModelSelection } : null;
+}
 
 /** T3 caps a client's runtime modes at its approval level; read-only clients cannot launch work. */
 export function runtimeModeAllowed(mode: RuntimeMode, access: T3Access): boolean {

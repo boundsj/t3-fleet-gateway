@@ -289,7 +289,10 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'questions. Pass that requestId and an answers object keyed by question id; each value is the chosen option ' +
       "(its value, or its label when it has no value), an array of them for multiSelect questions, or your own text when " +
       'custom answers are allowed. Only requests pending on this job are accepted. Permission approvals cannot be answered ' +
-      'here: when work_status shows waitingForApproval, the operator must approve in T3.',
+      'here: when work_status shows waitingForApproval, the operator must approve in T3 (projects that should run unattended ' +
+      'use runtimeMode auto or full-access; fleet_status shows each project\'s mode). Not idempotent: if a call fails with an ' +
+      'uncertain outcome (a timeout or lost response), call work_status before retrying; if the requestId is no longer ' +
+      'listed under pendingRequests, the answer arrived.',
     scope: OPERATE_SCOPE,
     readOnly: false,
     inputSchema: z.object({

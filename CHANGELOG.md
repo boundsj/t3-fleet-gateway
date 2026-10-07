@@ -18,10 +18,11 @@ All notable changes are recorded here. The project follows [Semantic Versioning]
 - Every job view carries `stateChangedAt` (when the job entered its current state; the feed's attention window and order use it) and `updatedAt` (the last real change, not the last poll).
 - Every job view carries `link`, which opens the job's thread in the T3 app, from the launch result on.
 - Error codes `job_state_conflict` and `request_id_conflict`.
-- Config: `watcher.reconcileWindowMinutes`.
+- Config: `watcher.reconcileWindowMinutes`; `hosts[].defaultModelSelection`, the model for projects on that host that set no `modelSelection` (T3 refuses launches without a model when the T3 project has no default). `doctor` fails a project that would have no model, `serve` logs `project.model_missing` at startup, and `fleet_status` shows each project's `runtimeMode` and `modelConfigured`.
+- `config.example.json` enrolls its host with `access: "full-access"`: the host's access is only a ceiling, and each project's `runtimeMode` (default `approval-required`) is what limits a job.
 - `scripts/e2e-live.ts`: a live end-to-end check against a running gateway and a real T3 host (`npm run e2e:live`), outside the test suite.
 
 ### Known limitations
 
-- Permission approvals cannot be answered through T3's MCP tools; jobs waiting on one show `needs_input` with `waitingForApproval`, and the operator approves in T3.
+- Permission approvals cannot be answered through T3's MCP tools; jobs waiting on one show `needs_input` with `waitingForApproval`, and the operator approves in T3. Projects that should run unattended need `runtimeMode` `auto` or `full-access`.
 - The state derivation and worker-message detection follow T3's published tool schemas and have not yet been confirmed against a live T3 server.

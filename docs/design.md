@@ -70,8 +70,9 @@ Config fields (validate on load with clear errors):
       "label": "Always-on Mac",
       "t3Url": "http://127.0.0.1:3773",                  // loopback http, or https for a remote host
       "mintPairingCode": ["t3", "auth", "pairing", "create", "--ttl", "5m", "--json"],
-      "access": "auto",                                  // T3 approval level the gateway requests
-      "maxConcurrentJobs": 2
+      "access": "auto",                                  // T3 approval level the gateway requests; a ceiling for runtimeMode
+      "maxConcurrentJobs": 2,
+      "defaultModelSelection": null                      // modelSelection for projects on this host that set none
     }
   ],
   "projects": [
@@ -83,7 +84,7 @@ Config fields (validate on load with clear errors):
       "baseRef": "main",
       "branchPrefix": "fleet/",
       "runtimeMode": "approval-required",                // T3 runtime mode for job threads
-      "modelSelection": null                             // optional T3 modelSelection object
+      "modelSelection": null                             // optional T3 modelSelection object; else the host's, else T3's project default
     }
   ],
   "tokens": { "accessTtlSeconds": 43200, "refreshIdleTtlDays": 90 },
@@ -92,7 +93,7 @@ Config fields (validate on load with clear errors):
 }
 ```
 
-`runtimeMode` defaults to `approval-required` when omitted. Operators choose looser modes per project deliberately.
+`runtimeMode` defaults to `approval-required` when omitted. Operators choose looser modes per project deliberately. As built: the gateway cannot answer permission approvals, so `approval-required` jobs wait for the operator in T3, and unattended projects need `auto` or `full-access`. T3 refuses a launch without `modelSelection` when the T3 project has no default model (`invalid_request`), so `doctor` checks that every project has a model from its own `modelSelection`, its host's `defaultModelSelection` or the T3 project's `defaultModelSelection`, and `serve` logs `project.model_missing` at startup otherwise.
 
 Validation rules beyond types (see `docs/configuration.md` for every field):
 
@@ -135,7 +136,7 @@ Scopes: **read** = `fleet:read`, **operate** = `fleet:operate`.
 
 | Tool | Scope | Purpose |
 | --- | --- | --- |
-| `fleet_status` | read | Hosts (reachable, T3 version, credential expiry or `rejected` when T3 answers 401/403, running and queued job counts), configured projects (alias, description, host), gateway version. "Running" counts the states that hold a concurrency slot: `dispatching`, `running`, `needs_input`, `cancel_requested` and `unknown`. |
+| `fleet_status` | read | Hosts (reachable, T3 version, credential expiry or `rejected` when T3 answers 401/403, running and queued job counts), configured projects (alias, description, host, `runtimeMode`, and `modelConfigured`: whether the gateway config sets the model), gateway version. "Running" counts the states that hold a concurrency slot: `dispatching`, `running`, `needs_input`, `cancel_requested` and `unknown`. |
 | `work_list` | read | Jobs filtered by project and state, newest first, bounded. |
 | `work_status` | read | One job: state, project, host, T3 thread id, title and app link, branch, timestamps, pending requests, latest worker message excerpt (bounded), last error. |
 | `work_feed` | read | Events since a cursor (state changes, needs input, finished turns, failures) plus the list of jobs currently needing attention. Returns the next cursor. Designed for an agent's scheduled routine. |

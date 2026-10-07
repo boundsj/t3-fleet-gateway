@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, test, type TestContext } from 'node:test';
@@ -194,6 +194,48 @@ describe('cli', () => {
     assert.equal(served.code, 0);
     assert.match(served.out, /"event":"gateway.started"/);
     assert.match(served.out, /"event":"gateway.stopped"/);
+  });
+
+  test('doctor fails a project whose launches T3 would refuse for want of a model, and serve warns about it', async (t) => {
+    const fake = await startFakeT3();
+    t.after(() => fake.close());
+    fake.projects[0]!.defaultModelSelection = null;
+    const env = await environment(t, fake, {
+      projects: [
+        { alias: 'pilot', host: 'main', t3ProjectTitle: 'Synthetic project 1' },
+        { alias: 'docs', host: 'main', t3ProjectId: 'project-2' },
+      ],
+    });
+    assert.equal((await run(env, ['hosts', 'enroll', 'main'])).code, 0);
+    const doctor = await run(env, ['doctor']);
+    assert.equal(doctor.code, 1);
+    assert.match(doctor.out, /FAIL  project pilot: no model: T3 project project-1 has no default model/);
+    assert.match(doctor.out, /Set projects\[\]\.modelSelection or hosts\[\]\.defaultModelSelection for host main/);
+    assert.match(doctor.out, /OK    project docs: model from the default of T3 project project-2/);
+
+    let stop: () => void = () => {};
+    const stopped = new Promise<void>((resolve) => (stop = resolve));
+    const served = await run(env, ['serve'], () => {
+      stop();
+      return stopped;
+    });
+    const warnings = served.out.split('\n').filter((line) => line.includes('"event":"project.model_missing"'));
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? '', /"project":"pilot"/);
+  });
+
+  test('a host default model satisfies doctor for every project on the host', async (t) => {
+    const fake = await startFakeT3();
+    t.after(() => fake.close());
+    fake.projects[0]!.defaultModelSelection = null;
+    const env = await environment(t, fake, { projects: [{ alias: 'pilot', host: 'main', t3ProjectTitle: 'Synthetic project 1' }] });
+    const config = JSON.parse(readFileSync(env.configPath, 'utf8')) as { hosts: Record<string, unknown>[] };
+    config.hosts[0]!.defaultModelSelection = { instanceId: 'synthetic-provider', model: 'synthetic-model' };
+    writeFileSync(env.configPath, JSON.stringify(config));
+    assert.equal((await run(env, ['hosts', 'enroll', 'main'])).code, 0);
+    const doctor = await run(env, ['doctor']);
+    assert.match(doctor.out, /OK    project pilot: model from host main defaultModelSelection/);
+    assert.doesNotMatch(doctor.out, /FAIL  project/);
   });
 
   test('the bin launcher runs the TypeScript entrypoint', async () => {

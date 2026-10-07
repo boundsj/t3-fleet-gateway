@@ -46,8 +46,11 @@ Each entry is a machine running a T3 Code server.
 | `label` | none | Human-friendly name shown in `fleet_status`. |
 | `t3Url` | required | T3 server origin. `http` only for loopback; `https` for remote hosts. |
 | `mintPairingCode` | `["t3","auth","pairing","create","--ttl","5m","--json"]` | Command (argv, no shell) that prints a T3 pairing code as JSON with a `credential` field. For a remote host use something like `["ssh","other-host","t3","auth","pairing","create","--ttl","5m","--json"]`. Adding `--label t3-fleet-gateway` makes the pairing easy to spot in T3. |
-| `access` | `"auto"` | The T3 approval level the gateway requests: `read-only`, `approval-required`, `auto-accept-edits`, `auto` or `full-access`. T3 also treats it as the ceiling for the runtime mode of threads the gateway starts. |
+| `access` | `"auto"` | The T3 approval level the gateway requests when it enrolls: `read-only`, `approval-required`, `auto-accept-edits`, `auto` or `full-access`. T3 treats it as the ceiling for the runtime mode of threads the gateway starts, so a project's `runtimeMode` may not exceed it. Changing it takes a new `hosts enroll`. |
 | `maxConcurrentJobs` | `2` (1 to 32) | Jobs holding a slot at once on this host: `dispatching`, `running`, `needs_input`, `cancel_requested` and `unknown` count; `idle` does not. Further jobs wait as `queued`, first in, first out. |
+| `defaultModelSelection` | `null` | T3 `modelSelection` object (must contain `model`) for launches in projects on this host that set no `modelSelection` of their own, for example `{ "instanceId": "codex", "model": "<model id>" }`. T3's `orchestrator_capabilities` tool lists the provider instances and models. |
+
+Which `access` to choose: the host's `access` is only a ceiling. What a job may do without asking is decided per project by `runtimeMode`, which defaults to `approval-required`. [`config.example.json`](../config.example.json) therefore enrolls the host with `full-access`, so any project on it can be given a looser mode later without re-enrolling, and keeps its project at `approval-required`. Use a lower `access` if you want the host itself to rule out looser modes.
 
 ### `projects`
 
@@ -61,10 +64,16 @@ What agents can target. Each entry:
 | `t3ProjectId` or `t3ProjectTitle` | exactly one required | The T3 project, by id or by exact title. `doctor` checks that it resolves. |
 | `baseRef` | `"main"` | Branch or ref each job's worktree starts from. |
 | `branchPrefix` | `"fleet/"` | Job branches are `<branchPrefix><jobId>`. |
-| `runtimeMode` | `"approval-required"` | T3 runtime mode for job threads: `approval-required`, `auto-accept-edits`, `auto` or `full-access`. Must not exceed the host's `access`; projects cannot be placed on a `read-only` host. Choose looser modes per project deliberately. |
-| `modelSelection` | `null` | Optional T3 `modelSelection` object (must contain `model`). |
+| `runtimeMode` | `"approval-required"` | T3 runtime mode for job threads: `approval-required`, `auto-accept-edits`, `auto` or `full-access`. Must not exceed the host's `access`; projects cannot be placed on a `read-only` host. See "Approvals and unattended projects" below. |
+| `modelSelection` | `null` | T3 `modelSelection` object (must contain `model`) for this project's launches. Without it the host's `defaultModelSelection` is used, and without that the T3 project's own default model. |
 
-`baseRef`, `branchPrefix`, `runtimeMode`, `modelSelection` and `maxConcurrentJobs` are validated now and take effect with the job layer.
+#### Models
+
+T3 refuses to launch a thread without a model when the T3 project has no default model (`invalid_request`: "Pass modelSelection: the project has no default model"), and every job in that project then fails at once. Set `modelSelection` on the project or `defaultModelSelection` on its host, or give the project a default model in T3. `doctor` reports `FAIL` for a project that would have no model, `serve` logs `project.model_missing` at startup, and `fleet_status` shows agents `modelConfigured: false` for projects that rely on T3's default.
+
+#### Approvals and unattended projects
+
+The gateway cannot answer permission approvals: T3's tools do not expose them. In a project with `runtimeMode` `approval-required` (the default), every command or edit the worker needs approved waits until you approve it in T3; the job shows `needs_input` with `waitingForApproval` meanwhile, and agents see that state and the project's mode in `fleet_status`. A project that should run unattended needs `runtimeMode` `auto` or `full-access` (and a host `access` at least that high). Choose looser modes per project deliberately: the worker runs in its own worktree, but with the mode's permissions on your machine.
 
 ### `tokens`
 

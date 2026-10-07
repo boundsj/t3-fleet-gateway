@@ -28,7 +28,7 @@ export const STATE_MEANINGS: Record<JobState, string> = {
   dispatching: 'The gateway is creating the T3 thread and worktree right now.',
   running: 'The worker is working on its turn.',
   needs_input:
-    'The worker is blocked: it asked a question (answer with work_respond) or needs a permission approval that only the operator can give in T3.',
+    'The worker is blocked: it asked a question (answer with work_respond) or needs a permission approval that only the operator can give in T3 (projects with runtimeMode approval-required).',
   idle: 'The worker finished its turn and is waiting: ready for review or the next instruction (work_continue). Not proof the task succeeded.',
   cancel_requested: 'An interrupt was requested; waiting for T3 to confirm the thread stopped.',
   cancelled: 'Stopped by work_cancel. Terminal.',

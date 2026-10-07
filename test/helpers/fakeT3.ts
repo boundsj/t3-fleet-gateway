@@ -150,7 +150,7 @@ interface Session {
 export class FakeT3 {
   readonly serverVersion: string;
   tokenLifetimeSeconds: number;
-  readonly projects: { id: string; title: string; deletedAt: string | null }[];
+  readonly projects: { id: string; title: string; deletedAt: string | null; defaultModelSelection: Record<string, unknown> | null }[];
   /** Tool name to a T3 failure returned instead of a result. */
   readonly failures = new Map<string, { code: string; message: string }>();
   /** Tool name to a T3 failure returned after the call has taken effect (for example a launch that created the thread). */
@@ -195,6 +195,7 @@ export class FakeT3 {
       id: `project-${i + 1}`,
       title: `Synthetic project ${i + 1}`,
       deletedAt: null,
+      defaultModelSelection: { instanceId: 'synthetic-provider', model: 'synthetic-model' },
     }));
   }
 
@@ -663,7 +664,11 @@ export class FakeT3 {
 
   #launch(input: z.output<typeof launchInput>): Record<string, unknown> {
     const projectId = this.#target(input.projectId);
-    if (!this.projects.some((project) => project.id === projectId)) throw new FakeFailure('project_not_found', 'No such project.');
+    const project = this.projects.find((candidate) => candidate.id === projectId);
+    if (!project) throw new FakeFailure('project_not_found', 'No such project.');
+    if (!input.modelSelection && !project.defaultModelSelection) {
+      throw new FakeFailure('invalid_request', 'Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.');
+    }
     const threadId = `thread-${this.threads.size + 1}`;
     const now = new Date().toISOString();
     const strategy = input.workspaceStrategy;

@@ -28,7 +28,7 @@ No build step: Node 24+ runs `.ts` directly. There is no linter or formatter con
 | `src/t3/` | Downstream T3: `client.ts` (MCP client, thread and pending-request wrappers, `T3TransportError.delivery`), `schemas.ts` (output schemas from T3's published tools), `results.ts` (result and failure parsing), `pairing.ts` (pairing-code enrollment) |
 | `src/jobs/` | Job layer: `store.ts` (ledger, guarded transitions, events, idempotency keys), `service.ts` (what the `work_*` tools do), `engine.ts` (dispatcher, watcher, reconciliation, host backoff), `derive.ts` (state from a thread read), `interrupt.ts`, `states.ts` |
 | `src/mcp/workTools.ts` | The `work_*` tool definitions and descriptions |
-| `src/hosts/` | `registry.ts` (clients, health cache, enroll and renew), `credentials.ts`, `renewal.ts`, `projects.ts` |
+| `src/hosts/` | `registry.ts` (clients, health cache, enroll and renew), `credentials.ts`, `renewal.ts`, `projects.ts` (project resolution and the model check used by `doctor` and at startup) |
 | `src/db/migrations.ts` | Schema, including `jobs`, `job_events`, `idempotency_keys` for the job layer |
 | `test/helpers/` | `fakeT3.ts` (fake T3: OAuth, an in-memory thread model driven by tests, failure injection; `stop()`/`start()` take the host down and back on the same port, `close()` releases it), `gateway.ts` (full gateway harness), `frontDoor.ts` (holds a test's public URL port in front of the gateway), `jobs.ts` (gateway + fake T3 + Operate agent; `tick()` drives the engine), `oauthFlow.ts`, `agent.ts` (SDK OAuth provider) |
 | `scripts/e2e-live.ts` | Live end-to-end check, run by hand only |

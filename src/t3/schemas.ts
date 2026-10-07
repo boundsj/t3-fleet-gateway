@@ -12,6 +12,8 @@ export const projectSchema = z.looseObject({
   id: z.string(),
   title: z.string(),
   deletedAt: z.string().nullable().optional(),
+  /** The model T3 uses for a launch that passes no `modelSelection`; without one, such a launch is refused. */
+  defaultModelSelection: z.unknown().optional(),
 });
 export type T3Project = z.infer<typeof projectSchema>;
 

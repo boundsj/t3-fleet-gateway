@@ -1,5 +1,5 @@
 import * as z from 'zod';
-import type { GatewayConfig } from '../config.ts';
+import { configuredModel, RUNTIME_MODES, type GatewayConfig } from '../config.ts';
 import type { Database } from '../db/database.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import { jobCountsByHost } from '../jobs/counts.ts';
@@ -33,7 +33,25 @@ const hostSchema = z.object({
 const outputSchema = z.object({
   gateway: z.object({ name: z.string(), version: z.string() }),
   hosts: z.array(hostSchema),
-  projects: z.array(z.object({ alias: z.string(), description: z.string(), host: z.string() })),
+  projects: z.array(
+    z.object({
+      alias: z.string(),
+      description: z.string(),
+      host: z.string(),
+      runtimeMode: z
+        .enum(RUNTIME_MODES)
+        .describe(
+          'How much the worker may do without asking. approval-required (the default): every command or edit that needs approval waits ' +
+            'for the operator to approve it in T3, so the job sits in needs_input until then. auto or full-access: jobs run unattended.',
+        ),
+      modelConfigured: z
+        .boolean()
+        .describe(
+          "true when the gateway config sets the model for this project's jobs. false: T3 uses the project's own default model, " +
+            'and refuses to launch (the job fails with invalid_request) if it has none; the operator fixes that in the gateway config.',
+        ),
+    }),
+  ),
 });
 
 type HostStatus = z.infer<typeof hostSchema>;
@@ -61,8 +79,10 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
       'Show the machines (hosts) this gateway can run coding work on and the projects you can target. ' +
       'For each host: whether its T3 Code server is reachable, its T3 version, when the gateway credential for it expires, ' +
       'and how many jobs are running or queued against its concurrency limit. For each project: the alias to use when ' +
-      'starting work, a description, and the host it runs on. Use this first to learn the project aliases, or to check ' +
-      'why work is not progressing. Read-only; safe to call any time.',
+      'starting work, a description, the host it runs on, its runtime mode and whether a model is configured. A project ' +
+      'whose runtimeMode is approval-required is not unattended: its jobs wait in needs_input until the operator approves in ' +
+      'T3, which you cannot do for them; auto and full-access projects run unattended. Use this first to learn the project ' +
+      'aliases, or to check why work is not progressing. Read-only; safe to call any time.',
     scope: READ_SCOPE,
     readOnly: true,
     inputSchema: z.object({}),
@@ -92,11 +112,21 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
           };
         }),
       );
-      const projects = deps.config.projects.map((project) => ({ alias: project.alias, description: project.description, host: project.host }));
+      const projects = deps.config.projects.map((project) => ({
+        alias: project.alias,
+        description: project.description,
+        host: project.host,
+        runtimeMode: project.runtimeMode,
+        modelConfigured: configuredModel(deps.config, project) !== null,
+      }));
       const summary = [
         `${GATEWAY_NAME} ${GATEWAY_VERSION}: ${hosts.length} host(s), ${projects.length} project(s).`,
         ...hosts.map(describeHost),
-        ...projects.map((project) => `project ${project.alias} on ${project.host}${project.description ? `: ${project.description}` : ''}`),
+        ...projects.map(
+          (project) =>
+            `project ${project.alias} on ${project.host} (${project.runtimeMode}${project.modelConfigured ? '' : ", T3's default model"})` +
+            `${project.description ? `: ${project.description}` : ''}`,
+        ),
       ].join('\n');
       return { structured: { gateway: { name: GATEWAY_NAME, version: GATEWAY_VERSION }, hosts, projects }, summary };
     },

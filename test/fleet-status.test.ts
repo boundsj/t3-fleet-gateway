@@ -18,7 +18,7 @@ interface FleetStatus {
     runningJobs: number;
     queuedJobs: number;
   }[];
-  projects: { alias: string; description: string; host: string }[];
+  projects: { alias: string; description: string; host: string; runtimeMode: string; modelConfigured: boolean }[];
 }
 
 test('fleet_status reports hosts, credentials, job counts and projects', async (t) => {
@@ -36,8 +36,8 @@ test('fleet_status reports hosts, credentials, job counts and projects', async (
         { id: 'gamma', t3Url: 'http://127.0.0.1:9' },
       ],
       projects: [
-        { alias: 'pilot', description: 'Scratch repository', host: 'alpha', t3ProjectTitle: 'Synthetic project 1' },
-        { alias: 'docs', host: 'beta', t3ProjectId: 'project-2' },
+        { alias: 'pilot', description: 'Scratch repository', host: 'alpha', t3ProjectTitle: 'Synthetic project 1', runtimeMode: 'auto' },
+        { alias: 'docs', host: 'beta', t3ProjectId: 'project-2', modelSelection: { instanceId: 'synthetic-provider', model: 'synthetic-large' } },
       ],
     },
   });
@@ -80,12 +80,14 @@ test('fleet_status reports hosts, credentials, job counts and projects', async (
   assert.equal(gamma?.reachable, null);
   assert.equal(gamma?.credential.state, 'missing');
   assert.deepEqual(status.projects, [
-    { alias: 'pilot', description: 'Scratch repository', host: 'alpha' },
-    { alias: 'docs', description: '', host: 'beta' },
+    { alias: 'pilot', description: 'Scratch repository', host: 'alpha', runtimeMode: 'auto', modelConfigured: false },
+    { alias: 'docs', description: '', host: 'beta', runtimeMode: 'approval-required', modelConfigured: true },
   ]);
   const text = JSON.stringify(result.content);
   assert.match(text, /alpha: reachable, T3 1\.2\.3; credential expires in 30 days; 2 running, 1 queued \(max 3\)/);
   assert.match(text, /beta: unreachable; credential expires in 2 days, last renewal failed \(enrollment_failed\)/);
+  assert.match(text, /project pilot on alpha \(auto, T3's default model\): Scratch repository/);
+  assert.match(text, /project docs on beta \(approval-required\)/);
   assert.doesNotMatch(JSON.stringify(result), /synthetic task/, 'no task text in status');
 });
 

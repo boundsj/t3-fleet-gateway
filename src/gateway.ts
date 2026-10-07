@@ -2,6 +2,7 @@ import { mcpResource, type GatewayConfig } from './config.ts';
 import { openDataDir } from './dataDir.ts';
 import { openDatabase, type Database } from './db/database.ts';
 import { CredentialStore } from './hosts/credentials.ts';
+import { warnProjectsWithoutModel } from './hosts/projects.ts';
 import { HostRegistry, type HostRegistryOptions } from './hosts/registry.ts';
 import { startRenewalLoop } from './hosts/renewal.ts';
 import { createRouter, listen } from './http/server.ts';
@@ -138,6 +139,8 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   });
   services.jobs.wake = () => engine.wake();
   if (options.jobEngine?.autoStart !== false) engine.start();
+  // Checked in the background: an unreachable host must not delay startup. Logged as warnings.
+  const modelCheck = warnProjectsWithoutModel(config, services.registry, logger);
   logger.info('gateway.started', { listen: `${config.listen.host}:${server.port}`, publicUrl: config.publicUrl, hosts: config.hosts.length });
   let closing: Promise<void> | undefined;
   const shutdown = async (): Promise<void> => {
@@ -146,6 +149,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
     // The engine finishes its current tick; job state is already in the database.
     await engine.stop();
     await renewal.stop();
+    await modelCheck;
     await mcp.close();
     await services.close();
     logger.info('gateway.stopped');

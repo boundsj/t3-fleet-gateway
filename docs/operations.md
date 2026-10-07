@@ -86,7 +86,7 @@ Agents with **Operate** start work with `work_start`; the gateway queues the job
 t3-fleet-gateway doctor
 ```
 
-Checks, in order: the config, data directory permissions, database integrity and schema version, each host's credential and live reachability, that each project resolves to a T3 project, and that `publicUrl` serves this gateway's protected resource metadata (which needs `serve` and the tunnel running). Each line is `OK`, `WARN` or `FAIL`; any `FAIL` exits `1`.
+Checks, in order: the config, data directory permissions, database integrity and schema version, each host's credential and live reachability, that each project resolves to a T3 project and has a model (its own `modelSelection`, its host's `defaultModelSelection`, or the T3 project's default model; without one T3 refuses every launch), and that `publicUrl` serves this gateway's protected resource metadata (which needs `serve` and the tunnel running). Each line is `OK`, `WARN` or `FAIL`; any `FAIL` exits `1`.
 
 ## Run as a service
 
@@ -118,6 +118,7 @@ On `SIGINT` or `SIGTERM` the gateway stops accepting connections, finishes in-fl
 | `mcp.tool_call` | Tool name, client id, outcome, error code, duration |
 | `mcp.unauthorized`, `mcp.origin_rejected` | Rejected `/mcp` requests |
 | `host.enrollment_succeeded`, `host.enrollment_failed`, `host.renewal_due`, `host.not_enrolled` | T3 credentials |
+| `project.model_missing` (warn) | At startup: a project has no model from the config and its T3 project has no default model, so T3 would refuse its launches; see `doctor` |
 | `job.created`, `job.state_changed` | Job id, project, host, client id; `from`, `to`, `reason`, `errorCode` |
 | `jobs.host_unreachable` (warn), `jobs.host_reachable` | The job engine lost or regained a host; jobs keep their state |
 | `jobs.reconcile_failed`, `jobs.watch_failed`, `jobs.interrupt_failed`, `jobs.interrupt_deferred` (warn) | A T3 call for one job failed (job id, error code); the error is on the job and the call is retried next tick |

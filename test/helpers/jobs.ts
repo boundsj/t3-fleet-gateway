@@ -65,6 +65,8 @@ export interface JobHarnessOptions {
   /** Run the engine on a timer instead of by hand. */
   intervalMs?: number;
   launchTimeoutMs?: number;
+  /** Extra fields for the host's config entry. */
+  host?: Record<string, unknown>;
 }
 
 /**
@@ -76,7 +78,7 @@ export async function startJobHarness(t: TestContext, options: JobHarnessOptions
   if (!options.fake) t.after(() => fake.close());
   const gw = await startTestGateway(t, {
     config: {
-      hosts: [{ id: 'main', t3Url: fake.url, mintPairingCode: fake.mintCommand(), maxConcurrentJobs: options.maxConcurrentJobs ?? 2 }],
+      hosts: [{ id: 'main', t3Url: fake.url, mintPairingCode: fake.mintCommand(), maxConcurrentJobs: options.maxConcurrentJobs ?? 2, ...options.host }],
       projects: [
         { alias: 'pilot', description: 'Synthetic pilot project', host: 'main', t3ProjectId: 'project-1', runtimeMode: 'auto', baseRef: 'main' },
         {

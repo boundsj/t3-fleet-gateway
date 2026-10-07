@@ -3,7 +3,7 @@ import { checkDataDirPermissions } from '../dataDir.ts';
 import { SCHEMA_VERSION, schemaVersion } from '../db/database.ts';
 import { describeError } from '../errors.ts';
 import type { GatewayServices } from '../gateway.ts';
-import { resolveProjectId } from '../hosts/projects.ts';
+import { checkProjectModel, resolveProject } from '../hosts/projects.ts';
 import { resourceMetadataUrl } from '../oauth/metadata.ts';
 import { SECOND } from '../time.ts';
 
@@ -81,8 +81,10 @@ export async function runDoctor(services: GatewayServices, dataDir: string): Pro
       continue;
     }
     try {
-      const id = await resolveProjectId(registry, project);
-      results.push({ level: 'ok', name, detail: `T3 project ${id} on ${project.host}` });
+      const t3Project = await resolveProject(registry, project);
+      results.push({ level: 'ok', name, detail: `T3 project ${t3Project.id} on ${project.host}` });
+      const model = checkProjectModel(config, project, t3Project);
+      results.push({ level: model.ok ? 'ok' : 'fail', name, detail: model.detail });
     } catch (error) {
       results.push({ level: 'fail', name, detail: describeError(error).message });
     }

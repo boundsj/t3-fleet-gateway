@@ -7,8 +7,9 @@
       "label": "Always-on workstation",
       "t3Url": "http://127.0.0.1:3773",
       "mintPairingCode": ["t3", "auth", "pairing", "create", "--ttl", "5m", "--label", "t3-fleet-gateway", "--json"],
-      "access": "auto",
-      "maxConcurrentJobs": 2
+      "access": "full-access",
+      "maxConcurrentJobs": 2,
+      "defaultModelSelection": { "instanceId": "codex", "model": "example-model-id" }
     }
   ],
   "projects": [
