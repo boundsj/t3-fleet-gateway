@@ -221,11 +221,24 @@ export class FakeT3 {
   /** The worker finishes its turn with a final assistant message. */
   finishTurn(threadId: string, text: string): void {
     const thread = this.#thread(threadId);
+    this.#addItem(thread, { runId: this.#activeRun(thread)?.runId ?? null, createdBy: 'agent', creationSource: 'provider', type: 'assistant_message', text });
+    this.endTurn(threadId);
+  }
+
+  /** The active run completes without a further message. */
+  endTurn(threadId: string): void {
+    const thread = this.#thread(threadId);
     const run = this.#activeRun(thread);
-    this.#addItem(thread, { runId: run?.runId ?? null, createdBy: 'agent', creationSource: 'provider', type: 'assistant_message', text });
     if (run) this.#endRun(run, 'completed');
     thread.status = 'completed';
     this.#touch(thread);
+  }
+
+  /** A person types into the thread in T3, starting a new turn. */
+  userTurn(threadId: string, text: string): void {
+    const thread = this.#thread(threadId);
+    const run = this.#startRun(thread);
+    this.#addItem(thread, { runId: run.runId, createdBy: 'user', creationSource: 'web', type: 'user_message', text });
   }
 
   /** The worker streams part of a message: an assistant item that is still running. */
@@ -271,6 +284,20 @@ export class FakeT3 {
     if (run) this.#endRun(run, 'failed');
     thread.status = 'failed';
     this.#touch(thread);
+  }
+
+  /** Create a thread as t3_thread_launch would, outside MCP: a launch the gateway never heard back from. */
+  launchDirect(input: Record<string, unknown>): { threadId: string } {
+    return this.#launch(launchInput.parse(input)) as { threadId: string };
+  }
+
+  /** Finish streaming an item started with streamAssistant. */
+  settleItem(threadId: string, position: number, text: string): void {
+    const item = this.#thread(threadId).items[position];
+    if (!item) throw new Error(`no item ${position}`);
+    item.text = text;
+    item.status = 'completed';
+    item.updatedAt = new Date().toISOString();
   }
 
   /** Apply interrupts accepted while deferInterrupts was set. */

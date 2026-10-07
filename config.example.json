@@ -24,5 +24,5 @@
   ],
   "tokens": { "accessTtlSeconds": 43200, "refreshIdleTtlDays": 90 },
   "renewal": { "renewWhenDaysLeft": 5, "checkEveryMinutes": 60 },
-  "watcher": { "pollSeconds": 10 }
+  "watcher": { "pollSeconds": 10, "reconcileWindowMinutes": 10 }
 }

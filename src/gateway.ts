@@ -136,18 +136,21 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   services.jobs.wake = () => engine.wake();
   if (options.jobEngine?.autoStart !== false) engine.start();
   logger.info('gateway.started', { listen: `${config.listen.host}:${server.port}`, publicUrl: config.publicUrl, hosts: config.hosts.length });
+  let closing: Promise<void> | undefined;
+  const shutdown = async (): Promise<void> => {
+    logger.info('gateway.stopping');
+    await server.close();
+    // The engine finishes its current tick; job state is already in the database.
+    await engine.stop();
+    await renewal.stop();
+    await mcp.close();
+    await services.close();
+    logger.info('gateway.stopped');
+  };
   return {
     services,
     engine,
     port: server.port,
-    async close() {
-      logger.info('gateway.stopping');
-      await server.close();
-      await engine.stop();
-      await renewal.stop();
-      await mcp.close();
-      await services.close();
-      logger.info('gateway.stopped');
-    },
+    close: () => (closing ??= shutdown()),
   };
 }

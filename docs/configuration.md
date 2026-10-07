@@ -82,7 +82,10 @@ What agents can target. Each entry:
 
 ### `watcher`
 
-`{ "pollSeconds": 10 }`: how often the planned job watcher polls T3. Validated now, used with the job layer.
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `pollSeconds` | `10` (2 to 300) | How often the job engine ticks: reconcile uncertain launches, poll active jobs' threads, dispatch queued jobs. Idle jobs are polled at most once a minute. A new job or agent action also triggers a tick at once. |
+| `reconcileWindowMinutes` | `10` (1 to 240) | How long a launch with an unknown outcome may go unconfirmed, while the host answers, before the job fails with `launch_not_confirmed`. Time the host is unreachable does not count. |
 
 ## A remote host
 

@@ -101,8 +101,11 @@ const configSchema = z
       })
       .default({ renewWhenDaysLeft: 5, checkEveryMinutes: 60 }),
     watcher: z
-      .strictObject({ pollSeconds: z.int().min(2).max(300).default(10) })
-      .default({ pollSeconds: 10 }),
+      .strictObject({
+        pollSeconds: z.int().min(2).max(300).default(10),
+        reconcileWindowMinutes: z.int().min(1).max(240).default(10),
+      })
+      .default({ pollSeconds: 10, reconcileWindowMinutes: 10 }),
   })
   .superRefine((config, ctx) => {
     const hostIds = new Set<string>();
