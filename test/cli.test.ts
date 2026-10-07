@@ -78,6 +78,17 @@ describe('cli', () => {
     assert.match(unknown.err, /Unknown command: launch/);
     assert.equal((await run(env, ['--nope'])).code, 2);
     assert.equal((await run(env, ['clients', 'list', 'x', 'y'])).code, 2);
+    for (const [args, message] of [
+      [['clients', 'list', '--all'], /--all is only for jobs list/],
+      [['jobs', 'release', 'job1', '--all'], /--all is only for jobs list/],
+      [['jobs', 'list', '--title', 'x'], /--title is only for jobs adopt/],
+      [['hosts', 'status', '--title', 'x'], /--title is only for jobs adopt/],
+      [['jobs', 'list', '--ttl', '5m'], /--ttl is only for pair/],
+    ] as const) {
+      const misplaced = await run(env, [...args]);
+      assert.deepEqual([misplaced.code, misplaced.out], [2, ''], args.join(' '));
+      assert.match(misplaced.err, message);
+    }
   });
 
   test('reports a missing config with a stable code', async (t) => {

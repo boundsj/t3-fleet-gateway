@@ -25,14 +25,23 @@ die() { echo "install.sh: $*" >&2; exit 1; }
 
 # launchctl bootout returns before launchd has finished removing the service, and a bootstrap in
 # that window fails with "Bootstrap failed: 5: Input/output error". Wait (up to about 10 s) until
-# launchd no longer knows the label.
+# launchd no longer knows the label: `launchctl print` exits 113 ("Could not find service"). Any
+# other failure says nothing about the service, so it is reported rather than taken as unloaded.
 wait_until_unloaded() {
-  local tries
+  local tries status
   for ((tries = 0; tries < 50; tries++)); do
-    launchctl print "$domain/$LABEL" >/dev/null 2>&1 || return 0
-    sleep 0.2
+    status=0
+    launchctl print "$domain/$LABEL" >/dev/null 2>&1 || status=$?
+    case "$status" in
+      0) sleep 0.2 ;;
+      113) return 0 ;;
+      *)
+        echo "install.sh: warning: launchctl print $domain/$LABEL failed with exit $status (not 113, \"service not found\"), so whether $LABEL is still loaded is unknown" >&2
+        return 1
+        ;;
+    esac
   done
-  echo "install.sh: warning: $LABEL is still loaded after 10 s" >&2
+  echo "install.sh: warning: $LABEL is still loaded after 10 s (launchctl print still finds it)" >&2
   return 1
 }
 

@@ -309,6 +309,15 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
     }
     // `jobs` checks its own arguments: `jobs adopt` takes two.
     if (command !== 'jobs' && args.length > 1) throw new UsageError(`Unexpected arguments: ${args.slice(1).join(' ')}`);
+    // Each of these options belongs to one command; anywhere else it would be ignored silently.
+    const optionCommands = [
+      ['ttl', values.ttl, 'pair', command === 'pair'],
+      ['title', values.title, 'jobs adopt', command === 'jobs' && action === 'adopt'],
+      ['all', values.all, 'jobs list', command === 'jobs' && action === 'list'],
+    ] as const;
+    for (const [option, value, owner, allowed] of optionCommands) {
+      if (value !== undefined && !allowed) throw new UsageError(`--${option} is only for ${owner}`);
+    }
     const paths = resolvePaths(io.env, {
       ...(values.config ? { configPath: values.config } : {}),
       ...(values['data-dir'] ? { dataDir: values['data-dir'] } : {}),

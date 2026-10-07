@@ -15,7 +15,7 @@ const run = promisify(execFile);
  * label as loaded for the first `loadedPrints` calls (bootout still in progress), and `bootstrap`
  * fails the way macOS does for the first `failingBootstraps` calls. The real launchctl is never run.
  */
-function stubs(t: TestContext, options: { loadedPrints: number; failingBootstraps: number }) {
+function stubs(t: TestContext, options: { loadedPrints: number; failingBootstraps: number; printFailure?: number }) {
   const dir = tempDir(t);
   const log = join(dir, 'calls.log');
   const counter = (name: string) => `n=$(cat "${dir}/${name}" 2>/dev/null || echo 0); echo $((n + 1)) >"${dir}/${name}"`;
@@ -23,7 +23,7 @@ function stubs(t: TestContext, options: { loadedPrints: number; failingBootstrap
     launchctl: [
       `echo "$1" >>"${log}"`,
       'case "$1" in',
-      `  print) ${counter('prints')}; (( n < ${options.loadedPrints} )) && exit 0; exit 113 ;;`,
+      `  print) ${counter('prints')}; (( n < ${options.loadedPrints} )) && exit 0; exit ${options.printFailure ?? 113} ;;`,
       `  bootstrap) ${counter('bootstraps')}; if (( n < ${options.failingBootstraps} )); then echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi ;;`,
       'esac',
     ],
@@ -89,6 +89,17 @@ describe('launchd installer', () => {
     const failed = await install(twice.env);
     assert.notEqual(failed.code, 0);
     assert.deepEqual(twice.calls(), ['bootout', 'print', 'bootstrap', 'print', 'bootstrap']);
+  });
+
+  test('a launchctl print failure other than "service not found" is reported, not taken as unloaded', async (t) => {
+    const stub = stubs(t, { loadedPrints: 1, failingBootstraps: 0 });
+    assert.equal((await install(stub.env)).code, 0);
+    const broken = stubs(t, { loadedPrints: 0, failingBootstraps: 0, printFailure: 5 });
+    const removed = await install({ ...broken.env, PLIST_DIR: stub.env.PLIST_DIR }, '--uninstall');
+    assert.notEqual(removed.code, 0);
+    assert.match(removed.stderr, /launchctl print gui\/\d+\/test\.t3-fleet-gateway failed with exit 5 \(not 113, "service not found"\)/);
+    assert.match(removed.stderr, /did not unload/);
+    assert.equal(existsSync(stub.plist), true, 'the plist is kept');
   });
 
   test('--uninstall waits for the agent to unload before removing its plist', async (t) => {
