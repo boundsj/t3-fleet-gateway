@@ -22,6 +22,7 @@ No build step: Node 24+ runs `.ts` directly. There is no linter or formatter con
 | --- | --- |
 | `bin/t3-fleet-gateway.js` | Launcher; imports `src/cli.ts` |
 | `src/cli/main.ts` | `runCli(argv, io)`: every command; returns the exit code |
+| `src/cli/output.ts` | `lineWriter`: stdout and stderr writers that stop quietly on EPIPE (a closed pipe reader) and rethrow other stream errors |
 | `src/processErrors.ts` | `guardProcess` (uncaught errors in `serve`: Node 26.0's `setTypeOfService` race is logged and ignored, anything else shuts down and exits 1), `isTypeOfServiceRace` |
 | `src/gateway.ts` | `openServices` (shared by CLI and server), `startGateway`, `gatewayTools` (the tool list) |
 | `src/oauth/` | Authorization server: `routes.ts` (HTTP), `tokens.ts` (codes, rotation, replay), `clients.ts`, `approvalCodes.ts`, `approvalPage.ts` (approval, return and notice pages), `approvedRequests.ts` (repeated submissions) |
