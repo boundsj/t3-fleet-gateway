@@ -132,11 +132,11 @@ Logs never contain tokens, codes, authorization headers, task text or message co
 `scripts/e2e-live.ts` checks a running gateway against a real T3 host the way an agent would. It is not part of `npm test`. It registers a client, gets approved for **Operate** with a code you mint, exchanges the code, calls `fleet_status`, then:
 
 1. starts job A in a project with a tiny harmless task (reply `READY`, no commands, no file changes) and polls `work_feed` until it is `idle`;
-2. checks `work_status` (thread, excerpt), sends a follow-up with `work_continue` (reply `DONE`) and polls until `idle` again;
-3. starts job B, waits until it runs, cancels it with `work_cancel` and waits for `cancelled`;
+2. checks with `work_status` that the job has a thread and that the excerpt of the worker's reply contains `READY`, sends a follow-up with `work_continue` (reply `DONE`), polls until `idle` again and checks that the new excerpt contains `DONE`;
+3. starts job B with a long harmless task (count slowly to 200, no commands, no file changes), waits until it runs, cancels it with `work_cancel`, requires the outcome `cancel_requested` (an interrupt of a run still going; a job that had already finished fails this step), and waits until the watcher confirms `cancelled`;
 4. cancels job A to leave nothing active.
 
-It prints one `PASS`/`FAIL`/`INFO` line per step with job ids, states and reasons only (never tokens, codes or worker text; excerpts are reported by length), ends with `E2E PASS` or `E2E FAIL`, and exits `0` or `1`.
+These checks are what only a real T3 can confirm: that worker replies are recognised and read back, and that an interrupt stops a running worker. A job that reaches `failed` fails its step with the job's `lastError` code and message. The script prints one `PASS`/`FAIL`/`INFO` line per step with job ids, states, reasons and error codes only (never tokens, approval codes or worker text: it reports whether an excerpt contains the expected word, not the excerpt), ends with `E2E PASS` or `E2E FAIL`, and exits `0` or `1`.
 
 Use a scratch project: each run leaves two T3 threads with their worktrees and branches. With the gateway running (`serve`) and the host enrolled:
 

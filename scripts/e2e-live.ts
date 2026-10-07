@@ -16,6 +16,10 @@ const HARMLESS_TASK =
   'This is an automated connectivity check. Reply with exactly the word READY and nothing else. ' +
   'Do not run any commands, do not read or change any files.';
 const HARMLESS_FOLLOW_UP = 'Reply with exactly the word DONE and nothing else. Do not run any commands, do not read or change any files.';
+/** Long enough that job B is still running when it is cancelled, and harmless. */
+const LONG_HARMLESS_TASK =
+  'This is an automated check. Count slowly from 1 to 200, writing each number on its own line, then reply FINISHED. ' +
+  'Do not run any commands, do not read or change any files.';
 
 class StepFailure extends Error {}
 
@@ -71,6 +75,13 @@ interface FeedPage {
   hasMore: boolean;
 }
 
+/** Why a job stopped, from work_status: its state and lastError code and message. */
+async function stopReason(call: Tool, jobId: string, state: string): Promise<string> {
+  const status = await call<{ lastError: { code: string; message: string } | null }>('work_status', { jobId });
+  if (state === 'failed' && status.lastError) return `job ${jobId} failed: lastError ${status.lastError.code}: ${status.lastError.message.slice(0, 300)}`;
+  return `job ${jobId} reached ${state}${status.lastError ? ` (lastError ${status.lastError.code})` : ''}`;
+}
+
 /** Poll work_feed from `cursor` until the job reaches one of `targets`; fail on a state in `stops`. */
 async function waitFor(call: Tool, jobId: string, cursor: string, targets: string[], stops: string[]): Promise<{ state: string; cursor: string }> {
   const deadline = Date.now() + timeoutMs;
@@ -83,7 +94,7 @@ async function waitFor(call: Tool, jobId: string, cursor: string, targets: strin
       line('INFO', `  ${jobId}`, `${event.type} -> ${event.toState}${event.reason ? ` (${event.reason})` : ''}`);
       if (event.toState === 'needs_input') line('INFO', `  ${jobId}`, 'waiting: answer or approve it in T3; this run keeps polling until the timeout');
       if (targets.includes(event.toState)) return { state: event.toState, cursor: next };
-      if (stops.includes(event.toState)) throw new Error(`job reached ${event.toState}`);
+      if (stops.includes(event.toState)) throw new Error(await stopReason(call, jobId, event.toState));
     }
     if (!page.hasMore) await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
@@ -183,12 +194,16 @@ async function main(): Promise<void> {
 
   try {
     await step('fleet_status', async () => {
-      const status = await call<{ hosts: { id: string; reachable: boolean | null }[]; projects: { alias: string; host: string }[] }>('fleet_status', {});
+      const status = await call<{
+        hosts: { id: string; reachable: boolean | null }[];
+        projects: { alias: string; host: string; runtimeMode: string; modelConfigured: boolean }[];
+      }>('fleet_status', {});
       const project = status.projects.find((candidate) => candidate.alias === projectAlias);
       ensure(project, `project ${projectAlias} is not configured`);
       const host = status.hosts.find((candidate) => candidate.id === project.host);
       ensure(host?.reachable === true, `host ${project.host} is not reachable`);
-      return { value: undefined, detail: `host ${host.id} reachable` };
+      const model = project.modelConfigured ? 'model configured' : "T3's default model (doctor checks it exists)";
+      return { value: undefined, detail: `host ${host.id} reachable; project ${project.runtimeMode}, ${model}` };
     });
 
     let cursor = await latestCursor(call);
@@ -212,8 +227,9 @@ async function main(): Promise<void> {
       const status = await call<{ state: string; threadId: string | null; latestMessageExcerpt: string | null }>('work_status', { jobId: first });
       ensure(status.state === 'idle' && status.threadId, `state ${status.state}`);
       ensure(status.latestMessageExcerpt, 'no worker message excerpt recorded');
-      const mentions = /READY/.test(status.latestMessageExcerpt) ? 'mentions READY' : 'does not mention READY';
-      return { value: undefined, detail: `thread ${status.threadId}, excerpt ${status.latestMessageExcerpt.length} chars, ${mentions}` };
+      // Only a real T3 shows that the worker's reply is recognised and read back.
+      ensure(/READY/.test(status.latestMessageExcerpt), `the excerpt (${status.latestMessageExcerpt.length} chars) does not mention READY`);
+      return { value: undefined, detail: `thread ${status.threadId}, excerpt mentions READY` };
     });
 
     await step('work_continue (job A)', async () => {
@@ -229,14 +245,14 @@ async function main(): Promise<void> {
     cursor = await step('job A reaches idle again', async () => {
       const reached = await waitFor(call, first, cursor, ['idle'], ['failed', 'cancelled']);
       const status = await call<{ latestMessageExcerpt: string | null }>('work_status', { jobId: first });
-      const mentions = status.latestMessageExcerpt && /DONE/.test(status.latestMessageExcerpt) ? 'mentions DONE' : 'does not mention DONE';
-      return { value: reached.cursor, detail: mentions };
+      ensure(status.latestMessageExcerpt && /DONE/.test(status.latestMessageExcerpt), 'the excerpt of the second turn does not mention DONE');
+      return { value: reached.cursor, detail: 'excerpt mentions DONE' };
     });
 
     const second = await step('work_start (job B)', async () => {
       const result = await call<{ job: { jobId: string; state: string } }>('work_start', {
         project: projectAlias,
-        task: HARMLESS_TASK,
+        task: LONG_HARMLESS_TASK,
         title: 't3-fleet-gateway live e2e (cancel)',
         requestId: randomUUID(),
       });
@@ -244,20 +260,23 @@ async function main(): Promise<void> {
     });
 
     await step('job B starts running', async () => {
-      const reached = await waitFor(call, second, cursor, ['running', 'idle'], ['failed', 'cancelled']);
+      const reached = await waitFor(call, second, cursor, ['running'], ['idle', 'failed', 'cancelled']);
       cursor = reached.cursor;
       return { value: undefined, detail: reached.state };
     });
 
-    await step('work_cancel (job B)', async () => {
-      const result = await call<{ outcome: string; confirmed: boolean; delivered: boolean }>('work_cancel', { jobId: second });
-      ensure(result.outcome !== 'already_finished', 'job had already finished');
-      return { value: undefined, detail: `outcome ${result.outcome}, delivered ${result.delivered}, confirmed ${result.confirmed}` };
+    await step('work_cancel (job B) while it runs', async () => {
+      const result = await call<{ outcome: string; confirmed: boolean; delivered: boolean; job: { state: string } }>('work_cancel', { jobId: second });
+      // Only an interrupt of a run that is still going shows that T3 stops the worker and the watcher sees it.
+      ensure(
+        result.outcome === 'cancel_requested',
+        `outcome ${result.outcome} (state ${result.job.state}): the job was not running when cancelled, so the interrupt was not exercised`,
+      );
+      return { value: undefined, detail: `outcome ${result.outcome}, delivered ${result.delivered}` };
     });
 
-    await step('job B is cancelled', async () => {
-      const status = await call<{ state: string }>('work_status', { jobId: second });
-      if (status.state !== 'cancelled') await waitFor(call, second, cursor, ['cancelled'], ['failed']);
+    await step('watcher confirms job B cancelled', async () => {
+      await waitFor(call, second, cursor, ['cancelled'], ['failed', 'idle']);
       return { value: undefined };
     });
 
