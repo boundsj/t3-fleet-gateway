@@ -8,6 +8,10 @@ updates:
     groups:
       npm:
         patterns: ['*']
+    ignore:
+      # The package supports Node 24 (engines >=24): types for a newer Node major would let code use APIs Node 24 lacks.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
   - package-ecosystem: github-actions
     directory: /
     schedule:
