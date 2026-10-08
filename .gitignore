@@ -6,3 +6,6 @@ config.json
 *.db
 *.db-wal
 *.db-shm
+gateway.key
+.env
+.env.*
