@@ -38,6 +38,18 @@ For each host: reachability and T3 version (checked live), credential state (`mi
 
 Codes work once. Five wrong codes lock that approval page (start again from the agent); twenty failures in an hour pause all approvals until the hour clears. Minting a new code with `pair` lifts that pause at once, and `pair` says so when it does.
 
+### Agents that only take a bearer token
+
+Some agents cannot sign in with OAuth and only offer a bearer token or API key field (Notion's custom MCP connections, for example). Mint a token for one such agent:
+
+```sh
+t3-fleet-gateway clients token --name notion                          # Operate, valid 1 year
+t3-fleet-gateway clients token --name notion --access read --ttl 90d  # read-only, 90 days
+t3-fleet-gateway clients token --name notion --ttl never              # does not expire
+```
+
+The token is printed once; the gateway keeps only its hash. Paste it into the agent's bearer token setting (it sends `Authorization: Bearer <token>`). `--access` is `operate` (the default, which includes read, as on the approval page) or `read`; `--ttl` is at least `1h` (units `h`, `d`, `y`) or `never`. Each token is a client of its own: `clients list` shows it as `bearer token` with its expiry, and `clients revoke <id>` cuts it off at once. There is no refresh: when it expires, mint a new one and revoke the old client. A static token is only as safe as the place that stores it; see [security.md](security.md#threats-and-mitigations).
+
 ## Throttles
 
 Registration and approval are open to anyone who can reach the public URL, so both are rate-limited, and you can clear both:
@@ -62,7 +74,7 @@ t3-fleet-gateway clients list
 t3-fleet-gateway clients revoke <client id>   # an id that starts with '-': clients revoke -- <client id>
 ```
 
-`list` shows each client's id, name, granted access, status (`pending` until approved, `active`, `revoked`), creation and last-use times, and the origins it redirects to. `revoke` takes effect immediately for every token the client holds; the agent must register and be approved again.
+`list` shows each client's id, name, granted access, status (`pending` until approved, `active`, `expired` for an operator token past its expiry, `revoked`), creation and last-use times, and how it signs in: the origins an OAuth client redirects to, or `bearer token` with the expiry of a token minted with `clients token`. `revoke` takes effect immediately for every token the client holds; the agent must register and be approved again.
 
 ## Credential renewal
 

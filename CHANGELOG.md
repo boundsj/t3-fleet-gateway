@@ -32,6 +32,7 @@ All notable changes are recorded here. The project follows [Semantic Versioning]
 - `t3-fleet-gateway jobs list [--all]`: open jobs (with `--all`, finished ones too) with project, state, standing flag, title and link.
 - Schema migration 2: `jobs.standing` and the terminal job state `released`, for standing jobs. It rebuilds the `jobs` table to change its state constraint and keeps every row, event and request id. Migrations are append-only from here on. Back up the data directory before updating a deployed gateway (see docs/operations.md).
 - `doctor`'s public URL check requires this gateway's own metadata (`resource_name` `t3-fleet-gateway`), so another server's metadata for the same resource fails it.
+- `clients token --name <name> [--access operate|read] [--ttl <duration>|never]`: a bearer token for an agent that cannot sign in with OAuth (Notion's custom MCP connections offer only header authentication). Printed once and stored as a hash; Operate and one year by default; listed by `clients list` with its expiry and cut off by `clients revoke`. Durations accept `y` (365 days).
 - `work_messages` (read scope): a job's worker messages in full, read live from T3, up to 50,000 characters each, with `textTruncated` and `length`. Without `before` or `after` it returns the latest (`limit`, default 1, at most 10); `earlier` and `later` page back and forward. `work_status` has `excerptTruncated` (schema migration 6), and its summary and the attention reasons point to `work_messages` when the excerpt is cut.
 
 ### Fixed

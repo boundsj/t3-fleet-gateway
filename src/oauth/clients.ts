@@ -27,6 +27,13 @@ export interface OAuthClient {
 export interface ClientSummary extends OAuthClient {
   activeFamilies: number;
   scopes: string[];
+  /** An operator token client's token expiry (NEVER_EXPIRES when it has none); null for OAuth clients. */
+  tokenExpiresAt: number | null;
+}
+
+/** A client the operator created with `clients token`: it has no redirect URIs, while OAuth clients always have one. */
+export function isTokenClient(client: OAuthClient): boolean {
+  return client.redirectUris.length === 0;
 }
 
 interface ClientRow {
@@ -164,10 +171,16 @@ export class ClientStore {
     const families = this.#db.prepare(
       'SELECT scope FROM token_families WHERE client_id = ? AND revoked_at IS NULL',
     );
+    const tokenExpiry = this.#db.prepare(
+      `SELECT MAX(a.expires_at) AS expires_at FROM access_tokens a JOIN token_families f ON f.id = a.family_id
+         WHERE f.client_id = ? AND f.revoked_at IS NULL AND a.revoked_at IS NULL`,
+    );
     return rows.map((row) => {
+      const client = fromRow(row);
       const active = families.all(row.id) as { scope: string }[];
       const scopes = [...new Set(active.flatMap((family) => family.scope.split(' ')))];
-      return { ...fromRow(row), activeFamilies: active.length, scopes };
+      const tokenExpiresAt = isTokenClient(client) ? ((tokenExpiry.get(row.id) as { expires_at: number | null }).expires_at ?? null) : null;
+      return { ...client, activeFamilies: active.length, scopes, tokenExpiresAt };
     });
   }
 

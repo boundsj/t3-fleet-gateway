@@ -14,6 +14,7 @@ import { ClientStore, MAX_REGISTRATIONS_PER_HOUR } from '../src/oauth/clients.ts
 import { systemClock } from '../src/time.ts';
 import { startFakeT3, type FakeT3 } from './helpers/fakeT3.ts';
 import { openFrontDoor, type FrontDoor } from './helpers/frontDoor.ts';
+import { agentWithToken } from './helpers/jobs.ts';
 import { tempDir } from './helpers/tmp.ts';
 
 interface Env {
@@ -157,6 +158,56 @@ describe('cli', () => {
     assert.equal(unknown.code, 1);
     assert.match(unknown.err, /not_found/);
     assert.equal((await run(env, ['clients', 'revoke'])).code, 2);
+  });
+
+  test('clients token mints a bearer token that works at /mcp until it is revoked', async (t) => {
+    const env = await environment(t);
+    for (const [args, message] of [
+      [['clients', 'token'], /clients token needs --name/],
+      [['clients', 'token', '--name', '  '], /clients token needs --name/],
+      [['clients', 'token', '--name', 'x', '--access', 'admin'], /--access must be operate/],
+      [['clients', 'token', '--name', 'x', '--ttl', '30m'], /--ttl must be a duration of at least 1h/],
+      [['clients', 'token', '--name', 'x', '--ttl', 'soon'], /--ttl must be/],
+      [['clients', 'token', 'extra', '--name', 'x'], /Unexpected arguments: extra/],
+      [['clients', 'list', '--name', 'x'], /--name is only for clients token/],
+      [['pair', '--access', 'read'], /--access is only for clients token/],
+    ] as const) {
+      const refused = await run(env, [...args]);
+      assert.deepEqual([refused.code, refused.out], [2, ''], args.join(' '));
+      assert.match(refused.err, message);
+    }
+    const minted = await run(env, ['clients', 'token', '--name', 'Synthetic notebook agent']);
+    assert.equal(minted.code, 0, minted.err);
+    const [, clientId = ''] = /^Created client (\S+) \("Synthetic notebook agent", operate access\)\. Its token expires \S+ \(in 365d\):$/m.exec(minted.out) ?? [];
+    const token = minted.out.split('\n')[1] ?? '';
+    assert.match(token, /^[\w-]{43}$/);
+    const reader = await run(env, ['clients', 'token', '--name', 'Synthetic reader', '--access', 'read', '--ttl', 'never']);
+    assert.match(reader.out, /\("Synthetic reader", read access\)\. Its token never expires:/);
+    const readToken = reader.out.split('\n')[1] ?? '';
+    const listed = (await run(env, ['clients', 'list'])).out;
+    assert.match(listed, new RegExp(`${clientId}\\s+Synthetic notebook agent\\s+operate\\s+active\\s.*bearer token, expires \\S+$`, 'm'));
+    assert.match(listed, /Synthetic reader\s+read\s+active\s.*bearer token, never expires$/m);
+    assert.match((await run(env, ['throttle', 'status'])).out, /registrations: +0\/30/, 'operator tokens do not count as registrations');
+
+    const initialize = (bearer: string) =>
+      fetch(`${env.door.url}/mcp`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'probe', version: '0' } } }),
+      });
+    const served = await run(env, ['serve'], async (until) => {
+      await until(/"event":"gateway.started"/);
+      const agent = await agentWithToken(t, env.door.url, clientId, token);
+      assert.deepEqual(await agent.call('work_list', {}), { jobs: [] });
+      const readOnly = await agentWithToken(t, env.door.url, '', readToken);
+      assert.equal((await readOnly.callError('work_start', { project: 'x', task: 'x', requestId: 'r1' })).code, 'insufficient_scope');
+      assert.equal((await run(env, ['clients', 'revoke', clientId])).code, 0);
+      assert.equal((await initialize(token)).status, 401, 'revoked at once');
+      assert.equal((await initialize(readToken)).status, 200);
+    });
+    assert.equal(served.code, 0, served.err);
+    assert.equal(served.out.includes(token) || served.out.includes(readToken), false, 'tokens never reach the logs');
+    assert.match((await run(env, ['clients', 'list'])).out, new RegExp(`${clientId}\\s+Synthetic notebook agent\\s+-\\s+revoked`));
   });
 
   test('hosts enroll and hosts status, without printing credentials', async (t) => {
