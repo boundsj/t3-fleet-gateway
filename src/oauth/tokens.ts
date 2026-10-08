@@ -10,6 +10,8 @@ export const AUTHORIZATION_CODE_TTL = 60 * SECOND;
  * concurrent requests refreshing with the same token): it gets another pair alongside the first.
  */
 export const REFRESH_GRACE = 2 * MINUTE;
+/** `expiresAt` of an operator token that does not expire (`clients token --ttl never`): later than any clock reading. */
+export const NEVER_EXPIRES = Number.MAX_SAFE_INTEGER;
 
 export interface TokenSettings {
   /** Canonical resource (audience) that every token is bound to. */
@@ -246,6 +248,36 @@ export class TokenService {
     if (outcome.event) this.#onEvent(outcome.event);
     if ('error' in outcome) throw outcome.error;
     return outcome.response;
+  }
+
+  /**
+   * A bearer token the operator mints for an agent that cannot sign in with OAuth (`clients token`). It gets
+   * a client of its own (no redirect URIs, so it can never complete an authorization; not counted toward the
+   * registration limit) with one grant and one access token, and no refresh token: it works until it expires
+   * or the client is revoked.
+   */
+  issueOperatorToken(input: { name: string; scopes: Scope[]; expiresAt: number }): { clientId: string; token: string } {
+    const token = randomToken();
+    const clientId = randomId(12);
+    const familyId = randomId(12);
+    const scope = formatScope(input.scopes);
+    const now = this.#clock();
+    transaction(this.#db, () => {
+      this.#db
+        .prepare("INSERT INTO oauth_clients (id, name, redirect_uris, created_at, counts_toward_limit) VALUES (?, ?, '[]', ?, 0)")
+        .run(clientId, input.name, now);
+      this.#db
+        .prepare('INSERT INTO token_families (id, client_id, scope, resource, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(familyId, clientId, scope, this.#settings.resource, now);
+      // refresh_token_hash cannot be NULL; an empty one matches no refresh token, so nothing ever rotates it.
+      this.#db
+        .prepare(
+          `INSERT INTO access_tokens (token_hash, family_id, refresh_token_hash, scope, created_at, expires_at)
+           VALUES (?, ?, '', ?, ?, ?)`,
+        )
+        .run(hashToken(token), familyId, scope, now, input.expiresAt);
+    });
+    return { clientId, token };
   }
 
   /** Returns the token's grant, or undefined when it is unknown, expired, revoked or for another resource. */

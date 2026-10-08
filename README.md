@@ -110,6 +110,8 @@ node bin/t3-fleet-gateway.js doctor               # check everything, including 
 2. Grok Bot registers itself and opens the gateway's approval page. On the gateway machine run `node bin/t3-fleet-gateway.js pair`, enter the printed code on the page, choose **Read** or **Operate**, and approve.
 3. Ask the agent to call `fleet_status`: it should list your hosts and project aliases. Then ask it to start a small task with `work_start` (or send one to a standing job with `work_continue`) and to check `work_feed` on a schedule. Each launched job is a T3 thread titled with `[job:<id>]` in a fresh worktree on its own branch, so you can open it in T3 at any time.
 
+An agent that can't sign in with OAuth and only takes a bearer token (Notion's custom MCP connections, for example) gets one from `node bin/t3-fleet-gateway.js clients token --name <name>` instead: Operate access, valid a year by default (`--access read`, `--ttl 90d` or `--ttl never` to change that); see [docs/operations.md](docs/operations.md#agents-that-only-take-a-bearer-token).
+
 `t3-fleet-gateway clients list` shows connected agents; `clients revoke <id>` disconnects one. If approvals or registrations are throttled (someone probing your URL), `pair` lifts an approval pause and `throttle reset` clears both limits; see [docs/operations.md](docs/operations.md#throttles).
 
 ## Status

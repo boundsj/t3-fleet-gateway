@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { REFRESH_GRACE } from '../src/oauth/tokens.ts';
-import { DAY, MINUTE, SECOND } from '../src/time.ts';
+import { NEVER_EXPIRES, REFRESH_GRACE } from '../src/oauth/tokens.ts';
+import { DAY, HOUR, MINUTE, SECOND } from '../src/time.ts';
 import { startOAuthHarness, type OAuthHarness } from './helpers/oauthHarness.ts';
 import {
   authorizationResponse,
@@ -257,5 +257,47 @@ describe('revocation and storage', () => {
     for (const secret of [tokens.access_token, tokens.refresh_token, approvalCode, approvalCode.replace('-', '')]) {
       assert.equal(dump.includes(secret), false);
     }
+  });
+});
+
+describe('operator tokens (clients token)', () => {
+  test('work for their scopes until they expire, are stored as hashes and need no refresh', async (t) => {
+    const h = await startOAuthHarness(t);
+    const now = h.clock();
+    const operate = h.tokens.issueOperatorToken({ name: 'Synthetic agent', scopes: ['fleet:read', 'fleet:operate'], expiresAt: now + HOUR });
+    const read = h.tokens.issueOperatorToken({ name: 'Synthetic reader', scopes: ['fleet:read'], expiresAt: NEVER_EXPIRES });
+    assert.deepEqual(h.tokens.verifyAccessToken(operate.token), {
+      clientId: operate.clientId,
+      familyId: h.tokens.verifyAccessToken(operate.token)?.familyId,
+      scopes: ['fleet:read', 'fleet:operate'],
+      expiresAt: now + HOUR,
+      resource: h.resource,
+    });
+    assert.deepEqual(h.tokens.verifyAccessToken(read.token)?.scopes, ['fleet:read']);
+    assert.equal(h.db.prepare('SELECT COUNT(*) AS n FROM refresh_tokens').get()?.n, 0, 'no refresh token is issued');
+    const dump = JSON.stringify(['oauth_clients', 'token_families', 'access_tokens'].map((table) => h.db.prepare(`SELECT * FROM ${table}`).all()));
+    assert.equal(dump.includes(operate.token) || dump.includes(read.token), false);
+
+    h.clock.advance(HOUR);
+    assert.equal(h.tokens.verifyAccessToken(operate.token), undefined, 'expired at expiresAt');
+    h.clock.advance(100 * 365 * DAY);
+    assert.ok(h.tokens.verifyAccessToken(read.token), 'a token minted with --ttl never does not expire');
+  });
+
+  test('revoking the client cuts the token off; it cannot authorize, refresh or count toward registrations', async (t) => {
+    const h = await startOAuthHarness(t);
+    const { clientId, token } = h.tokens.issueOperatorToken({ name: 'Synthetic agent', scopes: ['fleet:read'], expiresAt: NEVER_EXPIRES });
+    assert.equal(h.clients.registrationsCounted(), 0);
+    const { challenge } = pkcePair();
+    const authorize = await fetch(authorizeUrl(h.baseUrl, standardAuthorizeParams(clientId, challenge)), { redirect: 'manual' });
+    assert.deepEqual([authorize.status, authorize.headers.get('location')], [400, null], 'no redirect URI is registered for it');
+    await expectError(await refresh(h, clientId, token), 'invalid_grant');
+
+    // Cleaning up registrations that never completed an approval keeps it: it has a grant.
+    h.clock.advance(2 * DAY);
+    await registerClient(h.baseUrl);
+    assert.ok(h.tokens.verifyAccessToken(token));
+    assert.deepEqual(h.clients.revoke(clientId), { families: 1 });
+    assert.equal(h.tokens.verifyAccessToken(token), undefined);
   });
 });
