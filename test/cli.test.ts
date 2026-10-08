@@ -166,7 +166,8 @@ describe('cli', () => {
       [['clients', 'token'], /clients token needs --name/],
       [['clients', 'token', '--name', '  '], /clients token needs --name/],
       [['clients', 'token', '--name', 'x', '--access', 'admin'], /--access must be operate/],
-      [['clients', 'token', '--name', 'x', '--ttl', '30m'], /--ttl must be a duration of at least 1h/],
+      [['clients', 'token', '--name', 'x', '--ttl', '30m'], /--ttl must be a duration from 1h to 100y/],
+      [['clients', 'token', '--name', 'x', '--ttl', '999999y'], /--ttl must be a duration from 1h to 100y/],
       [['clients', 'token', '--name', 'x', '--ttl', 'soon'], /--ttl must be/],
       [['clients', 'token', 'extra', '--name', 'x'], /Unexpected arguments: extra/],
       [['clients', 'list', '--name', 'x'], /--name is only for clients token/],
@@ -176,6 +177,9 @@ describe('cli', () => {
       assert.deepEqual([refused.code, refused.out], [2, ''], args.join(' '));
       assert.match(refused.err, message);
     }
+    assert.equal((await run(env, ['clients', 'list'])).out, 'No clients registered.', 'a refused request creates nothing');
+    assert.equal((await run(env, ['clients', 'token', '--name', 'Synthetic long-lived', '--ttl', '100y'])).code, 0);
+    assert.match((await run(env, ['clients', 'list'])).out, /Synthetic long-lived\s+operate\s+active\s.*bearer token, expires \S+$/m);
     const minted = await run(env, ['clients', 'token', '--name', 'Synthetic notebook agent']);
     assert.equal(minted.code, 0, minted.err);
     const [, clientId = ''] = /^Created client (\S+) \("Synthetic notebook agent", operate access\)\. Its token expires \S+ \(in 365d\):$/m.exec(minted.out) ?? [];

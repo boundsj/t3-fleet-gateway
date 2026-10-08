@@ -48,7 +48,7 @@ t3-fleet-gateway clients token --name notion --access read --ttl 90d  # read-onl
 t3-fleet-gateway clients token --name notion --ttl never              # does not expire
 ```
 
-The token is printed once; the gateway keeps only its hash. Paste it into the agent's bearer token setting (it sends `Authorization: Bearer <token>`). `--access` is `operate` (the default, which includes read, as on the approval page) or `read`; `--ttl` is at least `1h` (units `h`, `d`, `y`) or `never`. Each token is a client of its own: `clients list` shows it as `bearer token` with its expiry, and `clients revoke <id>` cuts it off at once. There is no refresh: when it expires, mint a new one and revoke the old client. A static token is only as safe as the place that stores it; see [security.md](security.md#threats-and-mitigations).
+The token is printed once; the gateway keeps only its hash. Paste it into the agent's bearer token setting (it sends `Authorization: Bearer <token>`). `--access` is `operate` (the default, which includes read, as on the approval page) or `read`; `--ttl` is from `1h` to `100y` (units `h`, `d`, `y`), or `never`. Each token is a client of its own: `clients list` shows it as `bearer token` with its expiry, and `clients revoke <id>` cuts it off at once. There is no refresh: when it expires, mint a new one and revoke the old client. A static token is only as safe as the place that stores it; see [security.md](security.md#threats-and-mitigations).
 
 ## Throttles
 

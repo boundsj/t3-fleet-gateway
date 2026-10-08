@@ -113,8 +113,9 @@ function pair(paths: Paths, io: CliIo, ttlText: string | undefined): number {
   }
 }
 
-/** How long a `clients token` token lasts unless --ttl says otherwise. */
+/** How long a `clients token` token lasts unless --ttl says otherwise, and the longest finite --ttl (`never` is longer). */
 const DEFAULT_TOKEN_TTL = 365 * DAY;
+const MAX_TOKEN_TTL = 100 * 365 * DAY;
 
 interface TokenOptions {
   name?: string | undefined;
@@ -129,7 +130,9 @@ async function clientToken(paths: Paths, io: CliIo, options: TokenOptions): Prom
   const access = options.access ?? 'operate';
   if (access !== 'operate' && access !== 'read') throw new UsageError('--access must be operate (start and steer work, the default) or read');
   const ttl = options.ttl === undefined ? DEFAULT_TOKEN_TTL : options.ttl === 'never' ? null : parseDuration(options.ttl);
-  if (ttl === undefined || (ttl !== null && ttl < HOUR)) throw new UsageError('--ttl must be a duration of at least 1h, for example 90d or 1y, or never');
+  if (ttl === undefined || (ttl !== null && (ttl < HOUR || ttl > MAX_TOKEN_TTL))) {
+    throw new UsageError('--ttl must be a duration from 1h to 100y, for example 90d or 1y, or never');
+  }
   return withServices(paths, silentLogger, async ({ tokens, clock }) => {
     const expiresAt = ttl === null ? NEVER_EXPIRES : clock() + ttl;
     const { clientId, token } = tokens.issueOperatorToken({ name, scopes: scopesForChoice(access), expiresAt });
