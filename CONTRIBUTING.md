@@ -11,6 +11,8 @@ npm install
 npm run check   # tsc --noEmit, then every test
 ```
 
+CI (`.github/workflows/check.yml`) runs the same `npm run check` on Node 24 and 26 on Linux and Node 26 on macOS for every push to `main` and every pull request. A pull request needs every CI check green to merge. Dependabot opens monthly grouped updates for npm packages and GitHub Actions; they go through CI like any other pull request.
+
 ## Ground rules
 
 - **No secrets or machine-specific values**, anywhere: code, tests, fixtures, docs, commit messages. Use placeholders such as `example.ts.net`, `/path/to/repo`, and generated values in tests. Never paste real tokens, codes, hostnames, IPs, usernames or home-directory paths.

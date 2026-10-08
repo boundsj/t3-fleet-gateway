@@ -1,5 +1,7 @@
 # t3-fleet-gateway
 
+[![CI](https://github.com/boundsj/t3-fleet-gateway/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/boundsj/t3-fleet-gateway/actions/workflows/check.yml)
+
 Let long-running AI agents in the cloud hand coding work to the [T3 Code](https://github.com/pingdotgg/t3code) servers on your own machines, and follow that work to completion.
 
 The agent says *what* to do in *which project*. The gateway decides *where* and *how*: which machine, which T3 project, a fresh git worktree per job, the T3 thread, and watching it. You never have to pick worktrees or threads, or keep checking threads by hand. Every job is an ordinary T3 thread you can open, read and interrupt.

@@ -14,7 +14,7 @@ node bin/t3-fleet-gateway.js --help    # CLI
 node scripts/e2e-live.ts               # live check against a running gateway and real T3; never in tests (docs/operations.md)
 ```
 
-No build step: Node 24+ runs `.ts` directly. There is no linter or formatter configured; match the surrounding style (2 spaces, single quotes, semicolons, ~140-column lines).
+CI (`.github/workflows/check.yml`) runs `npm run check` on Node 24 and 26 (Linux) and 26 (macOS); `main` blocks force-pushes and deletion, and pull requests need CI green. No build step: Node 24+ runs `.ts` directly. There is no linter or formatter configured; match the surrounding style (2 spaces, single quotes, semicolons, ~140-column lines).
 
 ## Entrypoints
 
