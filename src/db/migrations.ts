@@ -223,7 +223,35 @@ ALTER TABLE jobs ADD COLUMN delegated_untracked_run_id TEXT;
 ALTER TABLE jobs ADD COLUMN delegated_ended_at INTEGER;
 `,
   },
+  {
+    version: 6,
+    name: 'excerpt truncated',
+    // latest_message_truncated: 1 when latest_message_excerpt stops short of the worker's message.
+    // Existing excerpts are marked from their length (see addExcerptTruncated).
+    run: addExcerptTruncated,
+  },
 ];
+
+/**
+ * The excerpt bound when migration 6 was written: 2,000 UTF-16 code units, the unit JavaScript string
+ * lengths and T3's `maxCharsPerItem` count. Fixed here so the migration never changes with the code.
+ */
+const V6_EXCERPT_CHARS = 2000;
+
+/**
+ * Migration 6: add `latest_message_truncated`. Excerpts stored before it carry no flag, so one of
+ * 1,999 or 2,000 code units (T3 may stop one short to keep a surrogate pair whole) is taken as cut:
+ * a message of exactly that length is flagged too, which at worst makes an agent read it in full.
+ */
+function addExcerptTruncated(db: DatabaseSync): void {
+  db.exec('ALTER TABLE jobs ADD COLUMN latest_message_truncated INTEGER NOT NULL DEFAULT 0;');
+  const rows = db.prepare('SELECT id, latest_message_excerpt FROM jobs WHERE latest_message_excerpt IS NOT NULL').all() as {
+    id: string;
+    latest_message_excerpt: string;
+  }[];
+  const mark = db.prepare('UPDATE jobs SET latest_message_truncated = 1 WHERE id = ?');
+  for (const row of rows) if (row.latest_message_excerpt.length >= V6_EXCERPT_CHARS - 1) mark.run(row.id);
+}
 
 const JOBS_V2_TABLE = `
 CREATE TABLE jobs_v2 (

@@ -857,16 +857,20 @@ export class FakeT3 {
   /**
    * T3's two views over the same positions: `messages` (the default) returns only user messages,
    * assistant messages and proposed plans, skipping everything else; `activity` returns every item.
-   * `nextPosition` is the last returned item's position either way.
+   * `nextPosition` is the last returned item's position either way. With `itemId`, as a live T3 does,
+   * the page is that one item (none when the thread has no such item), its text from `textOffset`.
    */
   #read(input: z.output<typeof readInput>): Record<string, unknown> {
     const thread = this.#thread(input.threadId);
     const after = input.afterPosition ?? -1;
     const limit = input.limit ?? 50;
     const inView = (input.view ?? 'messages') === 'activity' ? () => true : (item: FakeItem) => MESSAGE_VIEW_TYPES.has(item.type);
-    const remaining = thread.items.filter((item) => item.position > after && inView(item));
+    const remaining = thread.items.filter((item) =>
+      input.itemId != null ? item.itemId === input.itemId && inView(item) : item.position > after && inView(item),
+    );
     const page = remaining.slice(0, limit);
     const maxChars = input.maxCharsPerItem ?? 4000;
+    const offset = input.itemId != null ? (input.textOffset ?? 0) : 0;
     const active = this.#activeRun(thread);
     return {
       thread: {
@@ -886,9 +890,9 @@ export class FakeT3 {
         visibility: 'local',
         sourceThreadId: thread.threadId,
         title: item.title ?? null,
-        text: item.text.slice(0, maxChars),
-        textTruncated: item.text.length > maxChars,
-        nextTextOffset: item.text.length > maxChars ? maxChars : null,
+        text: item.text.slice(offset, offset + maxChars),
+        textTruncated: item.text.length > offset + maxChars,
+        nextTextOffset: item.text.length > offset + maxChars ? offset + maxChars : null,
       })),
       nextPosition: page.at(-1)?.position ?? null,
       hasMore: remaining.length > page.length,

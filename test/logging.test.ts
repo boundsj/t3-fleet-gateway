@@ -80,6 +80,7 @@ test('no task text, message, question, answer or worker output ever appears in t
   await agent.call('work_start', { project: 'pilot', task: `${content.task} again`, requestId: 'log-3' });
   await tick();
   await agent.call('work_feed', {});
+  await agent.call('work_messages', { jobId: job.jobId, limit: 5 });
   await agent.call('work_cancel', { jobId: job.jobId });
 
   assert.ok(gw.logs.some((line) => line.includes('"event":"job.state_changed"')));

@@ -24,6 +24,8 @@ export interface Job {
   lastRunId: string | null;
   pendingRequestIds: string[];
   latestMessageExcerpt: string | null;
+  /** The excerpt stops short of the worker's message (T3 cut it, or it is longer than the excerpt bound). */
+  latestMessageTruncated: boolean;
   latestActivityAt: number | null;
   /** The `afterPosition` for the next incremental `t3_thread_read` of the messages view; null reads from the start. */
   readPosition: number | null;
@@ -98,6 +100,7 @@ export type JobChanges = Partial<
     | 'lastRunId'
     | 'pendingRequestIds'
     | 'latestMessageExcerpt'
+    | 'latestMessageTruncated'
     | 'latestActivityAt'
     | 'readPosition'
     | 'activityPosition'
@@ -120,6 +123,7 @@ const COLUMNS: Record<keyof JobChanges, string> = {
   lastRunId: 'last_run_id',
   pendingRequestIds: 'pending_request_ids',
   latestMessageExcerpt: 'latest_message_excerpt',
+  latestMessageTruncated: 'latest_message_truncated',
   latestActivityAt: 'latest_activity_at',
   readPosition: 'read_position',
   activityPosition: 'activity_position',
@@ -151,6 +155,7 @@ interface JobRow {
   last_run_id: string | null;
   pending_request_ids: string;
   latest_message_excerpt: string | null;
+  latest_message_truncated: number;
   latest_activity_at: number | null;
   read_position: number | null;
   activity_position: number | null;
@@ -178,6 +183,13 @@ interface EventRow {
   detail: string | null;
   created_at: number;
 }
+
+/**
+ * The `mine` filter, with the agent's client id as its parameter: the jobs that agent started, and every
+ * standing job. No agent starts a standing job (the operator adopts it), but agents drive it as they do
+ * their own, so leaving it out would hide the coordinator an agent works with.
+ */
+const MINE = '(jobs.client_id = ? OR jobs.standing = 1)';
 
 /** Placeholders for TERMINAL_STATES in `state NOT IN (…)`. */
 const NOT_OPEN = TERMINAL_STATES.map(() => '?').join(', ');
@@ -223,6 +235,7 @@ function toJob(row: JobRow): Job {
     lastRunId: row.last_run_id,
     pendingRequestIds: parseIds(row.pending_request_ids),
     latestMessageExcerpt: row.latest_message_excerpt,
+    latestMessageTruncated: row.latest_message_truncated === 1,
     latestActivityAt: row.latest_activity_at,
     readPosition: row.read_position,
     activityPosition: row.activity_position,
@@ -256,6 +269,7 @@ function toEvent(row: EventRow): JobEvent {
 
 function columnValue(key: keyof JobChanges, value: JobChanges[keyof JobChanges]): string | number | null {
   if (key === 'pendingRequestIds' || key === 'delegatedWork') return JSON.stringify(value ?? []);
+  if (typeof value === 'boolean') return value ? 1 : 0;
   // T3 positions are integers; the STRICT INTEGER column refuses anything else.
   return (value ?? null) as string | number | null;
 }
@@ -304,6 +318,7 @@ export interface NewStandingJob {
   lastRunId: string | null;
   pendingRequestIds: string[];
   latestMessageExcerpt: string | null;
+  latestMessageTruncated: boolean;
   latestActivityAt: number | null;
   readPosition: number | null;
   activityPosition: number | null;
@@ -349,7 +364,7 @@ export class JobStore {
     return job;
   }
 
-  /** Jobs newest first, optionally filtered. */
+  /** Jobs newest first, optionally filtered. `clientId`: that agent's jobs and every standing job (MINE). */
   list(filter: { projectAlias?: string; states?: readonly JobState[]; clientId?: string; limit: number }): Job[] {
     const where: string[] = [];
     const params: (string | number)[] = [];
@@ -362,7 +377,7 @@ export class JobStore {
       params.push(...filter.states);
     }
     if (filter.clientId !== undefined) {
-      where.push('client_id = ?');
+      where.push(MINE);
       params.push(filter.clientId);
     }
     const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
@@ -475,8 +490,8 @@ export class JobStore {
           `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, t3_project_id, state, task, title, branch, runtime_mode,
              t3_thread_id, t3_thread_title, t3_thread_link, last_run_id, pending_request_ids, latest_message_excerpt, latest_activity_at,
              read_position, last_error_code, last_error_message, created_at, updated_at, state_changed_at, finished_at, standing, delegated_work,
-             activity_position, delegated_untracked, delegated_untracked_run_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+             activity_position, delegated_untracked, delegated_untracked_run_id, latest_message_truncated)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
         )
         .run(
           job.id,
@@ -507,6 +522,7 @@ export class JobStore {
           job.activityPosition,
           job.delegatedUntracked,
           job.delegatedUntrackedRunId,
+          job.latestMessageTruncated ? 1 : 0,
         );
       this.#insertEvent(job.id, 'created', null, job.state, { reason: 'adopted' }, now);
       this.#logger.info('job.adopted', { jobId: job.id, project: job.projectAlias, hostId: job.hostId, state: job.state });
@@ -574,9 +590,9 @@ export class JobStore {
     return rows.map(toEvent);
   }
 
-  /** Events after `cursor` (exclusive), oldest first, with their job's project and title. */
+  /** Events after `cursor` (exclusive), oldest first, with their job's project and title. `clientId`: see MINE. */
   eventsAfter(cursor: number, limit: number, clientId?: string): FeedEvent[] {
-    const mine = clientId === undefined ? '' : 'AND jobs.client_id = ?';
+    const mine = clientId === undefined ? '' : `AND ${MINE}`;
     const rows = this.#db
       .prepare(
         `SELECT job_events.*, jobs.project_alias, jobs.title FROM job_events JOIN jobs ON jobs.id = job_events.job_id
@@ -589,9 +605,10 @@ export class JobStore {
   /**
    * Jobs that want the agent's attention, most recent change first: blocked or unconfirmed jobs at any
    * age, and jobs that went idle or failed, or whose delegated work ended while idle, within `recentMs`.
+   * `clientId`: see MINE.
    */
   attention(now: number, recentMs: number, limit: number, clientId?: string): Job[] {
-    const mine = clientId === undefined ? '' : 'AND client_id = ?';
+    const mine = clientId === undefined ? '' : `AND ${MINE}`;
     const since = now - recentMs;
     const rows = this.#db
       .prepare(

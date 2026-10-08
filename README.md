@@ -12,7 +12,7 @@ The first supported agent is Grok Bot; any MCP client with OAuth support should 
 
 - The agent-facing MCP server (Streamable HTTP) with its own OAuth 2.1 authorization server: dynamic client registration, an approval page gated by one-time codes, PKCE, rotating refresh tokens.
 - Downstream connections to one or more T3 Code servers, with credentials the gateway obtains and renews itself through T3's pairing-code approval.
-- The job layer: `work_start`, `work_continue`, `work_respond`, `work_cancel`, `work_status`, `work_list` and `work_feed`, with a durable job ledger, a dispatcher that respects each host's concurrency limit, a watcher that follows every job's T3 thread, and reconciliation for launches whose outcome was lost.
+- The job layer: `work_start`, `work_continue`, `work_respond`, `work_cancel`, `work_status`, `work_messages`, `work_list` and `work_feed`, with a durable job ledger, a dispatcher that respects each host's concurrency limit, a watcher that follows every job's T3 thread, and reconciliation for launches whose outcome was lost.
 - Standing jobs: a T3 thread you already work in (a long-running coordinator, say) that you register for agents to drive with the same tools.
 - The `fleet_status` tool, the operator CLI, and deploy templates for launchd and systemd.
 

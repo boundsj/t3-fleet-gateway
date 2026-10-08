@@ -1,5 +1,6 @@
 import * as z from 'zod';
 import { MAX_DELEGATED_TASKS } from '../jobs/derive.ts';
+import { MAX_MESSAGE_TEXT_CHARS, MAX_MESSAGES } from '../jobs/messages.ts';
 import {
   ATTENTION_RECENT_MS,
   MAX_ANSWERS_CHARS,
@@ -87,6 +88,8 @@ const eventSchema = z.object({
   at: time,
 });
 
+const positionInput = z.union([z.string().regex(/^\d{1,15}$/), z.int().min(0)]);
+
 const errorSchema = z.object({ code: z.string(), message: z.string() });
 
 const questionSchema = z.object({
@@ -104,10 +107,21 @@ const jobDetailSchema = jobSchema.extend({
     .describe('Questions the worker is waiting on; answer with work_respond'),
   waitingForApproval: z.boolean().describe('Blocked on a permission approval that only the operator can give in T3'),
   latestMessageExcerpt: z.string().nullable().describe("The start of the worker's latest message, bounded"),
+  excerptTruncated: z.boolean().describe('The excerpt stops short of the message: read it in full with work_messages'),
   latestActivityAt: nullableTime,
   hostUnreachableSince: nullableTime.describe('Set while the gateway cannot reach the host; the job state is kept'),
   lastError: errorSchema.nullable(),
   recentEvents: z.array(eventSchema),
+});
+
+const messageSchema = z.object({
+  position: z.int().describe('Position in the thread; pass it as before or after to page from this message'),
+  type: z.string().describe('assistant_message or proposed_plan'),
+  status: z.string().describe('pending or running: still being written, read it again later'),
+  updatedAt: z.string(),
+  text: z.string(),
+  textTruncated: z.boolean().describe('text is cut at maxChars'),
+  length: z.int().nullable().describe('The full length in characters when text is all of it; null when it is cut'),
 });
 
 export type JobView = z.infer<typeof jobSchema>;
@@ -195,7 +209,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     inputSchema: z.object({
       project: z.string().min(1).max(64).optional().describe('Only jobs in this project alias'),
       states: z.array(z.enum(JOB_STATES)).max(JOB_STATES.length).optional().describe('Only jobs in these states'),
-      mine: z.boolean().optional().describe('Only jobs started by this agent'),
+      mine: z.boolean().optional().describe('Only jobs started by this agent, plus standing jobs (which every agent drives)'),
       limit: z.int().min(1).max(MAX_LIST_LIMIT).optional().describe(`Default 20, at most ${MAX_LIST_LIMIT}`),
     }),
     outputSchema: z.object({ jobs: z.array(jobSchema) }),
@@ -213,7 +227,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     description:
       "Show one job in detail: state and what it means, the T3 thread, branch, timestamps, the worker's pending questions, " +
       "whether it waits for an operator approval, an excerpt of the worker's latest message (its own reply, never the summaries " +
-      'of work it delegated), whether it waits on work it delegated (waitingOnDelegatedWork, delegatedTasks, ' +
+      'of work it delegated; excerptTruncated true means it is cut short: read it in full with work_messages), whether it waits on work it delegated (waitingOnDelegatedWork, delegatedTasks, ' +
       'delegatedTasksUntracked), host reachability, the last error and recent events. Use it when work_feed reports a change ' +
       'on a job, before deciding to continue, respond or cancel: if waitingOnDelegatedWork is true, send nothing and wait for ' +
       'its next turn; the flag wins over the reply text when they disagree. ' +
@@ -231,6 +245,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
         pendingRequests: detail.pendingRequests,
         waitingForApproval: detail.waitingForApproval,
         latestMessageExcerpt: job.latestMessageExcerpt,
+        excerptTruncated: job.latestMessageExcerpt !== null && job.latestMessageTruncated,
         latestActivityAt: job.latestActivityAt === null ? null : isoTime(job.latestActivityAt),
         hostUnreachableSince: job.hostUnreachableSince === null ? null : isoTime(job.hostUnreachableSince),
         lastError: job.lastErrorCode === null ? null : { code: job.lastErrorCode, message: job.lastErrorMessage ?? '' },
@@ -247,8 +262,65 @@ export function workTools(jobs: JobService): GatewayTool[] {
         lines.push(DELEGATED_ENDED);
       }
       if (view.lastError) lines.push(`Last error: ${view.lastError.code}`);
-      if (view.latestMessageExcerpt) lines.push(`Latest worker message (excerpt):\n${view.latestMessageExcerpt}`);
+      if (view.latestMessageExcerpt) {
+        const cut = view.excerptTruncated ? '; it is cut short, read it in full with work_messages' : '';
+        lines.push(`Latest worker message (excerpt${cut}):\n${view.latestMessageExcerpt}`);
+      }
       return { structured: view, summary: lines.join('\n') };
+    },
+  });
+
+  const workMessages = defineTool({
+    name: 'work_messages',
+    title: 'Read worker messages',
+    description:
+      "Read a job's worker messages in full, live from T3: the worker's own replies (assistant messages and proposed plans), " +
+      'never the messages sent to it, its tool activity or the summaries of work it delegated. Use it to read a reply when ' +
+      'work_status shows excerptTruncated true, after work_feed reports a finished turn, or to read earlier replies. Without ' +
+      `before or after it returns the latest messages (limit, default 1, at most ${MAX_MESSAGES}), oldest first. Page back with ` +
+      'before set to the returned earlier; read newer messages with after set to the returned later (hasMore: more wait in the ' +
+      `direction you read). Each message has textTruncated and length: text is cut at maxChars (default and at most ` +
+      `${MAX_MESSAGE_TEXT_CHARS}); length is the full length, null when cut. A message with status pending or running is still ` +
+      'being written: later stops before it, so reading on with after returns it again once finished. Read-only.',
+    scope: READ_SCOPE,
+    readOnly: true,
+    inputSchema: z.object({
+      jobId: jobIdInput,
+      before: positionInput.optional().describe('Only messages before this position (exclusive): earlier from a previous call'),
+      after: positionInput.optional().describe('Only messages after this position (exclusive): later from a previous call'),
+      limit: z.int().min(1).max(MAX_MESSAGES).optional().describe(`Messages to return, default 1, at most ${MAX_MESSAGES}`),
+      maxChars: z
+        .int()
+        .min(1)
+        .max(MAX_MESSAGE_TEXT_CHARS)
+        .optional()
+        .describe(`Characters of text per message, default and at most ${MAX_MESSAGE_TEXT_CHARS}`),
+    }),
+    outputSchema: z.object({
+      job: jobSchema,
+      messages: z.array(messageSchema).describe('Oldest first'),
+      earlier: z.int().nullable().describe('Pass as before for older messages; null when there are none'),
+      later: z.int().nullable().describe('Pass as after for newer messages'),
+      hasMore: z.boolean().describe('More messages wait in the direction you read: older ones, or newer ones with after'),
+    }),
+    async run(input, context) {
+      const { job, page } = await jobs.messages(input.jobId, {
+        before: input.before === undefined ? undefined : Number(input.before),
+        after: input.after === undefined ? undefined : Number(input.after),
+        limit: input.limit ?? 1,
+        maxChars: input.maxChars ?? MAX_MESSAGE_TEXT_CHARS,
+      });
+      const view = jobView(job, context);
+      const messages = page.messages.map(({ itemId: _itemId, ...message }) => message);
+      const lines = [
+        `${describeJob(view)}: ${messages.length} worker message(s), oldest first; earlier ${page.earlier ?? 'none'}, later ${page.later ?? 'none'}` +
+          `${page.hasMore ? ', more waiting' : ''}.`,
+        ...messages.map((message) => {
+          const size = message.length === null ? `cut at ${message.text.length} characters` : `${message.length} characters`;
+          return `#${message.position} ${message.type} (${message.status}, ${size}):\n${message.text}`;
+        }),
+      ];
+      return { structured: { job: view, messages, earlier: page.earlier, later: page.later, hasMore: page.hasMore }, summary: lines.join('\n\n') };
     },
   });
 
@@ -280,7 +352,10 @@ export function workTools(jobs: JobService): GatewayTool[] {
         .optional()
         .describe('nextCursor from your previous work_feed call; omit to start from the beginning'),
       limit: z.int().min(1).max(MAX_FEED_LIMIT).optional().describe(`Events per page, default 50, at most ${MAX_FEED_LIMIT}`),
-      mine: z.boolean().optional().describe('Only events and jobs from work this agent started (this leaves out standing jobs, which no agent started)'),
+      mine: z
+        .boolean()
+        .optional()
+        .describe('Only events and jobs from work this agent started, plus standing jobs (which no agent starts but every agent drives)'),
     }),
     outputSchema: z.object({
       events: z.array(eventSchema.extend({ project: z.string(), title: z.string() })),
@@ -417,7 +492,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     },
   });
 
-  return [workStart, workContinue, workRespond, workCancel, workStatus, workList, workFeed];
+  return [workStart, workContinue, workRespond, workCancel, workStatus, workMessages, workList, workFeed];
 }
 
 const DELEGATED_ENDED =
@@ -452,10 +527,10 @@ function attentionReason(job: Job): string {
         );
       }
       if (job.delegatedEndedAt !== null) return DELEGATED_ENDED;
-      if (!job.standing) return 'Turn finished: review with work_status, then work_continue or work_cancel.';
+      if (!job.standing) return 'Turn finished: read the reply with work_messages (work_status has an excerpt), then work_continue or work_cancel.';
       const failed = job.lastErrorCode === 't3_run_failed' ? ' Its last run failed (see lastError).' : '';
       return (
-        `Standing job's turn ended:${failed} read its reply with work_status. Nothing it delegated is still running ` +
+        `Standing job's turn ended:${failed} read its reply with work_messages (work_status has an excerpt). Nothing it delegated is still running ` +
         '(waitingOnDelegatedWork is false, which wins over the reply text). Send work_continue when the reply asks for input ' +
         'or the work is done.'
       );

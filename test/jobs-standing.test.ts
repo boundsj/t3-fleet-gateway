@@ -5,7 +5,7 @@ import { describe, test } from 'node:test';
 import { runCli } from '../src/cli/main.ts';
 import { MINUTE } from '../src/time.ts';
 import type { FakeT3 } from './helpers/fakeT3.ts';
-import { assertNotLogged, jobState, startJob, startJobHarness, type Agent, type JobHarness } from './helpers/jobs.ts';
+import { assertNotLogged, connectAgent, jobState, startJob, startJobHarness, type Agent, type JobHarness } from './helpers/jobs.ts';
 import { tempDir } from './helpers/tmp.ts';
 
 interface JobView {
@@ -122,7 +122,7 @@ describe('standing jobs: adopt', () => {
     );
     assert.match(
       later.attention.find((entry) => entry.jobId === job.id)?.why ?? '',
-      /read its reply with work_status\. Nothing it delegated is still running \(waitingOnDelegatedWork is false, which wins over the reply text\)/,
+      /read its reply with work_messages \(work_status has an excerpt\)\. Nothing it delegated is still running \(waitingOnDelegatedWork is false, which wins over the reply text\)/,
     );
   });
 
@@ -159,6 +159,25 @@ describe('standing jobs: adopt', () => {
 });
 
 describe('standing jobs: driving them', () => {
+  test("mine includes standing jobs, and work_messages reads the thread's replies from before the adoption", async (t) => {
+    const harness = await startJobHarness(t);
+    const { fake, gw, agent, tick } = harness;
+    const { job } = await adopt(harness, coordinatorThread(fake));
+    const launched = await startJob(agent);
+    await tick();
+    const other = await connectAgent(t, gw, 'operate');
+    const feed = await other.call<FeedPage>('work_feed', { mine: true });
+    assert.deepEqual([...new Set(feed.events.map((event) => event.jobId))], [job.id], "the standing job, not another agent's job");
+    const listed = await other.call<{ jobs: JobView[] }>('work_list', { mine: true });
+    assert.deepEqual(listed.jobs.map((entry) => [entry.jobId, entry.startedByYou]), [[job.id, false]]);
+    const own = await agent.call<{ jobs: JobView[] }>('work_list', { mine: true });
+    assert.deepEqual(own.jobs.map((entry) => entry.jobId).sort(), [job.id, launched.jobId].sort());
+
+    const page = await other.call<{ messages: { text: string }[]; earlier: number | null }>('work_messages', { jobId: job.id, limit: 10 });
+    assert.deepEqual(page.messages.map((message) => message.text), ['Synthetic old reply 1', 'Synthetic old reply 2'], 'worker replies only');
+    assert.equal(page.earlier, null);
+  });
+
   test('work_continue sends to the thread, idempotent on requestId', async (t) => {
     const harness = await startJobHarness(t);
     const { fake, agent } = harness;

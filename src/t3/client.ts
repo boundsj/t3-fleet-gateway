@@ -189,11 +189,14 @@ export class T3Client {
    * One page of a thread's state and timeline. `afterPosition` continues from a previous `nextPosition`.
    * Callers name the view: `messages` returns user and assistant messages and proposed plans only,
    * `activity` every timeline item (delegated work, reasoning, tools, checkpoints); positions are shared.
+   * With `itemId`, T3 returns that one item (none if it has no such item), its text from `textOffset`.
    */
   readThread(input: {
     threadId: string;
     view: 'messages' | 'activity';
     afterPosition?: number | null;
+    itemId?: string;
+    textOffset?: number;
     limit?: number;
     runLimit?: number;
     maxCharsPerItem?: number;

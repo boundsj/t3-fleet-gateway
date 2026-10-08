@@ -452,7 +452,7 @@ export class JobEngine {
       activityPosition: seen.activityPosition,
       latestActivityAt: seen.activityAt,
       lastRunId: seen.lastRunId,
-      ...(seen.excerpt === undefined ? {} : { latestMessageExcerpt: seen.excerpt }),
+      ...(seen.excerpt === undefined ? {} : { latestMessageExcerpt: seen.excerpt, latestMessageTruncated: seen.excerptTruncated ?? false }),
       ...(seen.link === undefined ? {} : { threadLink: seen.link }),
       ...(seen.errorCode
         ? { lastErrorCode: seen.errorCode, lastErrorMessage: 'The T3 run failed. Open the thread in T3 for details.' }

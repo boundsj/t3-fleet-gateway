@@ -25,6 +25,7 @@ function job(overrides: Partial<Job> = {}): Job {
     lastRunId: 'run-1',
     pendingRequestIds: [],
     latestMessageExcerpt: null,
+    latestMessageTruncated: false,
     latestActivityAt: null,
     readPosition: null,
     activityPosition: null,

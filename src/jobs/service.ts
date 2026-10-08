@@ -11,6 +11,7 @@ import { HOUR, SECOND, type Clock } from '../time.ts';
 import { scanActivity } from './activity.ts';
 import { EXCERPT_CHARS, holdsReadPosition, isActiveStatus, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { newJobId } from './ids.ts';
+import { readWorkerMessages, type MessagePage, type MessageQuery } from './messages.ts';
 import { cancelRequestId } from './interrupt.ts';
 import { isTerminal, OPEN_STATES, type JobState } from './states.ts';
 import type { FeedEvent, Job, JobEvent, JobStore } from './store.ts';
@@ -235,6 +236,14 @@ export class JobService {
     };
   }
 
+  /** A page of the job thread's worker messages, read live from T3 (see messages.ts). */
+  async messages(jobId: string, query: MessageQuery): Promise<{ job: Job; page: MessagePage }> {
+    const job = this.store.require(jobId);
+    if (query.before !== undefined && query.after !== undefined) throw new GatewayError('invalid_argument', 'Pass before or after, not both.');
+    if (job.threadId === null) throw new GatewayError('job_state_conflict', `Job ${jobId} has no T3 thread yet (${job.state}), so it has no messages.`);
+    return { job, page: await readWorkerMessages(this.#registry.client(job.hostId), job.threadId, job.readPosition, query) };
+  }
+
   async #questions(hostId: string, threadId: string, requestId: string): Promise<PendingQuestion[] | null> {
     try {
       const request = await this.#registry.client(hostId).readPendingRequest(threadId, requestId, { timeoutMs: QUESTION_READ_TIMEOUT_MS });
@@ -319,6 +328,7 @@ export class JobService {
       lastRunId: seen.lastRunId,
       pendingRequestIds: seen.pendingRequestIds,
       latestMessageExcerpt: seen.excerpt ?? null,
+      latestMessageTruncated: seen.excerptTruncated ?? false,
       latestActivityAt: seen.activityAt,
       readPosition: seen.readPosition,
       activityPosition: seen.activityPosition,

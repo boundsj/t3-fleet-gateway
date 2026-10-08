@@ -126,6 +126,8 @@ export interface Observation {
   lastRunId: string | null;
   /** The newest settled worker message in this read, bounded; undefined when there is none. */
   excerpt?: string;
+  /** Set with `excerpt`: it stops short of the message (T3 cut the text, or it is longer than EXCERPT_CHARS). */
+  excerptTruncated?: boolean;
   activityAt: number | null;
   /** `afterPosition` for the next messages read: never past a worker message that may still change. */
   readPosition: number | null;
@@ -271,7 +273,7 @@ export function observe(job: ObservedJob, read: ThreadRead, pendingQuestionIds: 
     ...(errorCode ? { errorCode } : {}),
     pendingRequestIds: [...pendingQuestionIds],
     lastRunId,
-    ...(message?.text ? { excerpt: message.text.slice(0, EXCERPT_CHARS) } : {}),
+    ...(message?.text ? { excerpt: message.text.slice(0, EXCERPT_CHARS), excerptTruncated: message.textTruncated || message.text.length > EXCERPT_CHARS } : {}),
     activityAt: times.length > 0 ? Math.max(...times) : job.latestActivityAt,
     readPosition,
     activityPosition: activity?.nextPosition ?? job.activityPosition,

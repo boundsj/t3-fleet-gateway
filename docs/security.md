@@ -57,6 +57,7 @@ All state is in the data directory (default `~/.local/share/t3-fleet-gateway/`, 
 | T3 credentials, one per host | `gateway.db` `host_credentials` | **plain bearer tokens** (the gateway must present them) |
 | HMAC key | `gateway.key` | 32 random bytes |
 | Jobs: task text, thread titles and app links, the latest worker message excerpt (at most 2,000 characters), pending question ids | `gateway.db` `jobs` | plain, never logged |
+| Full worker messages (`work_messages`) | not stored: read from T3 when an agent asks, returned to agents with Read access, never logged | — |
 | Job events (state changes with gateway-generated reasons and codes; no content) | `gateway.db` `job_events` | plain, append-only |
 | Request ids of `work_start` and `work_continue` with an input hash | `gateway.db` `idempotency_keys` | SHA-256 of the input |
 

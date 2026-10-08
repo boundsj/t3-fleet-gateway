@@ -113,10 +113,13 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 5);
+    assert.equal(SCHEMA_VERSION, 6);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
-      after.map(({ standing, delegated_work, activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, ...rest }) => rest),
+      after.map(
+        ({ standing, delegated_work, activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, ...rest }) =>
+          rest,
+      ),
       before,
       'every row and column is copied as it was',
     );
@@ -208,7 +211,7 @@ CREATE TABLE jobs (
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
     const after = (db.prepare('SELECT * FROM jobs').all() as Record<string, unknown>[]).map(
-      ({ activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, ...rest }) => [activity_position, rest],
+      ({ activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, ...rest }) => [activity_position, rest],
     );
     assert.deepEqual(after, before.map((row) => [null, row]), 'existing jobs keep every column and have no activity position yet');
     const store = new JobStore(db, () => 1_000, silentLogger);
@@ -240,9 +243,9 @@ CREATE TABLE jobs (
 
     const db = openDatabase(path);
     t.after(() => db.close());
-    assert.equal(schemaVersion(db), 5);
+    assert.equal(schemaVersion(db), SCHEMA_VERSION);
     const after = (db.prepare('SELECT * FROM jobs').all() as Record<string, unknown>[]).map(
-      ({ delegated_untracked, delegated_untracked_run_id, delegated_ended_at, ...rest }) => [[delegated_untracked, delegated_untracked_run_id, delegated_ended_at], rest],
+      ({ delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, ...rest }) => [[delegated_untracked, delegated_untracked_run_id, delegated_ended_at], rest],
     );
     assert.deepEqual(after, before.map((row) => [[0, null, null], row]), 'existing jobs keep every column, with nothing untracked or ended');
     const store = new JobStore(db, () => 1_000, silentLogger);
@@ -251,6 +254,42 @@ CREATE TABLE jobs (
     store.update(job.id, { delegatedUntracked: 3, delegatedUntrackedRunId: 'run-2', delegatedEndedAt: 900 });
     const updated = store.require(job.id);
     assert.deepEqual([updated.delegatedUntracked, updated.delegatedUntrackedRunId, updated.delegatedEndedAt], [3, 'run-2', 900]);
+    const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
+    t.after(() => fresh.close());
+    const schema = (target: typeof db) => target.prepare("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'jobs' ORDER BY name").all();
+    assert.deepEqual(schema(db), schema(fresh), 'the same schema as a new database');
+  });
+
+  test('migration 6 adds the excerpt truncated flag to a version 5 database, marking excerpts at the old bound', (t) => {
+    const path = join(openDataDir(join(tempDir(t), 'data')).databasePath);
+    const v5 = new DatabaseSync(path);
+    v5.exec('PRAGMA foreign_keys = ON');
+    migrate(v5, MIGRATIONS.slice(0, 5));
+    assert.equal(schemaVersion(v5), 5);
+    const insert = v5.prepare(
+      `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode, t3_thread_id,
+         latest_message_excerpt, read_position, created_at, updated_at, state_changed_at, standing)
+       VALUES (?, 'operator', 'adopted', 'pilot', 'main', 'idle', '', 'Synthetic coordinator', '', '', ?, ?, 12, 1, 2, 3, 1)`,
+    );
+    insert.run('jobshort001', 'thread-1', 'Synthetic short reply');
+    insert.run('jobfull0001', 'thread-2', 'x'.repeat(2000));
+    insert.run('jobnear0001', 'thread-3', 'x'.repeat(1999));
+    insert.run('jobnone0001', 'thread-4', null);
+    v5.prepare("INSERT INTO job_events (job_id, type, to_state, created_at) VALUES ('jobfull0001', 'created', 'idle', 1)").run();
+    const before = v5.prepare('SELECT * FROM jobs ORDER BY rowid').all().map((row) => ({ ...row }));
+    v5.close();
+
+    const db = openDatabase(path);
+    t.after(() => db.close());
+    assert.equal(schemaVersion(db), 6);
+    const after = (db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[]).map(
+      ({ latest_message_truncated, ...rest }) => [latest_message_truncated, rest],
+    );
+    assert.deepEqual(after, before.map((row, index) => [[0, 1, 1, 0][index], row]), 'existing jobs keep every column; excerpts at the bound are cut');
+    const store = new JobStore(db, () => 1_000, silentLogger);
+    assert.deepEqual([store.require('jobshort001').latestMessageTruncated, store.require('jobfull0001').latestMessageTruncated], [false, true]);
+    store.update('jobshort001', { latestMessageExcerpt: 'Synthetic longer reply', latestMessageTruncated: true });
+    assert.equal(store.require('jobshort001').latestMessageTruncated, true);
     const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
     t.after(() => fresh.close());
     const schema = (target: typeof db) => target.prepare("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'jobs' ORDER BY name").all();
@@ -362,7 +401,7 @@ describe('job store', () => {
     const standing = {
       projectAlias: 'pilot', hostId: 'main', t3ProjectId: 'project-1', state: 'idle' as const, title: 'Synthetic coordinator', branch: '', runtimeMode: '',
       threadId: 'thread-1', threadTitle: 'Synthetic coordinator', threadLink: null, lastRunId: null, pendingRequestIds: [], latestMessageExcerpt: null,
-      latestActivityAt: null, readPosition: 3, activityPosition: 9, lastErrorCode: null, lastErrorMessage: null, delegatedWork: [],
+      latestMessageTruncated: false, latestActivityAt: null, readPosition: 3, activityPosition: 9, lastErrorCode: null, lastErrorMessage: null, delegatedWork: [],
       delegatedUntracked: 4, delegatedUntrackedRunId: 'run-1',
     };
     const first = store.adopt({ id: 'job1', ...standing });
@@ -391,7 +430,7 @@ describe('job store', () => {
       store.adopt({
         id, projectAlias: 'pilot', hostId: 'main', t3ProjectId: 'project-1', state: 'idle', title: 'Synthetic', branch: '', runtimeMode: '',
         threadId: `thread-${id}`, threadTitle: 'Synthetic', threadLink: null, lastRunId: null, pendingRequestIds: [], latestMessageExcerpt: null,
-        latestActivityAt: null, readPosition: null, activityPosition: null, lastErrorCode: null, lastErrorMessage: null, ...delegated,
+        latestMessageTruncated: false, latestActivityAt: null, readPosition: null, activityPosition: null, lastErrorCode: null, lastErrorMessage: null, ...delegated,
       });
       store.update(id, { delegatedEndedAt: 500 });
       assert.deepEqual(fields(id), ['idle', 1, 2, 'run-1', 500]);
@@ -401,7 +440,7 @@ describe('job store', () => {
     store.adopt({
       id: 'job4', projectAlias: 'pilot', hostId: 'main', t3ProjectId: 'project-1', state: 'idle', title: 'Synthetic', branch: '', runtimeMode: '',
       threadId: 'thread-job4', threadTitle: 'Synthetic', threadLink: null, lastRunId: null, pendingRequestIds: [], latestMessageExcerpt: null,
-      latestActivityAt: null, readPosition: null, activityPosition: null, lastErrorCode: null, lastErrorMessage: null, ...delegated,
+      latestMessageTruncated: false, latestActivityAt: null, readPosition: null, activityPosition: null, lastErrorCode: null, lastErrorMessage: null, ...delegated,
     });
     store.update('job4', { delegatedEndedAt: 500 });
     store.transition('job4', { from: ['idle'], to: 'idle', changes: { readPosition: 7 } });
