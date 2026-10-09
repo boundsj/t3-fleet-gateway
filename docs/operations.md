@@ -157,6 +157,24 @@ On `SIGINT` or `SIGTERM` the gateway stops accepting connections, finishes in-fl
 
 An uncaught exception or unhandled rejection in `serve` is logged as `process.fatal` (error name and code only), followed by the same graceful shutdown (bounded to 10 seconds), and the process exits `1` so the supervisor restarts it. One exception is ignored: Node 26.0's bundled HTTP client can throw `setTypeOfService EINVAL` outside the request when T3 resets a connection just as it is opened (T3 restarting, on macOS). That request fails like any other reset, and the gateway logs `process.transient_socket_error` and keeps running.
 
+### A t3 that follows T3's updates
+
+The service runs the pairing command (`t3 auth pairing create` by default) every time it renews a T3 credential (by default about every 25 days). T3 installs each version in its own directory under `~/.t3/runtime/versions/` and, when it updates itself, switches its own service to the new one. If `T3_BIN` (by default whatever `command -v t3` finds) is inside one of those directories, the gateway service's `PATH` keeps that version's directory: renewals go on running the old `t3` against the newer T3 server, and if that directory is ever removed, renewal fails with `pairing_command_failed` (shown by `hosts status`, `doctor` and `fleet_status`). The installer warns when `T3_BIN` is inside such a directory. A `t3` your shell finds through a symlink in a shared directory (such as `/opt/homebrew/bin`) is fine as long as T3's updates move the symlink.
+
+T3 has no stable `t3` path today. One way to get one is a small wrapper that runs the version T3's own service uses, saved as `~/.local/bin/t3`. It reads `activeVersion` from T3's internal `runtime/service-state.json`, so check it again if a T3 update changes that file:
+
+```sh
+#!/bin/sh
+# Run the T3 version that T3's service currently uses; keeps working after T3 updates itself.
+state="${T3CODE_HOME:-$HOME/.t3}/runtime/service-state.json"
+version=$(sed -n 's/.*"activeVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$state" 2>/dev/null)
+bin="${T3CODE_HOME:-$HOME/.t3}/runtime/versions/$version/t3"
+[ -n "$version" ] && [ -x "$bin" ] || { echo "t3 wrapper: no active T3 version found in $state" >&2; exit 1; }
+exec "$bin" "$@"
+```
+
+Make it executable (`chmod +x ~/.local/bin/t3`), check that `~/.local/bin/t3 --version` prints the version T3 runs, and install with `T3_BIN=$HOME/.local/bin/t3 deploy/launchd/install.sh`.
+
 ## Logs
 
 `serve` writes JSON lines to standard output (launchd: `~/Library/Logs/t3-fleet-gateway/gateway.log` by default; systemd: `journalctl --user -u t3-fleet-gateway`). Set `T3FG_LOG_LEVEL=debug` for more detail. Useful events:

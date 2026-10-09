@@ -2,6 +2,13 @@
 
 All notable changes are recorded here. The project follows [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## 0.1.1 (2026-10-09)
+
+### Added
+
+- `deploy/launchd/install.sh` warns when `T3_BIN` (by default `command -v t3`) is inside one T3 version's directory (`.../runtime/versions/<version>/`). After T3 updates itself, a service `PATH` holding that directory keeps running the old `t3` for credential renewal, and renewal fails with `pairing_command_failed` if the directory is removed.
+- docs/operations.md, "A t3 that follows T3's updates": why, and a wrapper that runs the version T3's service uses. The README's Setup section and the systemd unit point to it.
+
 ## 0.1.0 (2026-10-08)
 
 ### Added
