@@ -102,6 +102,7 @@ node bin/t3-fleet-gateway.js doctor               # check everything, including 
 
 - Point your tunnel at the gateway's listen address (default `127.0.0.1:3790`) so that `publicUrl` reaches it over HTTPS; `doctor`'s `public URL` check passes once it does. `node bin/t3-fleet-gateway.js serve` runs it in the foreground instead of as a service.
 - The service runs the code in its checkout directly, so give it a clone of its own rather than one you develop in, and deploy updates in the order in [docs/operations.md](docs/operations.md#run-as-a-service).
+- The service runs `t3` to renew its T3 credential. T3 keeps each version in its own directory and removes old ones after it updates itself, so if `command -v t3` points into `~/.t3/runtime/versions/`, give the installer a `t3` that follows T3's updates (`T3_BIN=...`); the installer warns about this. See [docs/operations.md](docs/operations.md#a-t3-that-follows-t3s-updates).
 - The package runs its TypeScript sources directly with Node's type stripping, so run it from a checkout (or `npm link` it). It is not published to npm.
 
 ### Connect an agent

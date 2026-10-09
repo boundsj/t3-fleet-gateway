@@ -83,6 +83,13 @@ node_major="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')"
 (( node_major >= 24 )) || die "Node.js 24 or newer is required (found $node_major)"
 [[ -f "$REPO_DIR/bin/t3-fleet-gateway.js" ]] || die "no gateway checkout at $REPO_DIR; set REPO_DIR"
 [[ -n "$T3_BIN" ]] || echo "install.sh: warning: t3 not found on PATH; set T3_BIN if your pairing command uses it" >&2
+# T3 installs each version in its own directory (~/.t3/runtime/versions/<version>/) and removes old ones
+# after it updates itself; a service PATH holding one of them loses `t3`, and with it credential renewal.
+if [[ "$T3_BIN" == */runtime/versions/* ]]; then
+  echo "install.sh: warning: T3_BIN ($T3_BIN) is inside one T3 version's directory, which T3 removes after it updates;" \
+    "the service then can no longer renew its T3 credential. Set T3_BIN to a t3 that follows T3's updates" \
+    "(see docs/operations.md, \"A t3 that follows T3's updates\")." >&2
+fi
 
 if [[ "${1:-}" == "--dry-run" ]]; then
   render
