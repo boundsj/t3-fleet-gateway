@@ -16,7 +16,7 @@ WorkingDirectory=/path/to/t3-fleet-gateway
 ExecStart=/usr/bin/env node /path/to/t3-fleet-gateway/bin/t3-fleet-gateway.js serve
 Environment=T3FG_CONFIG=%h/.config/t3-fleet-gateway/config.json
 Environment=T3FG_DATA_DIR=%h/.local/share/t3-fleet-gateway
-# The pairing command (for example `t3`) must be on this PATH, from a directory that survives T3's
+# The pairing command (for example `t3`) must be on this PATH, from a directory that follows T3's
 # self-updates rather than one version's directory (see docs/operations.md, "A t3 that follows T3's updates").
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 UMask=0077

@@ -102,7 +102,7 @@ describe('launchd installer', () => {
     assert.equal(existsSync(stub.plist), true, 'the plist is kept');
   });
 
-  test('warns when T3_BIN is inside one T3 version directory, which T3 removes after it updates', async (t) => {
+  test('warns when T3_BIN is inside one T3 version directory, which a T3 update leaves behind', async (t) => {
     const stub = stubs(t, { loadedPrints: 0, failingBootstraps: 0 });
     const pinned = await install({ ...stub.env, T3_BIN: '/home/someone/.t3/runtime/versions/0.0.1-example/t3' }, '--dry-run');
     assert.equal(pinned.code, 0, pinned.stderr);
