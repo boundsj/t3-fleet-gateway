@@ -20,6 +20,8 @@ export interface FakeQuestion {
   question: string;
   options: { label: string; description: string; value?: string | null }[];
   multiSelect?: boolean | null;
+  allowCustomAnswer?: boolean | null;
+  required?: boolean | null;
 }
 
 export interface FakeRun {
@@ -59,7 +61,7 @@ export interface FakeThread {
   branch: string | null;
   runs: FakeRun[];
   items: FakeItem[];
-  questions: Map<string, FakeQuestion[]>;
+  questions: Map<string, FakeQuestion[] | null>;
   approvalsPending: number;
   /** Settled threads are listed only when t3_thread_list is asked for them (`settled: true`). */
   settled: boolean;
@@ -663,7 +665,7 @@ export class FakeT3 {
     }));
     tool('t3_pending_request_read', pendingReadInput, (input) => {
       const questions = this.#thread(this.#target(input.threadId, 'threadId')).questions.get(input.requestId);
-      if (!questions) throw new FakeFailure('not_found', 'No such pending request.');
+      if (questions === undefined) throw new FakeFailure('not_found', 'No such pending request.');
       return { requestId: input.requestId, questions };
     });
     tool('t3_pending_request_respond', pendingRespondInput, (input) => {

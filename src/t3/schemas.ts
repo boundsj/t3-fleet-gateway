@@ -172,7 +172,7 @@ export const pendingRequestSchema = z.looseObject({
       allowCustomAnswer: z.boolean().nullable().optional(),
       required: z.boolean().nullable().optional(),
     }),
-  ),
+  ).nullable(),
 });
 export type PendingRequest = z.infer<typeof pendingRequestSchema>;
 

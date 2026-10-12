@@ -4,6 +4,7 @@ import type { Logger } from '../log.ts';
 import { T3Client } from '../t3/client.ts';
 import { obtainCredential, type PairingFlowOptions } from '../t3/pairing.ts';
 import { DAY, SECOND, type Clock } from '../time.ts';
+import { checkMintExecutable, preflightCommand, type CommandCheck } from './commandPreflight.ts';
 import type { CredentialStore, StoredCredential } from './credentials.ts';
 
 const HEALTH_TTL_MS = 30 * SECOND;
@@ -43,6 +44,7 @@ export interface HostRegistryOptions {
   renewWhenDaysLeft: number;
   /** Override the pairing command runner (tests). */
   runCommand?: PairingFlowOptions['runCommand'];
+  commandEnv?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -120,6 +122,21 @@ export class HostRegistry {
     }
   }
 
+  /** Diagnostics only: no pairing flow, registration or credential mutation. */
+  async preflight(id: string, options: { signal?: AbortSignal; serverVersion?: string | null } = {}): Promise<CommandCheck[]> {
+    const host = this.host(id);
+    let serverVersion = options.serverVersion;
+    if (serverVersion === undefined && host.mintPairingCodeProbe && this.credentialStatus(id).state !== 'missing' && !options.signal?.aborted) {
+      serverVersion = (await this.health(id)).t3Version;
+    }
+    return preflightCommand(host, {
+      ...options,
+      serverVersion,
+      env: this.#options.commandEnv ?? process.env,
+      ...(this.#options.runCommand ? { runCommand: this.#options.runCommand } : {}),
+    });
+  }
+
   /** Enroll (or re-enroll) a host through T3's pairing-code approval. Concurrent calls share one attempt. */
   enroll(id: string): Promise<EnrollResult> {
     const running = this.#enrolling.get(id);
@@ -140,6 +157,7 @@ export class HostRegistry {
         access: host.access,
         mintPairingCode: host.mintPairingCode,
         clock,
+        ...(this.#options.commandEnv ? { commandEnv: this.#options.commandEnv } : {}),
         ...(this.#options.runCommand ? { runCommand: this.#options.runCommand } : {}),
       });
       const probe = new T3Client({ hostId: id, t3Url: host.t3Url, token: () => obtained.accessToken });
@@ -170,6 +188,14 @@ export class HostRegistry {
     for (const host of this.#hosts.values()) {
       const status = this.credentialStatus(host.id);
       if (status.state !== 'renewal_due' && status.state !== 'expired') continue;
+      const failure = checkMintExecutable(host, this.#options.commandEnv ?? process.env).find((result) => result.level === 'fail');
+      if (failure) {
+        this.#options.store.recordRenewal(host.id, this.#options.clock(), {
+          ok: false, code: 'pairing_command_failed', message: failure.detail,
+        });
+        this.#options.logger.error('host.pairing_preflight', { hostId: host.id, checkCode: failure.code });
+        continue;
+      }
       this.#options.logger.info('host.renewal_due', { hostId: host.id, daysLeft: status.daysLeft });
       try {
         await this.enroll(host.id);

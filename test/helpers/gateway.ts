@@ -35,6 +35,8 @@ export async function startTestGateway(
     door?: FrontDoor;
     clock?: TestClock;
     jobEngine?: GatewayOptions['jobEngine'];
+    runCommand?: GatewayOptions['runCommand'];
+    commandEnv?: NodeJS.ProcessEnv;
   } = {},
 ): Promise<TestGateway> {
   const door = options.door ?? (await openFrontDoor(t));
@@ -57,6 +59,8 @@ export async function startTestGateway(
     port: 0,
     ...(options.tools ? { tools: options.tools } : {}),
     ...(options.jobEngine ? { jobEngine: options.jobEngine } : {}),
+    ...(options.runCommand ? { runCommand: options.runCommand } : {}),
+    ...(options.commandEnv ? { commandEnv: options.commandEnv } : {}),
   });
   door.target = started.port;
   const gateway: RunningGateway = {

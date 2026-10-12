@@ -4,7 +4,7 @@ import { openDatabase, type Database } from './db/database.ts';
 import { CredentialStore } from './hosts/credentials.ts';
 import { warnProjectsWithoutModel } from './hosts/projects.ts';
 import { HostRegistry, type HostRegistryOptions } from './hosts/registry.ts';
-import { startRenewalLoop } from './hosts/renewal.ts';
+import { startRenewalLoop, type RenewalLoop } from './hosts/renewal.ts';
 import { createRouter, listen } from './http/server.ts';
 import { JobEngine } from './jobs/engine.ts';
 import { JobService } from './jobs/service.ts';
@@ -41,6 +41,7 @@ export interface ServiceOptions {
   logger: Logger;
   clock?: Clock;
   runCommand?: HostRegistryOptions['runCommand'];
+  commandEnv?: NodeJS.ProcessEnv;
 }
 
 export interface Storage {
@@ -65,6 +66,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
     logger,
     renewWhenDaysLeft: config.renewal.renewWhenDaysLeft,
     ...(options.runCommand ? { runCommand: options.runCommand } : {}),
+    ...(options.commandEnv ? { commandEnv: options.commandEnv } : {}),
   });
   return {
     config,
@@ -127,7 +129,22 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   for (const host of config.hosts) {
     if (services.registry.credentialStatus(host.id).state === 'missing') logger.warn('host.not_enrolled', { hostId: host.id });
   }
-  const renewal = startRenewalLoop(services.registry, config.renewal.checkEveryMinutes * MINUTE, logger);
+  const commandCheck = new AbortController();
+  let renewal: RenewalLoop | undefined;
+  // Probes are bounded and abortable; neither startup nor shutdown waits for them. Renewal starts after preflight.
+  void Promise.all(config.hosts.map(async (host) => {
+    const checks = await services.registry.preflight(host.id, { signal: commandCheck.signal });
+    if (commandCheck.signal.aborted) return;
+    for (const check of checks) {
+      logger[check.level === 'fail' ? 'error' : check.level === 'warn' ? 'warn' : 'info']('host.pairing_preflight', {
+        hostId: host.id, checkCode: check.code,
+      });
+    }
+  })).then(() => {
+    if (!commandCheck.signal.aborted) renewal = startRenewalLoop(services.registry, config.renewal.checkEveryMinutes * MINUTE, logger);
+  }).catch(() => {
+    if (!commandCheck.signal.aborted) logger.error('host.pairing_preflight_failed');
+  });
   const engine = new JobEngine({
     config,
     store: services.jobs.store,
@@ -148,10 +165,11 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
     logger.info('gateway.stopping');
     // Not awaited: a call still in flight ends when the T3 clients close below.
     modelCheck.abort();
+    commandCheck.abort();
     await server.close();
     // The engine finishes its current tick; job state is already in the database.
     await engine.stop();
-    await renewal.stop();
+    await renewal?.stop();
     await mcp.close();
     await services.close();
     logger.info('gateway.stopped');

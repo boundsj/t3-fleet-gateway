@@ -25,7 +25,8 @@ export interface PairingFlowOptions {
   mintPairingCode: readonly string[];
   clock: Clock;
   /** Runs the mint command and returns its stdout. Replaceable in tests. */
-  runCommand?: (argv: readonly string[]) => Promise<string>;
+  runCommand?: (argv: readonly string[], options?: CommandOptions) => Promise<string>;
+  commandEnv?: NodeJS.ProcessEnv;
 }
 
 const registrationSchema = z.looseObject({ client_id: z.string().min(1) });
@@ -38,15 +39,30 @@ const tokenSchema = z.looseObject({
   token_type: z.string(),
 });
 
+export interface CommandOptions {
+  env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  maxBuffer?: number;
+}
+
 /** Run a command without a shell and return stdout. Output is never logged: it holds a pairing code. */
-export function runCommand(argv: readonly string[]): Promise<string> {
+export function runCommand(argv: readonly string[], options: CommandOptions = {}): Promise<string> {
   const [file, ...args] = argv;
   if (!file) return Promise.reject(new GatewayError('pairing_command_failed', 'mintPairingCode is empty'));
   return new Promise((resolve, reject) => {
-    execFile(file, args, { timeout: COMMAND_TIMEOUT_MS, maxBuffer: 64 * 1024, windowsHide: true }, (error, stdout) => {
+    execFile(file, args, {
+      timeout: options.timeoutMs ?? COMMAND_TIMEOUT_MS,
+      maxBuffer: options.maxBuffer ?? 64 * 1024,
+      windowsHide: true,
+      killSignal: options.signal ? 'SIGKILL' : 'SIGTERM',
+      ...(options.env ? { env: options.env } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+    }, (error, stdout) => {
       if (error) {
-        const exit = typeof error.code === 'number' ? `exit code ${error.code}` : (error.code ?? error.signal ?? 'failed');
-        reject(new GatewayError('pairing_command_failed', `Pairing command "${file}" failed (${exit}). Run it by hand to see why.`));
+        const exit = typeof error.code === 'number' ? `exit code ${error.code}`
+          : error.code === 'ENOENT' ? 'executable missing' : error.code === 'EACCES' ? 'not executable' : 'failed';
+        reject(new GatewayError('pairing_command_failed', `Configured command failed (${exit}). Run it by hand to see why.`));
         return;
       }
       resolve(stdout);
@@ -127,7 +143,7 @@ export async function obtainCredential(options: PairingFlowOptions): Promise<Obt
   const run = options.runCommand ?? runCommand;
   let pairingOutput: unknown;
   try {
-    pairingOutput = JSON.parse(await run(options.mintPairingCode));
+    pairingOutput = JSON.parse(await run(options.mintPairingCode, { ...(options.commandEnv ? { env: options.commandEnv } : {}) }));
   } catch (error) {
     if (error instanceof GatewayError) throw error;
     throw new GatewayError('pairing_command_failed', 'Pairing command did not print JSON. Include --json in mintPairingCode.');

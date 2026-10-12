@@ -23,7 +23,11 @@ export const MAX_ANSWERS_CHARS = 16_000;
 /** Idle and failed jobs stay in the feed's attention list this long after their last change. */
 export const ATTENTION_RECENT_MS = 24 * HOUR;
 const MAX_ATTENTION = 50;
-const MAX_QUESTION_READS = 5;
+export const MAX_QUESTION_READS = 5;
+export const MAX_QUESTIONS = 50;
+export const MAX_QUESTION_OPTIONS = 100;
+/** Whole requests only: never truncate an option or required question into an unsafe partial answer. */
+export const MAX_QUESTION_CHARS = 64_000;
 const QUESTION_READ_TIMEOUT_MS = 5 * SECOND;
 export const MAX_TITLE_CHARS = 80;
 export const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -108,14 +112,22 @@ export interface PendingQuestion {
   header: string;
   question: string;
   options: { label: string; description: string; value: string | null }[];
-  multiSelect: boolean;
+  multiSelect: boolean | null;
+  allowCustomAnswer: boolean | null;
+  required: boolean | null;
+}
+
+export interface QuestionRequest {
+  requestId: string;
+  questions: PendingQuestion[] | null;
+  questionsUnavailable: 'temporarily_unreadable' | 'read_limit' | 'too_large' | null;
 }
 
 export interface JobDetail {
   job: Job;
   recentEvents: JobEvent[];
   /** Questions the worker waits on. `questions` is null when they could not be read from T3. */
-  pendingRequests: { requestId: string; questions: PendingQuestion[] | null }[];
+  pendingRequests: QuestionRequest[];
   /** Blocked with no answerable question: a permission approval only the operator can give in T3. */
   waitingForApproval: boolean;
 }
@@ -220,13 +232,19 @@ export class JobService {
   }
 
   /** One job with its recent events and, read live from T3, the questions it waits on. */
-  async status(jobId: string): Promise<JobDetail> {
+  async status(jobId: string, pendingRequestId?: string): Promise<JobDetail> {
     const job = this.store.require(jobId);
+    if (pendingRequestId !== undefined && !job.pendingRequestIds.includes(pendingRequestId)) {
+      throw new GatewayError('not_found', 'That request is not pending on this job. Read work_status without pendingRequestId for the current list.');
+    }
     const pendingRequests = await Promise.all(
-      job.pendingRequestIds.map(async (requestId, index) => ({
-        requestId,
-        questions: index < MAX_QUESTION_READS && job.threadId !== null ? await this.#questions(job.hostId, job.threadId, requestId) : null,
-      })),
+      job.pendingRequestIds.map(async (requestId, index): Promise<QuestionRequest> => {
+        if (pendingRequestId !== undefined ? requestId !== pendingRequestId : index >= MAX_QUESTION_READS) {
+          return { requestId, questions: null, questionsUnavailable: 'read_limit' };
+        }
+        if (job.threadId === null) return { requestId, questions: null, questionsUnavailable: 'temporarily_unreadable' };
+        return this.#questions(job.hostId, job.threadId, requestId);
+      }),
     );
     return {
       job,
@@ -244,19 +262,27 @@ export class JobService {
     return { job, page: await readWorkerMessages(this.#registry.client(job.hostId), job.threadId, job.readPosition, query) };
   }
 
-  async #questions(hostId: string, threadId: string, requestId: string): Promise<PendingQuestion[] | null> {
+  async #questions(hostId: string, threadId: string, requestId: string): Promise<QuestionRequest> {
     try {
       const request = await this.#registry.client(hostId).readPendingRequest(threadId, requestId, { timeoutMs: QUESTION_READ_TIMEOUT_MS });
-      return request.questions.map((question) => ({
+      if (request.questions === null) return { requestId, questions: null, questionsUnavailable: 'temporarily_unreadable' };
+      const questions = request.questions.map((question) => ({
         id: question.id,
         header: question.header,
         question: question.question,
         options: question.options.map((option) => ({ label: option.label, description: option.description, value: option.value ?? null })),
-        multiSelect: question.multiSelect ?? false,
+        multiSelect: question.multiSelect ?? null,
+        allowCustomAnswer: question.allowCustomAnswer ?? null,
+        required: question.required ?? null,
       }));
+      if (questions.length > MAX_QUESTIONS || questions.some((question) => question.options.length > MAX_QUESTION_OPTIONS) ||
+          JSON.stringify(questions).length > MAX_QUESTION_CHARS) {
+        return { requestId, questions: null, questionsUnavailable: 'too_large' };
+      }
+      return { requestId, questions, questionsUnavailable: null };
     } catch (error) {
       this.#logger.debug('jobs.question_read_failed', { hostId, errorCode: describeError(error).code });
-      return null;
+      return { requestId, questions: null, questionsUnavailable: 'temporarily_unreadable' };
     }
   }
 

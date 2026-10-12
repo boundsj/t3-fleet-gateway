@@ -64,12 +64,18 @@ test('no task text, message, question, answer or worker output ever appears in t
     followUp: 'Synthetic-follow-up-91ac: now add tests',
     question: 'Synthetic-question-55e0: which parser?',
     answer: 'Synthetic-answer-c3d9',
+    header: 'Synthetic-question-header-12ca',
+    optionLabel: 'Synthetic-option-label-a2f3',
+    optionDescription: 'Synthetic-option-description-cde4',
+    optionValue: 'Synthetic-option-value-678f',
     excerpt: 'Synthetic-worker-output-a6f2: parser refactored',
   };
   const { job } = await agent.call<{ job: { jobId: string } }>('work_start', { project: 'pilot', task: content.task, title: content.title, requestId: 'log-1' });
   await tick();
   const { threadId } = fake.threadForJob(job.jobId);
-  const requestId = fake.askQuestion(threadId, [{ id: 'q', header: 'Which', question: content.question, options: [] }]);
+  const requestId = fake.askQuestion(threadId, [{ id: 'q', header: content.header, question: content.question,
+    options: [{ label: content.optionLabel, description: content.optionDescription, value: content.optionValue }],
+    allowCustomAnswer: true, required: true, multiSelect: false }]);
   await tick();
   await agent.call('work_status', { jobId: job.jobId });
   await agent.call('work_respond', { jobId: job.jobId, requestId, answers: { q: content.answer } });
@@ -85,4 +91,31 @@ test('no task text, message, question, answer or worker output ever appears in t
 
   assert.ok(gw.logs.some((line) => line.includes('"event":"job.state_changed"')));
   assertNotLogged(gw, [...Object.values(content), 'Synthetic-task-text', 'Synthetic-worker-output']);
+  const events = JSON.stringify(gw.services.db.prepare('SELECT * FROM job_events').all());
+  for (const value of Object.values(content)) assert.equal(events.includes(value), false, 'content leaked into events');
+  fake.failures.set('t3_pending_request_read', { code: 'unavailable', message: content.question + content.optionDescription });
+  // The cancelled job has no listed ids; use a second job to exercise the failed read path.
+  const second = await agent.call<{ job: { jobId: string } }>('work_start', { project: 'pilot', task: content.task, requestId: 'log-4' });
+  fake.failures.delete('t3_thread_launch');
+  await tick();
+  fake.askQuestion(fake.threadForJob(second.job.jobId).threadId, [{ id: 'q', header: content.header, question: content.question, options: [] }]);
+  await tick();
+  await agent.call('work_status', { jobId: second.job.jobId });
+  assert.ok(gw.logs.some((line) => line.includes('jobs.question_read_failed')));
+  assertNotLogged(gw, Object.values(content));
+});
+
+test('mint and probe stdout, stderr and argv never enter logs, returned diagnostics or renewal records', async (t) => {
+  const fake = await startFakeT3();
+  t.after(() => fake.close());
+  const secrets = ['Synthetic-command-output-849d', 'Synthetic-command-error-912c', 'Synthetic-command-argv-391a'];
+  const command = [process.execPath, '-e', `console.log(${JSON.stringify(secrets[0])}); console.error(${JSON.stringify(secrets[1])}); process.exit(9)`, secrets[2]!];
+  const gw = await startTestGateway(t, { config: { hosts: [{ id: 'main', t3Url: fake.url,
+    mintPairingCode: command, mintPairingCodeProbe: command }] } });
+  const checks = await gw.services.registry.preflight('main');
+  assert.ok(checks.some((check) => check.code === 'probe_failed'));
+  await assert.rejects(gw.services.registry.enroll('main'), { code: 'pairing_command_failed' });
+  assertNotLogged(gw, secrets);
+  const returned = JSON.stringify(checks) + JSON.stringify(gw.services.registry.credentialStatus('main'));
+  for (const secret of secrets) assert.equal(returned.includes(secret), false);
 });
