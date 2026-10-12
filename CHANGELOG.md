@@ -2,6 +2,21 @@
 
 All notable changes are recorded here. The project follows [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## 0.1.3 (2026-10-12)
+
+### Added
+
+- T3FG-5: offline `clients diagnose <id>` reports OAuth versus static bearer clients, usable access/refresh grants, expiry ranges, rotation/grace/supersession/replay states, and each family's revocation reason. Aggregate usability considers every family, while explicitly leaving operator/cloud route reachability and the connector's saved token unknown.
+- Separate successful MCP and refresh timestamps (append-only migration 7). Old mixed last-use data remains intact; new times start unknown. Completed authorized MCP HTTP 2xx exchanges are sampled once per minute; successful refresh pair issuance, including grace retries, is recorded transactionally on every success.
+- Synthetic SDK outage recovery regression: saved credentials and feed cursor survive ingress loss across access expiry, automatically refresh on reconnection, and resume without duplicate events or work. This recovery already passed on the pinned v0.1.2 implementation; the new diagnostic CLI was missing there.
+- Recovery instructions distinguish ingress, gateway authentication, downstream T3 credentials, and disabled connector routines. Installed SDK retry limits are documented; real Grok and Notion retry behavior remains unverified.
+
+### Changed
+
+- `clients list` labels OAuth families as `unrevoked` rather than inferring active authentication from their count; use `diagnose` for grant usability.
+
+T3FG-1 remains blocked on the monitoring decision. T3FG-3/full live QA remains deferred; no new live verification, deployment, or publishing is claimed.
+
 ## 0.1.2 (2026-10-12)
 
 ### Fixed

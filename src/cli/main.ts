@@ -1,5 +1,5 @@
 import { parseArgs } from 'node:util';
-import { loadConfig, resolvePaths, type GatewayConfig, type Paths } from '../config.ts';
+import { loadConfig, mcpResource, resolvePaths, type GatewayConfig, type Paths } from '../config.ts';
 import { describeError, GatewayError, isGatewayError } from '../errors.ts';
 import { openServices, openStorage, startGateway, type GatewayServices } from '../gateway.ts';
 import { MAX_TITLE_CHARS } from '../jobs/service.ts';
@@ -8,6 +8,7 @@ import type { Job } from '../jobs/store.ts';
 import { createLogger, isLogLevel, silentLogger, type Logger } from '../log.ts';
 import { ApprovalCodes, DEFAULT_APPROVAL_CODE_TTL, MAX_APPROVAL_CODE_TTL, MAX_FAILURES_PER_HOUR } from '../oauth/approvalCodes.ts';
 import { ClientStore, isTokenClient, MAX_CLIENT_NAME_LENGTH, MAX_REGISTRATIONS_PER_HOUR } from '../oauth/clients.ts';
+import { diagnoseClient } from '../oauth/diagnostics.ts';
 import { OPERATE_SCOPE, READ_SCOPE, scopesForChoice } from '../oauth/scopes.ts';
 import { NEVER_EXPIRES } from '../oauth/tokens.ts';
 import { FATAL_SHUTDOWN_MS, guardProcess } from '../processErrors.ts';
@@ -34,6 +35,7 @@ Commands:
   clients list              List registered agent clients
   clients token --name <name> [--access operate|read] [--ttl 1y|never]
                             Mint a bearer token for an agent that cannot sign in with OAuth
+  clients diagnose <id>      Diagnose stored grants and authentication recovery (offline)
   clients revoke <id>       Revoke a client and every token issued to it
   hosts enroll <id>         Obtain a T3 credential for a host via pairing-code approval
   hosts status              Show each host's credential and reachability
@@ -159,9 +161,10 @@ function clients(paths: Paths, io: CliIo, action: string | undefined, id: string
       const rows = list.map((client) => {
         const access = client.scopes.includes(OPERATE_SCOPE) ? 'operate' : client.scopes.includes(READ_SCOPE) ? 'read' : '-';
         const expired = client.tokenExpiresAt !== null && client.tokenExpiresAt <= now;
-        const status = client.revokedAt !== null ? 'revoked' : expired ? 'expired' : client.activeFamilies > 0 ? 'active' : 'pending';
+        const status = client.revokedAt !== null ? 'revoked' : expired ? 'expired'
+          : client.activeFamilies > 0 ? isTokenClient(client) ? 'active' : 'unrevoked' : 'pending';
         const signIn = !isTokenClient(client)
-          ? [...new Set(client.redirectUris.map((uri) => new URL(uri).origin))].join(' ')
+          ? `${[...new Set(client.redirectUris.map((uri) => new URL(uri).origin))].join(' ')} (${client.activeFamilies} unrevoked grants; diagnose for usability)`
           : client.tokenExpiresAt === NEVER_EXPIRES
             ? 'bearer token, never expires'
             : `bearer token, expires ${shortTime(client.tokenExpiresAt)}`;
@@ -170,14 +173,45 @@ function clients(paths: Paths, io: CliIo, action: string | undefined, id: string
       io.out(table(['ID', 'NAME', 'ACCESS', 'STATUS', 'CREATED', 'LAST USED', 'SIGN-IN'], rows));
       return 0;
     }
+    if (action === 'diagnose') {
+      if (!id) throw new UsageError('clients diagnose needs a client id (see clients list)');
+      const diagnostic = diagnoseClient(storage.db, systemClock, mcpResource(loadConfig(paths.configPath)), id);
+      if (!diagnostic) throw new GatewayError('not_found', `No client with id ${id}`);
+      const time = (value: number | null): string => value === null ? 'unknown (not observed; old data or never succeeded)'
+        : value === NEVER_EXPIRES ? 'never' : new Date(value).toISOString();
+      io.out(`Client: ${id}\nKind: ${diagnostic.kind}\nState: ${diagnostic.state}\nChecked: ${time(diagnostic.checkedAt)}`);
+      io.out(`Reachability: unknown (offline store read). Run: t3-fleet-gateway doctor`);
+      io.out('Doctor checks the operator route at check time, not the cloud connector route; it also checks downstream hosts separately.');
+      io.out(`Usable access grant: ${diagnostic.usableAccess}\nUsable refresh grant: ${diagnostic.usableRefresh}`);
+      io.out(`Client revoked at: ${diagnostic.revokedAt === null ? 'no' : time(diagnostic.revokedAt)}`);
+      io.out(`Last successful MCP: ${time(diagnostic.lastMcpSuccessAt)} (sampled at most once per minute)`);
+      io.out(`Last successful refresh: ${time(diagnostic.lastRefreshSuccessAt)} (pair issuance, including grace retry)`);
+      for (const family of diagnostic.families) {
+        const revokedAt = family.revokedAt === null ? 'no' : time(family.revokedAt);
+        const reason = family.revocationReason ?? (family.revokedAt === null ? 'none' : 'unknown');
+        io.out(`Grant ${family.id}: revoked at ${revokedAt}; reason ${reason}`);
+        for (const kind of ['access', 'refresh'] as const) {
+          if (family[kind].length === 0) io.out(`  ${kind}: none`);
+          for (const grant of family[kind]) {
+            io.out(`  ${kind}: ${grant.state}, count ${grant.count}, expires ${time(grant.earliestExpiresAt)} to ${time(grant.latestExpiresAt)}`);
+          }
+        }
+      }
+      io.out('These grants describe server capability; the gateway cannot know which token or sibling the connector saved.');
+      io.out(diagnostic.kind === 'bearer'
+        ? 'Static bearer clients have no refresh. Replace an expired or revoked bearer through clients token and the connector settings.'
+        : 'Preserve saved credentials and the feed cursor during connectivity failures. Retry after ingress returns; reauthorize only if saved refresh is rejected or expired.');
+      io.out('Inspect the connector routine and re-enable it if disabled. Longer token lifetimes do not restart a disabled routine.');
+      return 0;
+    }
     if (action === 'revoke') {
       if (!id) throw new UsageError('clients revoke needs a client id (see clients list)');
       const result = store.revoke(id);
       if (!result) throw new GatewayError('not_found', `No client with id ${id}`);
-      io.out(`Revoked client ${id} and ${result.families} active grant(s). Its tokens no longer work.`);
+      io.out(`Revoked client ${id} and ${result.families} unrevoked grant(s). Its tokens no longer work.`);
       return 0;
     }
-    throw new UsageError('Use: clients list | clients token --name <name> | clients revoke <id>');
+    throw new UsageError('Use: clients list | clients diagnose <id> | clients token --name <name> | clients revoke <id>');
   } finally {
     storage.db.close();
   }

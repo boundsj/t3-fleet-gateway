@@ -55,6 +55,7 @@ All state is in the data directory (default `~/.local/share/t3-fleet-gateway/`, 
 | --- | --- | --- |
 | Registered agent clients (name, redirect URIs, timestamps) | `gateway.db` | plain |
 | Approval codes | `gateway.db` | HMAC-SHA256, single use |
+| Client authentication success times | `gateway.db` | nullable timestamps, MCP sampled once per minute; old mixed usage is not backfilled |
 | Authorization codes, access tokens, refresh tokens | `gateway.db` | SHA-256 hashes |
 | T3 credentials, one per host | `gateway.db` `host_credentials` | **plain bearer tokens** (the gateway must present them) |
 | HMAC key | `gateway.key` | 32 random bytes |
@@ -64,6 +65,8 @@ All state is in the data directory (default `~/.local/share/t3-fleet-gateway/`, 
 | Request ids of `work_start` and `work_continue` with an input hash | `gateway.db` `idempotency_keys` | SHA-256 of the input |
 
 Back up the data directory as a secret. Anyone who can read it can call T3 with the stored credentials until they expire or you revoke them in T3.
+
+`clients diagnose` exposes only client/family ids, states, expiry ranges, revocation reasons and observed success timestamps; no credentials, tokens, hashes, task or message content. It reads stored capability without consuming/revoking tokens or starting downstream probes. A usable family does not prove the connector saved a valid sibling, and an offline store cannot prove reachability. Connectivity failures alone are not a reason to erase credentials or reauthorize; see [recovery](operations.md#authentication-and-outage-recovery).
 
 ## Logs
 

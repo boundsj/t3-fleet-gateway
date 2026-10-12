@@ -161,6 +161,24 @@ describe('cli', () => {
     assert.equal((await run(env, ['clients', 'revoke'])).code, 2);
   });
 
+  test('clients diagnose reports pending auth separately from unknown reachability without contacting hosts', async (t) => {
+    const env = await environment(t);
+    const storage = openStorage(env.dataDir);
+    const client = new ClientStore(storage.db, systemClock).register({ redirect_uris: ['https://agent.example.com/cb'] });
+    storage.db.close();
+    const result = await run(env, ['clients', 'diagnose', client.id]);
+    assert.equal(result.code, 0, result.err);
+    assert.match(result.out, /Kind: oauth/);
+    assert.match(result.out, /State: pending/);
+    assert.match(result.out, /Reachability: unknown/);
+    assert.match(result.out, /Last successful MCP: unknown/);
+    assert.match(result.out, /Last successful refresh: unknown/);
+    assert.match(result.out, /doctor/);
+    assert.doesNotMatch(result.out, /token_hash|access_token|refresh_token|https:\/\/agent/);
+    assert.equal((await run(env, ['clients', 'diagnose'])).code, 2);
+    assert.equal((await run(env, ['clients', 'diagnose', 'missing'])).code, 1);
+  });
+
   test('clients token mints a bearer token that works at /mcp until it is revoked', async (t) => {
     const env = await environment(t);
     for (const [args, message] of [
@@ -186,6 +204,12 @@ describe('cli', () => {
     const [, clientId = ''] = /^Created client (\S+) \("Synthetic notebook agent", operate access\)\. Its token expires \S+ \(in 365d\):$/m.exec(minted.out) ?? [];
     const token = minted.out.split('\n')[1] ?? '';
     assert.match(token, /^[\w-]{43}$/);
+    const diagnostic = await run(env, ['clients', 'diagnose', clientId]);
+    assert.equal(diagnostic.code, 0, diagnostic.err);
+    assert.match(diagnostic.out, /Kind: bearer\nState: active/);
+    assert.match(diagnostic.out, /Usable access grant: true\nUsable refresh grant: false/);
+    assert.match(diagnostic.out, /refresh: none/);
+    assert.ok(!diagnostic.out.includes(token));
     const reader = await run(env, ['clients', 'token', '--name', 'Synthetic reader', '--access', 'read', '--ttl', 'never']);
     assert.match(reader.out, /\("Synthetic reader", read access\)\. Its token never expires:/);
     const readToken = reader.out.split('\n')[1] ?? '';
@@ -211,6 +235,11 @@ describe('cli', () => {
       assert.equal((await initialize(readToken)).status, 200);
     });
     assert.equal(served.code, 0, served.err);
+    const revokedDiagnostic = await run(env, ['clients', 'diagnose', clientId]);
+    assert.match(revokedDiagnostic.out, /State: revoked/);
+    assert.match(revokedDiagnostic.out, /reason client_revoked/);
+    assert.match(revokedDiagnostic.out, /Last successful MCP: \d{4}-/);
+    assert.match(revokedDiagnostic.out, /Last successful refresh: unknown/);
     assert.equal(served.out.includes(token) || served.out.includes(readToken), false, 'tokens never reach the logs');
     assert.match((await run(env, ['clients', 'list'])).out, new RegExp(`${clientId}\\s+Synthetic notebook agent\\s+-\\s+revoked`));
   });

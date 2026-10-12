@@ -25,6 +25,7 @@ export interface OAuthClient {
 }
 
 export interface ClientSummary extends OAuthClient {
+  /** Historical name: counts unrevoked families only, never evidence of usable tokens. */
   activeFamilies: number;
   scopes: string[];
   /** An operator token client's token expiry (NEVER_EXPIRES when it has none); null for OAuth clients. */
@@ -195,6 +196,13 @@ export class ClientStore {
         .run(now, reason, id);
       return { families: Number(result.changes) };
     });
+  }
+
+  /** Completed authorized MCP HTTP 2xx exchanges, sampled at most once per minute (up to one minute behind). */
+  recordMcpSuccess(id: string): void {
+    const now = this.#clock();
+    this.#db.prepare(`UPDATE oauth_clients SET last_mcp_success_at = ?
+      WHERE id = ? AND (last_mcp_success_at IS NULL OR last_mcp_success_at <= ?)`).run(now, id, now - MINUTE);
   }
 
   /** Record use, at most once a minute per client to keep writes off the hot path. */

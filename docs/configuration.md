@@ -98,6 +98,8 @@ If you run a long-lived T3 thread that coordinates a project (it plans, delegate
 | `accessTtlSeconds` | `43200` (12 h) | 60 s to 7 days |
 | `refreshIdleTtlDays` | `90` | 1 to 365. A refresh token not used for this long expires; each use rotates it and restarts the clock. |
 
+OAuth TTLs govern gateway grants only; static bearer tokens from `clients token` use their own `--ttl` and have no refresh. Increasing these values cannot restore ingress or restart a disabled connector routine. Diagnose stored grants with `clients diagnose <client-id>` before changing TTLs; retain credentials and the saved feed cursor during outages. See [authentication and outage recovery](operations.md#authentication-and-outage-recovery).
+
 ### `renewal`
 
 | Field | Default | Meaning |

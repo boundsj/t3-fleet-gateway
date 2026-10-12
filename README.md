@@ -113,11 +113,21 @@ node bin/t3-fleet-gateway.js doctor               # check everything, including 
 
 An agent that can't sign in with OAuth and only takes a bearer token (Notion's custom MCP connections, for example) gets one from `node bin/t3-fleet-gateway.js clients token --name <name>` instead: Operate access, valid a year by default (`--access read`, `--ttl 90d` or `--ttl never` to change that); see [docs/operations.md](docs/operations.md#agents-that-only-take-a-bearer-token).
 
-`t3-fleet-gateway clients list` shows connected agents; `clients revoke <id>` disconnects one. If approvals or registrations are throttled (someone probing your URL), `pair` lifts an approval pause and `throttle reset` clears both limits; see [docs/operations.md](docs/operations.md#throttles).
+`t3-fleet-gateway clients list` shows registered agents (an unrevoked OAuth grant is not proof of usable saved credentials); `clients revoke <id>` disconnects one. If approvals or registrations are throttled (someone probing your URL), `pair` lifts an approval pause and `throttle reset` clears both limits; see [docs/operations.md](docs/operations.md#throttles).
+
+### Recover a disconnected agent
+
+```sh
+node bin/t3-fleet-gateway.js clients list
+node bin/t3-fleet-gateway.js clients diagnose <client-id>  # offline grants, expiries, revocation, separate success times
+node bin/t3-fleet-gateway.js doctor                      # operator-route public URL and separate downstream checks
+```
+
+A network outage is separate from token expiry. Keep the OAuth credentials and saved `work_feed.nextCursor`, restore ingress, then reconnect with those credentials: a usable saved refresh token can replace an expired access token without another approval. Resume `work_feed` after the saved cursor; reuse the same request id and input for any uncertain work mutation. Static bearer clients have no refresh; replace an expired/revoked token in the connector settings. Inspect and re-enable a disabled bot routine yourself: longer token lifetimes cannot restart it. Actual Grok/Notion retry thresholds remain unverified; [recovery instructions and tested SDK limits](docs/operations.md#authentication-and-outage-recovery) explain the evidence and next steps.
 
 ## Status
 
-**v0.1.** Confirmed live against a real T3: starting a job in its own worktree and branch, following it to idle with the worker's reply, continuing it, job links, cancelling a running job, driving an adopted coordinator thread with `work_continue`, and reading full replies with `work_messages`. Not yet confirmed live: answering questions, approvals, failed runs, and following a coordinator's delegated work end to end. The automated suite runs against a fake T3 built from T3's published tool schemas; [`scripts/e2e-live.ts`](scripts/e2e-live.ts) is the live check (see [docs/operations.md](docs/operations.md#live-end-to-end-check)).
+**v0.1.3.** T3FG-5 adds authentication recovery diagnostics and a synthetic saved-credential/feed-cursor outage test. T3FG-1 monitoring is blocked on an operator decision; T3FG-3/full live QA remains deferred. Confirmed live against a real T3: starting a job in its own worktree and branch, following it to idle with the worker's reply, continuing it, job links, cancelling a running job, driving an adopted coordinator thread with `work_continue`, and reading full replies with `work_messages`. Not yet confirmed live: answering questions, approvals, failed runs, and following a coordinator's delegated work end to end. The automated suite runs against a fake T3 built from T3's published tool schemas; [`scripts/e2e-live.ts`](scripts/e2e-live.ts) is the live check (see [docs/operations.md](docs/operations.md#live-end-to-end-check)).
 
 Known limits:
 
