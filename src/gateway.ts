@@ -132,18 +132,25 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   const commandCheck = new AbortController();
   let renewal: RenewalLoop | undefined;
   // Probes are bounded and abortable; neither startup nor shutdown waits for them. Renewal starts after preflight.
-  void Promise.all(config.hosts.map(async (host) => {
-    const checks = await services.registry.preflight(host.id, { signal: commandCheck.signal });
+  void Promise.allSettled(config.hosts.map((host) => services.registry.preflight(host.id, { signal: commandCheck.signal }))).then((results) => {
     if (commandCheck.signal.aborted) return;
-    for (const check of checks) {
-      logger[check.level === 'fail' ? 'error' : check.level === 'warn' ? 'warn' : 'info']('host.pairing_preflight', {
-        hostId: host.id, checkCode: check.code,
-      });
+    try {
+      for (const [index, result] of results.entries()) {
+        const hostId = config.hosts[index]!.id;
+        if (result.status === 'rejected') {
+          logger.error('host.pairing_preflight_failed', { hostId });
+          continue;
+        }
+        for (const check of result.value) {
+          logger[check.level === 'fail' ? 'error' : check.level === 'warn' ? 'warn' : 'info']('host.pairing_preflight', {
+            hostId, checkCode: check.code,
+          });
+        }
+      }
+    } finally {
+      // Unexpected diagnostic failures must not disable renewal. Logger errors still propagate.
+      if (!commandCheck.signal.aborted) renewal = startRenewalLoop(services.registry, config.renewal.checkEveryMinutes * MINUTE, logger);
     }
-  })).then(() => {
-    if (!commandCheck.signal.aborted) renewal = startRenewalLoop(services.registry, config.renewal.checkEveryMinutes * MINUTE, logger);
-  }).catch(() => {
-    if (!commandCheck.signal.aborted) logger.error('host.pairing_preflight_failed');
   });
   const engine = new JobEngine({
     config,

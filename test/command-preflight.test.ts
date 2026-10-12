@@ -186,6 +186,53 @@ test('startup preflight completes before due renewal; shutdown during its probe 
   assert.equal(fake.registeredClientNames.length, registrations, 'late probe completion did not start renewal');
 });
 
+test('unexpected preflight rejection still starts due renewal after all host checks settle', async (t) => {
+  const fake = await startFakeT3({ tokenLifetimeSeconds: 3 * 86400 });
+  t.after(() => fake.close());
+  const first = await startTestGateway(t, { config: { hosts: [{ id: 'main', t3Url: fake.url, mintPairingCode: fake.mintCommand() }] } });
+  await first.services.registry.enroll('main');
+  await first.gateway.close();
+  const registrations = fake.registeredClientNames.length;
+  const probeStarted = Promise.withResolvers<void>();
+  const finishProbe = Promise.withResolvers<string>();
+  const renewed = Promise.withResolvers<void>();
+  const gw = await startTestGateway(t, {
+    dataDir: first.dataDir, door: first.door, jobEngine: { autoStart: false },
+    config: { hosts: [
+      { id: 'main', t3Url: fake.url, mintPairingCode: fake.mintCommand() },
+      { id: 'other', t3Url: fake.url, mintPairingCode: [process.execPath],
+        mintPairingCodeProbe: [process.execPath, 'synthetic-non-mutating-probe'] },
+    ] },
+    tools: (services) => {
+      const preflight = services.registry.preflight.bind(services.registry);
+      // Inject an unexpected service-boundary rejection without making the logger sink throw.
+      t.mock.method(services.registry, 'preflight', async (id: string, options?: Parameters<typeof preflight>[1]) => {
+        if (id === 'main') throw new Error('Synthetic-preflight-secret-734a');
+        return preflight(id, options);
+      });
+      const renewDue = services.registry.renewDue.bind(services.registry);
+      t.mock.method(services.registry, 'renewDue', async () => { await renewDue(); renewed.resolve(); });
+      return [];
+    },
+    runCommand: async (argv, options) => {
+      if (argv[1] === 'synthetic-non-mutating-probe') {
+        probeStarted.resolve();
+        return finishProbe.promise;
+      }
+      return runCommand(argv, options);
+    },
+  });
+  await probeStarted.promise;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(fake.registeredClientNames.length, registrations, 'renewal waits for the other host preflight');
+  finishProbe.resolve('1.2.3');
+  assert.equal(await within(renewed.promise, 1000), true, 'unexpected preflight rejection must not disable automatic renewal');
+  assert.equal(fake.registeredClientNames.length, registrations + 1, 'the due credential was actually renewed');
+  assert.ok(gw.logs.some((line) => line.includes('host.pairing_preflight_failed')));
+  assert.ok(gw.logs.some((line) => line.includes('probe_succeeded')), 'other host diagnostics are preserved');
+  assert.doesNotMatch(gw.logs.join('\n'), /Synthetic-preflight-secret|synthetic-non-mutating-probe/);
+});
+
 // The child announces readiness only after installing its SIGTERM handler. A closed socket
 // proves it exited; deadlines bound event waits, rather than sleeping and guessing readiness.
 async function resistantProbe(t: TestContext): Promise<{ argv: string[]; ready: Promise<void>; closed: Promise<void> }> {

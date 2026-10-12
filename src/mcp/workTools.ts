@@ -154,7 +154,9 @@ function questionText(request: QuestionRequest): string[] {
     lines.push(`Question: ${JSON.stringify(question)}`);
     const select = question.multiSelect === true ? 'Selection: an array of option values (labels when value is null).'
       : question.multiSelect === false ? 'Selection: a single option value (label when value is null).'
-        : 'Selection rule unspecified by T3 (multiSelect is null).';
+        : 'Selection rule unspecified by T3 (multiSelect is null): follow explicit question wording. ' +
+          'Without instructions to select several, try a single listed value (label when value is null) as a conservative answer attempt, ' +
+          'not a T3 default.';
     const custom = question.allowCustomAnswer === true ? 'Custom answers allowed: you may supply your own text.'
       : question.allowCustomAnswer === false ? 'Custom answers forbidden: use the listed options.' : 'Custom answers: unspecified by T3.';
     const required = question.required === true ? 'Answer required: include this question id.'
@@ -302,7 +304,8 @@ export function workTools(jobs: JobService): GatewayTool[] {
       if (view.pendingRequests.length > 0) {
         lines.push(`Answer with work_respond using jobId ${JSON.stringify(view.jobId)}, the requestId and answers keyed by question id. ` +
           `At most ${MAX_QUESTIONS} answers, question ids at most 200 characters, answers JSON at most ${MAX_ANSWERS_CHARS} characters. ` +
-          'Use an option value, or its label when value is null. Do not guess unspecified rules; T3 validates answers.');
+          'Use an option value, or its label when value is null. Follow explicit question wording; unspecified flags alone do not block ' +
+          'an answer or require escalation. T3 validates answers; do not retry blindly if delivery is uncertain.');
         for (const request of view.pendingRequests) lines.push(...questionText(request));
       }
       if (view.waitingForApproval) lines.push('Waiting for an approval the operator must give in T3.');
