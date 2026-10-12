@@ -103,6 +103,16 @@ export function createMcpEndpoint(deps: McpEndpointDependencies): { route: Route
     const verified = authenticate(req, res);
     if (!verified) return;
     deps.clients.touch(verified.clientId);
+    res.once('finish', () => {
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        try {
+          deps.clients.recordMcpSuccess(verified.clientId);
+        } catch {
+          // Observability must not change the response or grant security, or crash the server after a response.
+          logger.warn('mcp.success_record_failed', { clientId: verified.clientId });
+        }
+      }
+    });
     const authInfo: AuthInfo = {
       token: '',
       clientId: verified.clientId,

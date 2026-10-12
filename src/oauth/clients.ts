@@ -25,6 +25,9 @@ export interface OAuthClient {
 }
 
 export interface ClientSummary extends OAuthClient {
+  /** All issued families, including revoked grants; zero means no completed authorization or operator token. */
+  totalFamilies: number;
+  /** Historical name: counts unrevoked families only, never evidence of usable tokens. */
   activeFamilies: number;
   scopes: string[];
   /** An operator token client's token expiry (NEVER_EXPIRES when it has none); null for OAuth clients. */
@@ -169,7 +172,7 @@ export class ClientStore {
   list(): ClientSummary[] {
     const rows = this.#db.prepare('SELECT * FROM oauth_clients ORDER BY created_at').all() as unknown as ClientRow[];
     const families = this.#db.prepare(
-      'SELECT scope FROM token_families WHERE client_id = ? AND revoked_at IS NULL',
+      'SELECT scope, revoked_at FROM token_families WHERE client_id = ?',
     );
     const tokenExpiry = this.#db.prepare(
       `SELECT MAX(a.expires_at) AS expires_at FROM access_tokens a JOIN token_families f ON f.id = a.family_id
@@ -177,10 +180,11 @@ export class ClientStore {
     );
     return rows.map((row) => {
       const client = fromRow(row);
-      const active = families.all(row.id) as { scope: string }[];
+      const all = families.all(row.id) as { scope: string; revoked_at: number | null }[];
+      const active = all.filter((family) => family.revoked_at === null);
       const scopes = [...new Set(active.flatMap((family) => family.scope.split(' ')))];
       const tokenExpiresAt = isTokenClient(client) ? ((tokenExpiry.get(row.id) as { expires_at: number | null }).expires_at ?? null) : null;
-      return { ...client, activeFamilies: active.length, scopes, tokenExpiresAt };
+      return { ...client, totalFamilies: all.length, activeFamilies: active.length, scopes, tokenExpiresAt };
     });
   }
 
@@ -195,6 +199,13 @@ export class ClientStore {
         .run(now, reason, id);
       return { families: Number(result.changes) };
     });
+  }
+
+  /** Completed authorized MCP HTTP 2xx exchanges, sampled at most once per minute (up to one minute behind). */
+  recordMcpSuccess(id: string): void {
+    const now = this.#clock();
+    this.#db.prepare(`UPDATE oauth_clients SET last_mcp_success_at = ?
+      WHERE id = ? AND (last_mcp_success_at IS NULL OR last_mcp_success_at <= ?)`).run(now, id, now - MINUTE);
   }
 
   /** Record use, at most once a minute per client to keep writes off the hot path. */

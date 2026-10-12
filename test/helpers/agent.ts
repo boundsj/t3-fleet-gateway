@@ -14,6 +14,7 @@ export class TestAgentProvider implements OAuthClientProvider {
   clientInfo: ClientInfo | undefined;
   savedTokens: ProviderTypes | undefined;
   callbackParams: URLSearchParams | undefined;
+  invalidations: string[] = [];
   #verifier = '';
   #discovery: DiscoveryState | undefined;
   readonly #approve: () => string;
@@ -68,6 +69,14 @@ export class TestAgentProvider implements OAuthClientProvider {
 
   discoveryState() {
     return this.#discovery;
+  }
+
+  invalidateCredentials(scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery'): void {
+    this.invalidations.push(scope);
+    if (scope === 'all' || scope === 'client') this.clientInfo = undefined;
+    if (scope === 'all' || scope === 'tokens') this.savedTokens = undefined;
+    if (scope === 'all' || scope === 'verifier') this.#verifier = '';
+    if (scope === 'all' || scope === 'discovery') this.#discovery = undefined;
   }
 
   async redirectToAuthorization(url: URL): Promise<void> {

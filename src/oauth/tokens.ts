@@ -56,9 +56,21 @@ interface RefreshRow {
   client_revoked_at: number | null;
 }
 
+/** Shared by grant diagnostics; inclusive grace boundary and child rotation must match refresh enforcement. */
+export function refreshIsReplay(row: { superseded_at: number | null; rotated_at: number | null }, now: number, childWasRotated: boolean): boolean {
+  return row.superseded_at !== null || (row.rotated_at !== null && (now - row.rotated_at > REFRESH_GRACE || childWasRotated));
+}
+
+export function accessIsUsable(row: {
+  revoked_at: number | null; family_revoked_at: number | null; client_revoked_at: number | null; expires_at: number; resource: string;
+}, now: number, resource: string): boolean {
+  return row.revoked_at === null && row.family_revoked_at === null && row.client_revoked_at === null
+    && row.expires_at > now && resourceMatches(row.resource, resource);
+}
+
 const hashToken = (token: string): string => sha256Hex(token);
 
-function resourceMatches(candidate: string, resource: string): boolean {
+export function resourceMatches(candidate: string, resource: string): boolean {
   return candidate.replace(/\/$/, '') === resource.replace(/\/$/, '');
 }
 
@@ -201,9 +213,7 @@ export class TokenService {
       if (row.family_revoked_at !== null || row.client_revoked_at !== null) {
         return { error: new OAuthError('invalid_grant', 'Refresh token has been revoked') };
       }
-      const replay =
-        row.superseded_at !== null ||
-        (row.rotated_at !== null && (now - row.rotated_at > REFRESH_GRACE || this.#childWasRotated(row.token_hash)));
+      const replay = refreshIsReplay(row, now, row.rotated_at !== null && this.#childWasRotated(row.token_hash));
       if (replay) {
         this.#revokeFamily(row.family_id, 'refresh_token_reuse', now);
         return {
@@ -240,6 +250,8 @@ export class TokenService {
         }
       }
       const response = this.#issuePair(row.family_id, scope, now, row.token_hash);
+      // Success is pair issuance in this transaction, including an accepted grace retry; never an attempted refresh.
+      this.#db.prepare('UPDATE oauth_clients SET last_refresh_success_at = ? WHERE id = ?').run(now, row.client_id);
       const event: TokenEvent = isRetry
         ? { type: 'refresh_retry', clientId: row.client_id, familyId: row.family_id }
         : { type: 'issued', clientId: row.client_id, familyId: row.family_id, grant: 'refresh_token' };
@@ -302,8 +314,7 @@ export class TokenService {
         }
       | undefined;
     if (!row) return undefined;
-    if (row.revoked_at !== null || row.family_revoked_at !== null || row.client_revoked_at !== null) return undefined;
-    if (row.expires_at <= this.#clock() || !resourceMatches(row.resource, this.#settings.resource)) return undefined;
+    if (!accessIsUsable(row, this.#clock(), this.#settings.resource)) return undefined;
     return {
       clientId: row.client_id,
       familyId: row.family_id,

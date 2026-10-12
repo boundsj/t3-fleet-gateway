@@ -12,6 +12,8 @@ export interface FrontDoor {
   port: number;
   /** The loopback port connections are forwarded to. */
   target: number | undefined;
+  /** Cut ingress, including pooled connections, while keeping the listening port. */
+  disconnect(): void;
 }
 
 export async function openFrontDoor(t: TestContext): Promise<FrontDoor> {
@@ -20,7 +22,13 @@ export async function openFrontDoor(t: TestContext): Promise<FrontDoor> {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
   };
-  const door: FrontDoor = { url: '', port: 0, target: undefined };
+  const door: FrontDoor = {
+    url: '', port: 0, target: undefined,
+    disconnect() {
+      door.target = undefined;
+      for (const socket of sockets) socket.destroy();
+    },
+  };
   const server = createServer((client) => {
     track(client);
     client.on('error', () => client.destroy());

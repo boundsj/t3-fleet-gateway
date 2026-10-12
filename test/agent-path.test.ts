@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { Client, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
 import { HOUR } from '../src/time.ts';
 import { TestAgentProvider } from './helpers/agent.ts';
+import { startFakeT3 } from './helpers/fakeT3.ts';
 import { startTestGateway } from './helpers/gateway.ts';
 import { startJobHarness } from './helpers/jobs.ts';
 
@@ -72,4 +73,78 @@ test('an SDK agent with an Operate grant starts work and follows it through work
   assert.deepEqual(feed.attention.map((job) => [job.jobId, job.state]), [[jobId, 'idle']]);
   const status = await call<{ latestMessageExcerpt: string }>('work_status', { jobId });
   assert.equal(status.latestMessageExcerpt, 'Synthetic agent-path result');
+});
+
+test('saved SDK credentials survive ingress loss across access expiry and resume the saved feed cursor', async (t) => {
+  const fake = await startFakeT3();
+  t.after(() => fake.close());
+  const gw = await startTestGateway(t, {
+    config: {
+      hosts: [{ id: 'main', t3Url: fake.url, mintPairingCode: fake.mintCommand() }],
+      projects: [{ alias: 'pilot', host: 'main', t3ProjectId: 'project-1' }],
+    },
+    jobEngine: { autoStart: false },
+  });
+  await gw.services.registry.enroll('main');
+  let approvals = 0;
+  const provider = new TestAgentProvider(() => { approvals++; return gw.mintApprovalCode(); }, 'operate');
+  const url = new URL(`${gw.baseUrl}/mcp`);
+  const first = new StreamableHTTPClientTransport(url, { authProvider: provider });
+  await assert.rejects(new Client({ name: 'agent', version: '0' }).connect(first), UnauthorizedError);
+  await first.finishAuth(provider.callbackParams ?? new URLSearchParams());
+  const client = new Client({ name: 'agent', version: '0' });
+  await client.connect(new StreamableHTTPClientTransport(url, { authProvider: provider }));
+  t.after(() => client.close());
+  const call = async <T>(agent: Client, name: string, args: Record<string, unknown> = {}): Promise<T> => {
+    const result = await agent.callTool({ name, arguments: args });
+    assert.notEqual(result.isError, true);
+    return result.structuredContent as T;
+  };
+  const input = { project: 'pilot', task: 'Synthetic outage recovery task', requestId: 'saved-start-1' };
+  const started = await call<{ job: { jobId: string }; created: boolean }>(client, 'work_start', input);
+  await gw.gateway.engine.tick();
+  type Feed = { events: { cursor: string; jobId: string; toState: string | null }[]; nextCursor: string };
+  const before = await call<Feed>(client, 'work_feed');
+  const cursor = before.nextCursor;
+  const saved = structuredClone({ clientInfo: provider.clientInfo, tokens: provider.savedTokens, discovery: provider.discoveryState() });
+  const clientId = saved.clientInfo?.client_id;
+  assert.ok(clientId);
+  gw.door.disconnect(); // Port stays held; a new request is reset only once its data arrives.
+  gw.clock.advance(13 * HOUR);
+  await assert.rejects(client.callTool({ name: 'work_feed', arguments: { cursor } }));
+  assert.deepEqual(provider.savedTokens, saved.tokens);
+  assert.deepEqual(provider.invalidations, []);
+  await client.close();
+  const restarted = new TestAgentProvider(() => { throw new Error('must not approve twice'); }, 'operate');
+  restarted.clientInfo = saved.clientInfo;
+  restarted.savedTokens = saved.tokens;
+  if (saved.discovery) restarted.saveDiscoveryState(saved.discovery);
+  const offline = new Client({ name: 'agent', version: '0' });
+  t.after(() => offline.close());
+  await assert.rejects(offline.connect(new StreamableHTTPClientTransport(url, { authProvider: restarted })));
+  assert.deepEqual(restarted.savedTokens, saved.tokens, 'network failure does not invalidate persisted credentials');
+  assert.deepEqual(restarted.clientInfo, saved.clientInfo);
+  assert.deepEqual(restarted.invalidations, [], 'network failure does not ask the provider to erase credentials');
+  assert.equal(cursor, before.nextCursor, 'persisted feed position survives the failed request');
+  fake.finishTurn(fake.threadForJob(started.job.jobId).threadId, 'Synthetic recovered reply');
+  await gw.gateway.engine.tick();
+  gw.door.target = gw.gateway.port;
+  const recovered = new Client({ name: 'agent', version: '0' });
+  t.after(() => recovered.close());
+  await recovered.connect(new StreamableHTTPClientTransport(url, { authProvider: restarted }));
+  assert.notEqual(restarted.savedTokens?.access_token, saved.tokens?.access_token, 'SDK refreshes automatically');
+  assert.equal(restarted.clientInfo?.client_id, clientId);
+  const after = await call<Feed>(recovered, 'work_feed', { cursor });
+  assert.ok(after.events.length > 0);
+  assert.ok(after.events.every((event) => !before.events.some((old) => old.cursor === event.cursor)), 'no replay of consumed events');
+  assert.deepEqual(after.events.filter((event) => event.toState).map((event) => event.toState), ['idle']);
+  assert.deepEqual((await call<Feed>(recovered, 'work_feed', { cursor: after.nextCursor })).events, []);
+  const retry = await call<{ job: { jobId: string }; created: boolean }>(recovered, 'work_start', input);
+  assert.equal(retry.created, false);
+  assert.equal(retry.job.jobId, started.job.jobId);
+  await gw.gateway.engine.tick();
+  assert.equal(fake.launches.length, 1);
+  assert.equal((gw.services.db.prepare('SELECT COUNT(*) AS n FROM jobs').get() as { n: number }).n, 1);
+  assert.equal(gw.services.clients.list().length, 1);
+  assert.equal(approvals, 1);
 });

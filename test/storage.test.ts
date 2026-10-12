@@ -113,7 +113,7 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 6);
+    assert.equal(SCHEMA_VERSION, 7);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
       after.map(
@@ -281,7 +281,7 @@ CREATE TABLE jobs (
 
     const db = openDatabase(path);
     t.after(() => db.close());
-    assert.equal(schemaVersion(db), 6);
+    assert.equal(schemaVersion(db), SCHEMA_VERSION);
     const after = (db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[]).map(
       ({ latest_message_truncated, ...rest }) => [latest_message_truncated, rest],
     );
@@ -294,6 +294,51 @@ CREATE TABLE jobs (
     t.after(() => fresh.close());
     const schema = (target: typeof db) => target.prepare("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'jobs' ORDER BY name").all();
     assert.deepEqual(schema(db), schema(fresh), 'the same schema as a new database');
+  });
+
+  test('migration 7 retains a populated version 6 database and leaves separate auth success times unknown', (t) => {
+    const path = openDataDir(join(tempDir(t), 'data')).databasePath;
+    const old = new DatabaseSync(path);
+    old.exec('PRAGMA foreign_keys = ON');
+    migrate(old, MIGRATIONS.slice(0, 6));
+    old.exec(`
+      INSERT INTO oauth_clients (id, name, redirect_uris, created_at, last_used_at) VALUES ('client-1', 'Synthetic agent', '[]', 1, 42);
+      INSERT INTO token_families (id, client_id, scope, resource, created_at, revoked_at, revoked_reason)
+        VALUES ('family-1', 'client-1', 'fleet:read', 'https://gateway.example.com/mcp', 1, 3, 'refresh_token_reuse');
+      INSERT INTO refresh_tokens (token_hash, family_id, scope, created_at, expires_at, rotated_at)
+        VALUES ('synthetic-refresh-hash', 'family-1', 'fleet:read', 1, 9000, 2);
+      INSERT INTO access_tokens (token_hash, family_id, refresh_token_hash, scope, created_at, expires_at)
+        VALUES ('synthetic-access-hash', 'family-1', 'synthetic-refresh-hash', 'fleet:read', 1, 1000);
+      INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode,
+        created_at, updated_at, state_changed_at, activity_position, latest_message_truncated)
+        VALUES ('job-1', 'client-1', 'request-1', 'pilot', 'main', 'idle', 'Synthetic task', 'Synthetic title', 'synthetic/branch', 'auto',
+          1, 2, 2, 7, 1);
+      INSERT INTO job_events (job_id, type, to_state, created_at) VALUES ('job-1', 'created', 'idle', 1);
+      INSERT INTO idempotency_keys (client_id, tool, request_id, input_hash, job_id, created_at)
+        VALUES ('client-1', 'work_start', 'request-1', 'synthetic-request-hash', 'job-1', 1);
+    `);
+    const tables = ['token_families', 'refresh_tokens', 'access_tokens', 'jobs', 'job_events', 'idempotency_keys'];
+    const clientsBefore = old.prepare('SELECT * FROM oauth_clients').all();
+    const before = tables.map((table) => old.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    old.close();
+    const db = openDatabase(path);
+    t.after(() => db.close());
+    assert.equal(schemaVersion(db), 7);
+    assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
+    const clients = db.prepare('SELECT * FROM oauth_clients').all().map(({ last_mcp_success_at, last_refresh_success_at, ...rest }) => {
+      assert.equal(last_mcp_success_at, null);
+      assert.equal(last_refresh_success_at, null);
+      return rest;
+    });
+    assert.deepEqual(clients, clientsBefore.map((row) => ({ ...row })), 'mixed last_used_at is retained, never fabricated into success');
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+    assert.equal((db.prepare('PRAGMA integrity_check').get() as { integrity_check: string }).integrity_check, 'ok');
+    assert.throws(() => db.prepare('DELETE FROM job_events').run(), /append-only/);
+    assert.throws(() => db.prepare("UPDATE job_events SET type = 'changed'").run(), /append-only/);
+    const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
+    t.after(() => fresh.close());
+    const schema = (target: typeof db) => target.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name").all();
+    assert.deepEqual(schema(db), schema(fresh));
   });
 
   test('migration 2 names a missing column it cannot fill and leaves the database at version 1', (t) => {

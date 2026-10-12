@@ -230,6 +230,13 @@ ALTER TABLE jobs ADD COLUMN delegated_ended_at INTEGER;
     // Existing excerpts are marked from their length (see addExcerptTruncated).
     run: addExcerptTruncated,
   },
+  {
+    version: 7,
+    name: 'client authentication success times',
+    // Old last_used_at mixes authentication attempts and token issuance; it cannot be backfilled honestly.
+    sql: `ALTER TABLE oauth_clients ADD COLUMN last_mcp_success_at INTEGER;
+          ALTER TABLE oauth_clients ADD COLUMN last_refresh_success_at INTEGER;`,
+  },
 ];
 
 /**
