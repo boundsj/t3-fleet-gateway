@@ -33,6 +33,15 @@ const FORBIDDEN_KEYS = new Set([
   'text',
   'prompt',
   'content',
+  'question',
+  'questions',
+  'options',
+  'answer',
+  'answers',
+  'argv',
+  'stdout',
+  'stderr',
+  'commandoutput',
 ]);
 
 function isForbiddenKey(key: string): boolean {

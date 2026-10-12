@@ -52,6 +52,8 @@ const hostSchema = z.strictObject({
   label: z.string().min(1).max(80).optional(),
   t3Url: originUrl('t3Url'),
   mintPairingCode: z.array(z.string().min(1)).min(1).default(DEFAULT_MINT_COMMAND),
+  /** Operator asserts this exact argv is non-mutating; never inferred from the mint command. */
+  mintPairingCodeProbe: z.array(z.string().min(1).max(4096)).min(1).max(32).optional(),
   access: z.enum(T3_ACCESS_LEVELS).default('auto'),
   maxConcurrentJobs: z.int().min(1).max(32).default(2),
   defaultModelSelection: modelSelectionSchema.nullable().default(null),

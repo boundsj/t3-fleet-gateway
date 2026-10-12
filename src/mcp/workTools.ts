@@ -7,6 +7,11 @@ import {
   MAX_MESSAGE_CHARS,
   MAX_TASK_CHARS,
   MAX_TITLE_CHARS,
+  MAX_QUESTION_READS,
+  MAX_QUESTIONS,
+  MAX_QUESTION_OPTIONS,
+  MAX_QUESTION_CHARS,
+  type QuestionRequest,
   REQUEST_ID_PATTERN,
   type JobService,
 } from '../jobs/service.ts';
@@ -97,13 +102,20 @@ const questionSchema = z.object({
   header: z.string(),
   question: z.string(),
   options: z.array(z.object({ label: z.string(), description: z.string(), value: z.string().nullable() })),
-  multiSelect: z.boolean(),
+  multiSelect: z.boolean().nullable().describe('null: T3 did not specify the selection rule'),
+  allowCustomAnswer: z.boolean().nullable().describe('null: T3 did not specify whether custom text is allowed'),
+  required: z.boolean().nullable().describe('null: T3 did not specify whether this answer is required'),
 });
 
 const jobDetailSchema = jobSchema.extend({
   stateMeaning: z.string(),
   pendingRequests: z
-    .array(z.object({ requestId: z.string(), questions: z.array(questionSchema).nullable().describe('null when T3 could not be asked just now') }))
+    .array(z.object({
+      requestId: z.string(),
+      questions: z.array(questionSchema).nullable(),
+      questionsUnavailable: z.enum(['temporarily_unreadable', 'read_limit', 'too_large']).nullable()
+        .describe('Why questions is null: retry, select pendingRequestId, or answer in T3 when too large'),
+    }))
     .describe('Questions the worker is waiting on; answer with work_respond'),
   waitingForApproval: z.boolean().describe('Blocked on a permission approval that only the operator can give in T3'),
   latestMessageExcerpt: z.string().nullable().describe("The start of the worker's latest message, bounded"),
@@ -123,6 +135,36 @@ const messageSchema = z.object({
   textTruncated: z.boolean().describe('text is cut at maxChars'),
   length: z.int().nullable().describe('The full length in characters when text is all of it; null when it is cut'),
 });
+
+/** JSON quoting keeps arbitrary worker text and option values unambiguous for text-only clients. */
+function questionText(request: QuestionRequest): string[] {
+  const lines = [`Pending request: ${JSON.stringify(request.requestId)}`];
+  if (request.questions === null) {
+    const reason = request.questionsUnavailable === 'read_limit'
+      ? 'Not read in this response (read limit). Call work_status with pendingRequestId set to this requestId.'
+      : request.questionsUnavailable === 'too_large'
+        ? `Question set exceeds ${MAX_QUESTIONS} questions, ${MAX_QUESTION_OPTIONS} options per question or ${MAX_QUESTION_CHARS} JSON characters. ` +
+          'No partial questions returned. Ask the operator to answer this request in T3.'
+        : 'Questions temporarily unreadable. Retry work_status; do not invent an answer.';
+    lines.push(reason);
+    return lines;
+  }
+  if (request.questions.length === 0) lines.push('T3 returned no questions. Recheck status before responding.');
+  for (const question of request.questions) {
+    lines.push(`Question: ${JSON.stringify(question)}`);
+    const select = question.multiSelect === true ? 'Selection: an array of option values (labels when value is null).'
+      : question.multiSelect === false ? 'Selection: a single option value (label when value is null).'
+        : 'Selection rule unspecified by T3 (multiSelect is null): follow explicit question wording. ' +
+          'Without instructions to select several, try a single listed value (label when value is null) as a conservative answer attempt, ' +
+          'not a T3 default.';
+    const custom = question.allowCustomAnswer === true ? 'Custom answers allowed: you may supply your own text.'
+      : question.allowCustomAnswer === false ? 'Custom answers forbidden: use the listed options.' : 'Custom answers: unspecified by T3.';
+    const required = question.required === true ? 'Answer required: include this question id.'
+      : question.required === false ? 'Answer optional: this question id may be omitted.' : 'Required: unspecified by T3.';
+    lines.push(`${select} ${custom} ${required}`);
+  }
+  return lines;
+}
 
 export type JobView = z.infer<typeof jobSchema>;
 export type JobDetailView = z.infer<typeof jobDetailSchema>;
@@ -231,13 +273,19 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'delegatedTasksUntracked), host reachability, the last error and recent events. Use it when work_feed reports a change ' +
       'on a job, before deciding to continue, respond or cancel: if waitingOnDelegatedWork is true, send nothing and wait for ' +
       'its next turn; the flag wins over the reply text when they disagree. ' +
+      `Reads at most ${MAX_QUESTION_READS} pending requests by default; pass pendingRequestId to read another. ` +
+      `Whole requests are bounded to ${MAX_QUESTIONS} questions, ${MAX_QUESTION_OPTIONS} options each and ${MAX_QUESTION_CHARS} JSON characters; ` +
+      'questionsUnavailable explains any null questions. Text includes the questions and answer rules. ' +
       `Read-only. States: ${STATE_GUIDE}`,
     scope: READ_SCOPE,
     readOnly: true,
-    inputSchema: z.object({ jobId: jobIdInput }),
+    inputSchema: z.object({
+      jobId: jobIdInput,
+      pendingRequestId: z.string().min(1).max(200).optional().describe('Read this pending request instead of the first five; other ids stay listed'),
+    }),
     outputSchema: jobDetailSchema,
     async run(input, context) {
-      const detail = await jobs.status(input.jobId);
+      const detail = await jobs.status(input.jobId, input.pendingRequestId);
       const { job } = detail;
       const view: JobDetailView = {
         ...jobView(job, context),
@@ -253,7 +301,13 @@ export function workTools(jobs: JobService): GatewayTool[] {
       };
       const lines = [describeJob(view), STATE_MEANINGS[job.state]];
       if (view.link) lines.push(`Open in T3: ${view.link}`);
-      if (view.pendingRequests.length > 0) lines.push(`Pending questions: ${view.pendingRequests.map((request) => request.requestId).join(', ')}`);
+      if (view.pendingRequests.length > 0) {
+        lines.push(`Answer with work_respond using jobId ${JSON.stringify(view.jobId)}, the requestId and answers keyed by question id. ` +
+          `At most ${MAX_QUESTIONS} answers, question ids at most 200 characters, answers JSON at most ${MAX_ANSWERS_CHARS} characters. ` +
+          'Use an option value, or its label when value is null. Follow explicit question wording; unspecified flags alone do not block ' +
+          'an answer or require escalation. T3 validates answers; do not retry blindly if delivery is uncertain.');
+        for (const request of view.pendingRequests) lines.push(...questionText(request));
+      }
       if (view.waitingForApproval) lines.push('Waiting for an approval the operator must give in T3.');
       if (view.hostUnreachableSince) lines.push(`Host unreachable since ${view.hostUnreachableSince}.`);
       if (view.waitingOnDelegatedWork) {
@@ -432,8 +486,8 @@ export function workTools(jobs: JobService): GatewayTool[] {
       requestId: z.string().min(1).max(200).describe('A pendingRequests[].requestId from work_status'),
       answers: z
         .record(z.string().max(200), z.unknown())
-        .refine((answers) => Object.keys(answers).length <= 50 && JSON.stringify(answers).length <= MAX_ANSWERS_CHARS, {
-          message: `at most 50 answers and ${MAX_ANSWERS_CHARS} characters`,
+        .refine((answers) => Object.keys(answers).length <= MAX_QUESTIONS && JSON.stringify(answers).length <= MAX_ANSWERS_CHARS, {
+          message: `at most ${MAX_QUESTIONS} answers and ${MAX_ANSWERS_CHARS} characters`,
         })
         .describe('Answers keyed by question id'),
     }),
@@ -485,7 +539,8 @@ export function workTools(jobs: JobService): GatewayTool[] {
       const pendingQuestions = result.pendingQuestionIds ?? [];
       const pending =
         pendingQuestions.length > 0
-          ? ` The worker's question is still pending (${pendingQuestions.join(', ')}): answer it with work_respond; the job stays needs_input until then.`
+          ? ` The worker's question is still pending (${pendingQuestions.join(', ')}): read it with work_status and answer with work_respond; ` +
+            'the job stays needs_input until then.'
           : '';
       const summary = `${summaries[result.outcome]}${pending} ${describeJob(view)}`;
       return { structured: { job: view, outcome: result.outcome, confirmed, delivered: result.delivered, pendingQuestions }, summary };

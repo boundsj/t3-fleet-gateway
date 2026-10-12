@@ -57,8 +57,12 @@ export async function runDoctor(services: GatewayServices, dataDir: string): Pro
   const reachable = new Set<string>();
   for (const host of config.hosts) {
     const name = `host ${host.id}`;
+    // Even a host with no credential needs a usable command for its first enrollment.
     const credential = registry.credentialStatus(host.id);
     if (credential.state === 'missing') {
+      for (const check of await registry.preflight(host.id)) {
+        results.push({ level: check.level, name: `${name} pairing command`, detail: check.detail });
+      }
       results.push({ level: 'fail', name, detail: `not enrolled. Run: t3-fleet-gateway hosts enroll ${host.id}` });
       continue;
     }
@@ -69,6 +73,9 @@ export async function runDoctor(services: GatewayServices, dataDir: string): Pro
       results.push({ level: 'warn', name, detail: `last renewal failed: ${credential.renewalError.code}: ${credential.renewalError.message}` });
     }
     const health = await registry.health(host.id, { fresh: true });
+    for (const check of await registry.preflight(host.id, { serverVersion: health.t3Version })) {
+      results.push({ level: check.level, name: `${name} pairing command`, detail: check.detail });
+    }
     if (health.credentialRejected) {
       results.push({ level: 'fail', name, detail: `T3 at ${host.t3Url} rejected the stored credential. Run: t3-fleet-gateway hosts enroll ${host.id}` });
     } else if (health.reachable === true) {

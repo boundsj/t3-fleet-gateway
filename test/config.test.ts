@@ -28,6 +28,7 @@ describe('config', () => {
     assert.equal(config.hosts[0]?.access, 'auto');
     assert.equal(config.hosts[0]?.maxConcurrentJobs, 2);
     assert.deepEqual(config.hosts[0]?.mintPairingCode, ['t3', 'auth', 'pairing', 'create', '--ttl', '5m', '--json']);
+    assert.equal(config.hosts[0]?.mintPairingCodeProbe, undefined, 'no executable probe is inferred for existing configs');
   });
 
   test('projects allow work_start unless allowWorkStart is false', () => {

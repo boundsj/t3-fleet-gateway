@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { chmodSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 import { parseConfig } from '../src/config.ts';
@@ -113,6 +114,29 @@ describe('credential renewal', () => {
     fake.failures.set('t3_environment_read', { code: 'unavailable', message: 'Try later.' });
     await assert.rejects(registry.enroll('main'), { code: 'enrollment_failed', message: /verification/ });
     assert.deepEqual(store.get('main'), before);
+  });
+
+  test('a known missing or non-executable mint is caught before renewal registration', async (t) => {
+    const mint = join(tempDir(t), 'synthetic-mint');
+    writeFileSync(mint, '', { mode: 0o700 });
+    const { fake, store, registry } = await setup(t, { tokenLifetimeSeconds: 3 * 86400 });
+    await registry.enroll('main');
+    const oldCredential = store.get('main');
+    const registrations = fake.registeredClientNames.length;
+    // Config objects are fixture-owned; changing this argv simulates the configured entrypoint disappearing.
+    const command = registry.host('main').mintPairingCode;
+    command.splice(0, command.length, mint, 'secret-argument');
+    chmodSync(mint, 0o600);
+    await registry.renewDue();
+    assert.equal(fake.registeredClientNames.length, registrations, 'known failure never starts pairing registration');
+    assert.deepEqual(store.get('main'), oldCredential);
+    assert.equal(registry.credentialStatus('main').renewalError?.code, 'pairing_command_failed');
+    assert.match(registry.credentialStatus('main').renewalError?.message ?? '', /executable_not_executable/);
+    assert.doesNotMatch(registry.credentialStatus('main').renewalError?.message ?? '', /secret-argument|synthetic-mint/);
+    command[0] = join(tempDir(t), 'missing-secret-command');
+    await registry.renewDue();
+    assert.equal(fake.registeredClientNames.length, registrations);
+    assert.match(registry.credentialStatus('main').renewalError?.message ?? '', /executable_missing/);
   });
 
   test('credentials outside the window are left alone', async (t) => {

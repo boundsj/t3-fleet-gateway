@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { HOUR, MINUTE } from '../src/time.ts';
 import { FAKE_ENVIRONMENT_ID } from './helpers/fakeT3.ts';
-import { connectAgent, jobState, startJob, startJobHarness, type Agent } from './helpers/jobs.ts';
+import { assertNotLogged, connectAgent, jobState, startJob, startJobHarness, type Agent } from './helpers/jobs.ts';
 
 interface JobView {
   jobId: string;
@@ -27,6 +27,83 @@ interface FeedPage {
 const status = (agent: Agent, jobId: string) => agent.call<Status>('work_status', { jobId });
 
 describe('work_respond', () => {
+  for (const flags of ['omitted', 'null'] as const) {
+    test(`a text-only public MCP client can answer one listed choice with ${flags} flags`, async (t) => {
+      const { fake, gw, agent, tick } = await startJobHarness(t);
+      const job = await startJob(agent);
+      await tick();
+      const { threadId } = fake.threadForJob(job.jobId);
+      const wording = 'Synthetic: choose exactly one listed check to run.';
+      const label = 'Synthetic-parser-choice';
+      const description = 'Synthetic: run parser checks only';
+      const value = 'synthetic-parser-answer';
+      fake.askQuestion(threadId, [{ id: 'check', header: 'Check', question: wording,
+        options: [{ label, description, value }],
+        ...(flags === 'null' ? { multiSelect: null, allowCustomAnswer: null, required: null } : {}) }]);
+      await tick();
+      const result = await agent.client.callTool({ name: 'work_status', arguments: { jobId: job.jobId } });
+      assert.notEqual(result.isError, true);
+      // No structuredContent is read, including for the flags and the response identifiers.
+      const text = (result.content as { type: string; text: string }[])
+        .filter((item) => item.type === 'text').map((item) => item.text).join('\n');
+      const jobId = JSON.parse(text.match(/Answer with work_respond using jobId ("[^"]+")/)![1]!);
+      const requestId = JSON.parse(text.match(/^Pending request: (.+)$/m)![1]!);
+      const question = JSON.parse(text.match(/^Question: (.+)$/m)![1]!);
+      assert.equal(question.question, wording);
+      assert.deepEqual([question.multiSelect, question.allowCustomAnswer, question.required], [null, null, null]);
+      assert.match(text, /follow (?:the )?(?:explicit )?question wording/i);
+      assert.match(text, /single listed (?:option )?value.*conservative.*attempt/i);
+      assert.match(text, /unspecified flags alone.*(?:block|escalat)/i);
+      assert.match(text, /T3 validates answers/);
+      assert.doesNotMatch(text, /Do not guess unspecified rules/);
+      // The wording asks for one choice; the text permits trying that listed value despite null flags.
+      const answers = { [question.id]: question.options[0].value ?? question.options[0].label };
+      const answered = await agent.client.callTool({ name: 'work_respond', arguments: { jobId, requestId, answers } });
+      assert.notEqual(answered.isError, true);
+      assert.deepEqual(fake.responses, [{ threadId, requestId, answers: { check: value } }], 'gateway transmitted the answer');
+      assertNotLogged(gw, [wording, label, description, value]);
+      const events = JSON.stringify(gw.services.db.prepare('SELECT * FROM job_events').all());
+      for (const content of [wording, label, description, value]) assert.equal(events.includes(content), false);
+    });
+  }
+
+  test('a text-only public MCP client can read every answer rule and respond', async (t) => {
+    const { fake, agent, tick } = await startJobHarness(t);
+    const job = await startJob(agent);
+    await tick();
+    const { threadId } = fake.threadForJob(job.jobId);
+    const requestId = fake.askQuestion(threadId, [
+      { id: 'scope', header: 'Scope', question: 'Synthetic: which checks?', multiSelect: true,
+        options: [{ label: 'Unit', description: 'Fast parser checks', value: 'unit' },
+          { label: 'Integration', description: 'Public interface checks', value: null }] },
+    ]);
+    await tick();
+    const result = await agent.client.callTool({ name: 'work_status', arguments: { jobId: job.jobId } });
+    assert.notEqual(result.isError, true);
+    // Deliberately consume only MCP text. All identifiers and answer values come from that text.
+    const text = (result.content as { type: string; text: string }[]).filter((item) => item.type === 'text').map((item) => item.text).join('\n');
+    assert.match(text, /Synthetic: which checks\?/, 'text exposes the question the client must answer');
+    const request = JSON.parse(text.match(/^Pending request: (.+)$/m)?.[1] ?? 'null') as string | null;
+    assert.equal(request, requestId, 'text identifies the pending request');
+    const question = JSON.parse(text.match(/^Question: (.+)$/m)?.[1] ?? 'null') as {
+      id: string; header: string; question: string; multiSelect: boolean;
+      options: { label: string; description: string; value: string | null }[];
+    } | null;
+    assert.ok(question, 'text includes the actionable question');
+    assert.equal(question.header, 'Scope');
+    assert.equal(question.question, 'Synthetic: which checks?');
+    assert.equal(question.multiSelect, true);
+    assert.deepEqual(question.options.map((option) => option.description), ['Fast parser checks', 'Public interface checks']);
+    assert.match(text, /array of option values/);
+    assert.match(text, /16,000|16000/);
+    assert.match(text, /custom answers.*unspecified/i);
+    assert.match(text, /required.*unspecified/i);
+    const answers = { [question.id]: question.options.map((option) => option.value ?? option.label) };
+    const answered = await agent.client.callTool({ name: 'work_respond', arguments: { jobId: job.jobId, requestId: request, answers } });
+    assert.notEqual(answered.isError, true);
+    assert.deepEqual(fake.responses, [{ threadId, requestId, answers: { scope: ['unit', 'Integration'] } }]);
+  });
+
   test('answers a pending question on the job, which then runs again', async (t) => {
     const { fake, agent, tick } = await startJobHarness(t);
     const job = await startJob(agent);

@@ -59,9 +59,9 @@ function logLevelLogger(env: NodeJS.ProcessEnv, sink: (line: string) => void, fa
   return fallback === 'info' ? createLogger({ level: 'info', sink }) : silentLogger;
 }
 
-function withServices<T>(paths: Paths, logger: Logger, fn: (services: GatewayServices, config: GatewayConfig) => Promise<T>): Promise<T> {
+function withServices<T>(paths: Paths, logger: Logger, env: NodeJS.ProcessEnv, fn: (services: GatewayServices, config: GatewayConfig) => Promise<T>): Promise<T> {
   const config = loadConfig(paths.configPath);
-  const services = openServices({ config, dataDir: paths.dataDir, logger });
+  const services = openServices({ config, dataDir: paths.dataDir, logger, commandEnv: env });
   return fn(services, config).finally(() => services.close());
 }
 
@@ -70,7 +70,7 @@ async function serve(paths: Paths, io: CliIo): Promise<number> {
   const config = loadConfig(paths.configPath);
   const guard = guardProcess(logger);
   try {
-    const gateway = await startGateway({ config, dataDir: paths.dataDir, logger, ...(io.listenPort === undefined ? {} : { port: io.listenPort }) });
+    const gateway = await startGateway({ config, dataDir: paths.dataDir, logger, commandEnv: io.env, ...(io.listenPort === undefined ? {} : { port: io.listenPort }) });
     const fatal = await Promise.race([(io.waitForShutdown ?? waitForSignal)(gateway).then(() => false), guard.fatal.then(() => true)]);
     if (!fatal) {
       await gateway.close();
@@ -133,7 +133,7 @@ async function clientToken(paths: Paths, io: CliIo, options: TokenOptions): Prom
   if (ttl === undefined || (ttl !== null && (ttl < HOUR || ttl > MAX_TOKEN_TTL))) {
     throw new UsageError('--ttl must be a duration from 1h to 100y, for example 90d or 1y, or never');
   }
-  return withServices(paths, silentLogger, async ({ tokens, clock }) => {
+  return withServices(paths, silentLogger, io.env, async ({ tokens, clock }) => {
     const expiresAt = ttl === null ? NEVER_EXPIRES : clock() + ttl;
     const { clientId, token } = tokens.issueOperatorToken({ name, scopes: scopesForChoice(access), expiresAt });
     const expiry = ttl === null ? 'never expires' : `expires ${shortTime(expiresAt)} (${relative(ttl)})`;
@@ -212,16 +212,16 @@ async function hosts(paths: Paths, io: CliIo, action: string | undefined, id: st
   const logger = logLevelLogger(io.env, (line) => io.err(line), 'off');
   if (action === 'enroll') {
     if (!id) throw new UsageError('hosts enroll needs a host id from the config');
-    return withServices(paths, logger, async ({ registry }) => {
+    return withServices(paths, logger, io.env, async ({ registry }) => {
       const host = registry.host(id);
-      io.out(`Enrolling host ${id} at ${host.t3Url} with T3 access "${host.access}"; running: ${host.mintPairingCode.join(' ')}`);
+      io.out(`Enrolling host ${id} at ${host.t3Url} with T3 access "${host.access}"; running the configured mint command`);
       const result = await registry.enroll(id);
       io.out(`Enrolled ${id}: T3 ${result.t3Version}, credential expires ${shortTime(result.expiresAt)} (${relative(result.expiresAt - Date.now())}).`);
       return 0;
     });
   }
   if (action === 'status') {
-    return withServices(paths, logger, async ({ registry }, config) => {
+    return withServices(paths, logger, io.env, async ({ registry }, config) => {
       for (const host of config.hosts) {
         const credential = registry.credentialStatus(host.id);
         const health = await registry.health(host.id, { fresh: true });
@@ -264,7 +264,7 @@ async function jobs(paths: Paths, io: CliIo, action: string | undefined, args: s
     if (extra.length > 0) throw new UsageError(`Unexpected arguments: ${extra.join(' ')}`);
     const title = options.title?.trim();
     if (options.title !== undefined && (!title || title.length > MAX_TITLE_CHARS)) throw new UsageError(`--title must be 1 to ${MAX_TITLE_CHARS} characters`);
-    return withServices(paths, logger, async (services) => {
+    return withServices(paths, logger, io.env, async (services) => {
       const { job, created } = await services.jobs.adopt({ project, threadId, title });
       io.out(created ? `Adopted thread ${job.threadId} as standing job ${job.id}.` : `Thread ${job.threadId} is already standing job ${job.id}.`);
       io.out(describeJobLine(job));
@@ -274,7 +274,7 @@ async function jobs(paths: Paths, io: CliIo, action: string | undefined, args: s
   }
   if (action === 'list') {
     if (args.length > 0) throw new UsageError(`Unexpected arguments: ${args.join(' ')}`);
-    return withServices(paths, logger, async (services) => {
+    return withServices(paths, logger, io.env, async (services) => {
       const all = services.jobs.store.list({ limit: MAX_LISTED_JOBS });
       const shown = options.all ? all : all.filter((job) => !TERMINAL_STATES.includes(job.state));
       if (shown.length === 0) {
@@ -290,7 +290,7 @@ async function jobs(paths: Paths, io: CliIo, action: string | undefined, args: s
     const [jobId, ...extra] = args;
     if (!jobId) throw new UsageError('jobs release needs a job id (see jobs list)');
     if (extra.length > 0) throw new UsageError(`Unexpected arguments: ${extra.join(' ')}`);
-    return withServices(paths, logger, async (services) => {
+    return withServices(paths, logger, io.env, async (services) => {
       const { job, released } = services.jobs.release(jobId);
       io.out(
         released
@@ -312,7 +312,7 @@ async function doctor(paths: Paths, io: CliIo): Promise<number> {
     return 1;
   }
   io.out(`config: ${paths.configPath}`);
-  const services = openServices({ config, dataDir: paths.dataDir, logger: logLevelLogger(io.env, (line) => io.err(line), 'off') });
+  const services = openServices({ config, dataDir: paths.dataDir, logger: logLevelLogger(io.env, (line) => io.err(line), 'off'), commandEnv: io.env });
   try {
     const results = await runDoctor(services, paths.dataDir);
     for (const result of results) io.out(`${result.level.toUpperCase().padEnd(4)}  ${result.name}: ${result.detail}`);

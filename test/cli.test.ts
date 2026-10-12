@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
@@ -42,7 +42,8 @@ async function environment(t: TestContext, fake?: FakeT3, extra: Record<string, 
 }
 
 /** `waitForShutdown` may wait for output with `until` before letting `serve` stop. */
-async function run(env: Env, args: string[], waitForShutdown?: (until: (pattern: RegExp) => Promise<void>) => Promise<void>) {
+async function run(env: Env, args: string[], waitForShutdown?: (until: (pattern: RegExp) => Promise<void>) => Promise<void>,
+  processEnv: NodeJS.ProcessEnv = {}) {
   const out: string[] = [];
   const err: string[] = [];
   const waiters: { pattern: RegExp; resolve: () => void }[] = [];
@@ -57,7 +58,7 @@ async function run(env: Env, args: string[], waitForShutdown?: (until: (pattern:
     },
   };
   const code = await runCli(args, {
-    env: { T3FG_CONFIG: env.configPath, T3FG_DATA_DIR: env.dataDir },
+    env: { ...process.env, ...processEnv, T3FG_CONFIG: env.configPath, T3FG_DATA_DIR: env.dataDir },
     out: (text) => {
       out.push(text);
       for (const waiter of waiters) if (waiter.pattern.test(text)) waiter.resolve();
@@ -273,6 +274,70 @@ describe('cli', () => {
     assert.equal(served.code, 0);
     assert.match(served.out, /"event":"gateway.started"/);
     assert.match(served.out, /"event":"gateway.stopped"/);
+  });
+
+  test('doctor detects a missing renewal executable while the enrolled host is healthy', async (t) => {
+    const fake = await startFakeT3();
+    t.after(() => fake.close());
+    const env = await environment(t, fake);
+    assert.equal((await run(env, ['hosts', 'enroll', 'main'])).code, 0);
+    const config = JSON.parse(readFileSync(env.configPath, 'utf8'));
+    config.hosts[0].mintPairingCode = [join(env.dir, 'missing-synthetic-mint'), 'secret-argument'];
+    writeFileSync(env.configPath, JSON.stringify(config));
+    let stop = () => {};
+    const stopped = new Promise<void>((resolve) => (stop = resolve));
+    let ready = () => {};
+    const started = new Promise<void>((resolve) => (ready = resolve));
+    const serving = run(env, ['serve'], () => { ready(); return stopped; });
+    await started;
+    try {
+      const doctor = await run(env, ['doctor']);
+      assert.equal(doctor.code, 1, doctor.out);
+      assert.match(doctor.out, /FAIL  host main pairing command: executable_missing/);
+      assert.doesNotMatch(doctor.out, /secret-argument|missing-synthetic-mint/);
+      assert.equal(fake.decisions.length, 1, 'preflight never enrolls');
+    } finally {
+      stop();
+      await serving;
+    }
+  });
+
+  test('doctor and serve use their actual PATH, diagnose pinned commands and explicit probe failures without leakage', async (t) => {
+    const fake = await startFakeT3();
+    t.after(() => fake.close());
+    const env = await environment(t, fake);
+    assert.equal((await run(env, ['hosts', 'enroll', 'main'])).code, 0);
+    const bin = join(env.dir, 'runtime', 'versions', '1.2.3');
+    mkdirSync(bin, { recursive: true });
+    const command = join(bin, 'synthetic-t3');
+    writeFileSync(command, `#!/bin/sh\necho 't3 v1.2.3'\n`, { mode: 0o700 });
+    const config = JSON.parse(readFileSync(env.configPath, 'utf8'));
+    config.hosts[0].mintPairingCode = ['synthetic-t3', 'secret-mint-argv'];
+    config.hosts[0].mintPairingCodeProbe = ['synthetic-t3', '--version'];
+    writeFileSync(env.configPath, JSON.stringify(config));
+    const serviceEnv = { PATH: bin };
+    const passing = await run(env, ['doctor'], undefined, serviceEnv);
+    assert.match(passing.out, /OK    host main pairing command: executable_resolved/);
+    assert.match(passing.out, /WARN  host main pairing command: version_pinned_path/);
+    assert.match(passing.out, /WARN  host main pairing command: version_disagreement/);
+    writeFileSync(command, `#!/bin/sh\necho 't3 v${fake.serverVersion}'\n`);
+    const matching = await run(env, ['doctor'], undefined, serviceEnv);
+    assert.match(matching.out, /OK    host main pairing command: version_matches/);
+    const missing = await run(env, ['doctor'], undefined, { PATH: '' });
+    assert.match(missing.out, /FAIL  host main pairing command: executable_missing/);
+    assert.equal(missing.code, 1);
+    writeFileSync(command, '#!/bin/sh\necho secret-probe-output\necho secret-probe-stderr >&2\nexit 9\n');
+    const failed = await run(env, ['doctor'], undefined, serviceEnv);
+    assert.match(failed.out, /FAIL  host main pairing command: probe_failed/);
+    chmodSync(command, 0o600);
+    const denied = await run(env, ['doctor'], undefined, serviceEnv);
+    assert.match(denied.out, /FAIL  host main pairing command: executable_not_executable/);
+    const served = await run(env, ['serve'], async (until) => { await until(/executable_not_executable/); }, serviceEnv);
+    assert.match(served.out, /host.pairing_preflight/);
+    assert.equal(served.code, 0, 'diagnostics do not prevent serving with an existing credential');
+    assert.equal(fake.decisions.length, 1, 'doctor and startup never mint');
+    const outputs = [passing, matching, missing, failed, denied, served].map((result) => result.out + result.err).join('\n');
+    assert.doesNotMatch(outputs, /secret-mint-argv|secret-probe-output|secret-probe-stderr|--version/);
   });
 
   test("doctor fails a public URL that serves another server's metadata for the same resource", async (t) => {

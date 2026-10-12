@@ -4,6 +4,7 @@ import type { Logger } from '../log.ts';
 import { T3Client } from '../t3/client.ts';
 import { obtainCredential, type PairingFlowOptions } from '../t3/pairing.ts';
 import { DAY, SECOND, type Clock } from '../time.ts';
+import { checkMintExecutable, preflightCommand, type CommandCheck } from './commandPreflight.ts';
 import type { CredentialStore, StoredCredential } from './credentials.ts';
 
 const HEALTH_TTL_MS = 30 * SECOND;
@@ -43,6 +44,7 @@ export interface HostRegistryOptions {
   renewWhenDaysLeft: number;
   /** Override the pairing command runner (tests). */
   runCommand?: PairingFlowOptions['runCommand'];
+  commandEnv?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -52,7 +54,7 @@ export interface HostRegistryOptions {
 export class HostRegistry {
   readonly #hosts: Map<string, HostConfig>;
   readonly #clients = new Map<string, T3Client>();
-  readonly #health = new Map<string, { value: Promise<HostHealth>; at: number }>();
+  readonly #health = new Map<string, { value: Promise<HostHealth>; at: number; settled?: HostHealth }>();
   readonly #enrolling = new Map<string, Promise<EnrollResult>>();
   readonly #options: HostRegistryOptions;
 
@@ -102,9 +104,12 @@ export class HostRegistry {
     const now = this.#options.clock();
     const cached = this.#health.get(id);
     if (cached && !options.fresh && now - cached.at < HEALTH_TTL_MS) return cached.value;
-    const value = this.#checkHealth(id);
-    this.#health.set(id, { value, at: now });
-    return value;
+    const entry: { value: Promise<HostHealth>; at: number; settled?: HostHealth } = {
+      value: this.#checkHealth(id), at: now,
+    };
+    entry.value = entry.value.then((health) => { entry.settled = health; return health; });
+    this.#health.set(id, entry);
+    return entry.value;
   }
 
   async #checkHealth(id: string): Promise<HostHealth> {
@@ -118,6 +123,24 @@ export class HostRegistry {
       const reachable = described.code === 'host_not_enrolled' ? null : credentialRejected;
       return { reachable, credentialRejected, t3Version: null, checkedAt, error: described };
     }
+  }
+
+  /** Diagnostics only: no pairing flow, registration or credential mutation. */
+  async preflight(id: string, options: { signal?: AbortSignal; serverVersion?: string | null } = {}): Promise<CommandCheck[]> {
+    const host = this.host(id);
+    let serverVersion = options.serverVersion;
+    if (serverVersion === undefined) {
+      // Startup diagnostics must neither initiate MCP initialization nor wait for a pending
+      // health read. Doctor supplies its fresh health version explicitly.
+      const cached = this.#health.get(id);
+      serverVersion = cached && this.#options.clock() - cached.at < HEALTH_TTL_MS ? cached.settled?.t3Version ?? null : null;
+    }
+    return preflightCommand(host, {
+      ...options,
+      serverVersion,
+      env: this.#options.commandEnv ?? process.env,
+      ...(this.#options.runCommand ? { runCommand: this.#options.runCommand } : {}),
+    });
   }
 
   /** Enroll (or re-enroll) a host through T3's pairing-code approval. Concurrent calls share one attempt. */
@@ -140,6 +163,7 @@ export class HostRegistry {
         access: host.access,
         mintPairingCode: host.mintPairingCode,
         clock,
+        ...(this.#options.commandEnv ? { commandEnv: this.#options.commandEnv } : {}),
         ...(this.#options.runCommand ? { runCommand: this.#options.runCommand } : {}),
       });
       const probe = new T3Client({ hostId: id, t3Url: host.t3Url, token: () => obtained.accessToken });
@@ -170,6 +194,14 @@ export class HostRegistry {
     for (const host of this.#hosts.values()) {
       const status = this.credentialStatus(host.id);
       if (status.state !== 'renewal_due' && status.state !== 'expired') continue;
+      const failure = checkMintExecutable(host, this.#options.commandEnv ?? process.env).find((result) => result.level === 'fail');
+      if (failure) {
+        this.#options.store.recordRenewal(host.id, this.#options.clock(), {
+          ok: false, code: 'pairing_command_failed', message: failure.detail,
+        });
+        this.#options.logger.error('host.pairing_preflight', { hostId: host.id, checkCode: failure.code });
+        continue;
+      }
       this.#options.logger.info('host.renewal_due', { hostId: host.id, daysLeft: status.daysLeft });
       try {
         await this.enroll(host.id);

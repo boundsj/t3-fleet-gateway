@@ -245,7 +245,7 @@ describe('standing jobs: driving them', () => {
     const result = await agent.client.callTool({ name: 'work_cancel', arguments: { jobId: job.id } });
     const again = result.structuredContent as Cancel;
     assert.deepEqual([again.outcome, again.confirmed, again.pendingQuestions, again.job.state], ['not_running', true, [requestId], 'needs_input']);
-    assert.match(JSON.stringify(result.content), new RegExp(`question is still pending \\(${requestId}\\): answer it with work_respond`));
+    assert.match(JSON.stringify(result.content), new RegExp(`question is still pending \\(${requestId}\\): read it with work_status and answer with work_respond`));
 
     // Once T3 lists no question for the stopped thread, the job is idle.
     fake.threads.get(threadId)?.questions.clear();

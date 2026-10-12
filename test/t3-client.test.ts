@@ -189,7 +189,7 @@ describe('T3 thread tools', () => {
     const { threadId } = await client.launchThread(LAUNCH);
     const requestId = fake.askQuestion(threadId, [{ id: 'q1', header: 'Choice', question: 'Which one?', options: [{ label: 'A', description: 'first' }] }]);
     assert.deepEqual(await client.listPendingRequests(threadId), [requestId]);
-    assert.equal((await client.readPendingRequest(threadId, requestId)).questions[0]?.id, 'q1');
+    assert.equal((await client.readPendingRequest(threadId, requestId)).questions?.[0]?.id, 'q1');
     assert.equal(typeof (await client.respondToPendingRequest(threadId, requestId, { q1: 'A' })), 'number');
     assert.deepEqual(await client.listPendingRequests(threadId), []);
     await assert.rejects(client.respondToPendingRequest(threadId, requestId, { q1: 'A' }), { t3Code: 'not_found' });
