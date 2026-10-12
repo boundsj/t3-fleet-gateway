@@ -11,10 +11,12 @@ import { randomId } from '../src/crypto.ts';
 import { openStorage } from '../src/gateway.ts';
 import { ApprovalCodes, MAX_FAILURES_PER_HOUR } from '../src/oauth/approvalCodes.ts';
 import { ClientStore, MAX_REGISTRATIONS_PER_HOUR } from '../src/oauth/clients.ts';
+import { TokenService } from '../src/oauth/tokens.ts';
 import { systemClock } from '../src/time.ts';
 import { startFakeT3, type FakeT3 } from './helpers/fakeT3.ts';
 import { openFrontDoor, type FrontDoor } from './helpers/frontDoor.ts';
 import { agentWithToken } from './helpers/jobs.ts';
+import { pkcePair } from './helpers/oauthFlow.ts';
 import { tempDir } from './helpers/tmp.ts';
 
 interface Env {
@@ -177,6 +179,71 @@ describe('cli', () => {
     assert.doesNotMatch(result.out, /token_hash|access_token|refresh_token|https:\/\/agent/);
     assert.equal((await run(env, ['clients', 'diagnose'])).code, 2);
     assert.equal((await run(env, ['clients', 'diagnose', 'missing'])).code, 1);
+  });
+
+  test('clients list distinguishes replay-revoked grants from pending approval and preserves mixed families', async (t) => {
+    const env = await environment(t);
+    const storage = openStorage(env.dataDir);
+    t.after(() => storage.db.close());
+    const clients = new ClientStore(storage.db, systemClock);
+    const tokens = new TokenService(storage.db, systemClock, {
+      resource: `${env.door.url}/mcp`, accessTtlSeconds: 3600, refreshIdleTtlDays: 30,
+    });
+    for (const replay of ['refresh_token', 'authorization_code'] as const) {
+      const redirectUri = 'https://agent.example.com/cb';
+      const client = clients.register({ client_name: 'Replay agent', redirect_uris: [redirectUri] });
+      const grant = () => {
+        const { verifier, challenge } = pkcePair();
+        const code = tokens.issueAuthorizationCode({
+          clientId: client.id, redirectUri, codeChallenge: challenge, scopes: ['fleet:read'],
+        });
+        const request = { clientId: client.id, code, redirectUri, codeVerifier: verifier, resource: tokens.resource };
+        return { request, pair: tokens.exchangeAuthorizationCode(request) };
+      };
+      const refresh = (refreshToken: string) => tokens.refresh({
+        clientId: client.id, refreshToken, scope: undefined, resource: tokens.resource,
+      });
+      const expectStatus = async (access: string, status: string) => {
+        const listed = await run(env, ['clients', 'list']);
+        assert.equal(listed.code, 0, listed.err);
+        assert.match(listed.out, new RegExp(`${client.id}\\s+Replay agent\\s+${access}\\s+${status}\\s`));
+        return listed.out.split('\n').find((line) => line.startsWith(client.id))!;
+      };
+      await expectStatus('-', 'pending');
+      const { request, pair } = grant();
+      await expectStatus('read', 'unrevoked');
+      if (replay === 'refresh_token') {
+        const child = refresh(pair.refresh_token);
+        refresh(child.refresh_token);
+        assert.throws(() => refresh(pair.refresh_token), /already used/);
+      } else {
+        assert.throws(() => tokens.exchangeAuthorizationCode(request), /already used/);
+      }
+      assert.equal(clients.get(client.id)?.revokedAt, null, 'replay revokes the family, not the client');
+      const diagnostic = await run(env, ['clients', 'diagnose', client.id]);
+      assert.equal(diagnostic.code, 0, diagnostic.err);
+      assert.match(diagnostic.out, new RegExp(`reason ${replay}_reuse`));
+      assert.match(await expectStatus('-', 'grants revoked'), /\(0 unrevoked grants; diagnose for usability\)/);
+      grant();
+      assert.match(await expectStatus('read', 'unrevoked'), /\(1 unrevoked grants; diagnose for usability\)/);
+      clients.revoke(client.id);
+      await expectStatus('-', 'revoked');
+    }
+  });
+
+  test('clients list keeps expired bearer status and gives client revocation precedence', async (t) => {
+    const env = await environment(t);
+    const storage = openStorage(env.dataDir);
+    t.after(() => storage.db.close());
+    const tokens = new TokenService(storage.db, systemClock, {
+      resource: `${env.door.url}/mcp`, accessTtlSeconds: 3600, refreshIdleTtlDays: 30,
+    });
+    const { clientId } = tokens.issueOperatorToken({ name: 'Expired bearer', scopes: ['fleet:read'], expiresAt: systemClock() });
+    const listed = await run(env, ['clients', 'list']);
+    assert.equal(listed.code, 0, listed.err);
+    assert.match(listed.out, new RegExp(`${clientId}\\s+Expired bearer\\s+read\\s+expired\\s`));
+    assert.equal((await run(env, ['clients', 'revoke', clientId])).code, 0);
+    assert.match((await run(env, ['clients', 'list'])).out, new RegExp(`${clientId}\\s+Expired bearer\\s+-\\s+revoked\\s`));
   });
 
   test('clients token mints a bearer token that works at /mcp until it is revoked', async (t) => {

@@ -25,6 +25,8 @@ export interface OAuthClient {
 }
 
 export interface ClientSummary extends OAuthClient {
+  /** All issued families, including revoked grants; zero means no completed authorization or operator token. */
+  totalFamilies: number;
   /** Historical name: counts unrevoked families only, never evidence of usable tokens. */
   activeFamilies: number;
   scopes: string[];
@@ -170,7 +172,7 @@ export class ClientStore {
   list(): ClientSummary[] {
     const rows = this.#db.prepare('SELECT * FROM oauth_clients ORDER BY created_at').all() as unknown as ClientRow[];
     const families = this.#db.prepare(
-      'SELECT scope FROM token_families WHERE client_id = ? AND revoked_at IS NULL',
+      'SELECT scope, revoked_at FROM token_families WHERE client_id = ?',
     );
     const tokenExpiry = this.#db.prepare(
       `SELECT MAX(a.expires_at) AS expires_at FROM access_tokens a JOIN token_families f ON f.id = a.family_id
@@ -178,10 +180,11 @@ export class ClientStore {
     );
     return rows.map((row) => {
       const client = fromRow(row);
-      const active = families.all(row.id) as { scope: string }[];
+      const all = families.all(row.id) as { scope: string; revoked_at: number | null }[];
+      const active = all.filter((family) => family.revoked_at === null);
       const scopes = [...new Set(active.flatMap((family) => family.scope.split(' ')))];
       const tokenExpiresAt = isTokenClient(client) ? ((tokenExpiry.get(row.id) as { expires_at: number | null }).expires_at ?? null) : null;
-      return { ...client, activeFamilies: active.length, scopes, tokenExpiresAt };
+      return { ...client, totalFamilies: all.length, activeFamilies: active.length, scopes, tokenExpiresAt };
     });
   }
 

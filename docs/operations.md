@@ -75,7 +75,7 @@ t3-fleet-gateway clients diagnose <client-id>
 t3-fleet-gateway clients revoke <client id>   # an id that starts with '-': clients revoke -- <client id>
 ```
 
-`list` shows each client's id, name, granted access, status (`pending` until a grant exists, `unrevoked` for OAuth families regardless of usability, `active` or `expired` for an operator token, `revoked`), creation and last-use times, and how it signs in: the origins an OAuth client redirects to, or `bearer token` with the expiry of a token minted with `clients token`. `revoke` takes effect immediately for every token the client holds; an OAuth agent must register and be approved again, while a static bearer client needs a replacement token.
+`list` shows each client's id, name, granted access, status, creation and last-use times, and how it signs in: the origins an OAuth client redirects to, or `bearer token` with the expiry of a token minted with `clients token`. Status is `pending` only when no grant family exists, `grants revoked` when families exist but all are revoked, `unrevoked` when an OAuth family is unrevoked regardless of usability, and `active` or `expired` for an unrevoked operator token. A revoked client always shows `revoked`; one revoked family does not hide another unrevoked family. For `grants revoked`, run `clients diagnose <client-id>` to see the reason; an OAuth agent needs a new approval. `revoke` takes effect immediately for every token the client holds; an OAuth agent must register and be approved again, while a static bearer client needs a replacement token.
 
 ## Authentication and outage recovery
 

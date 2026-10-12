@@ -161,8 +161,8 @@ function clients(paths: Paths, io: CliIo, action: string | undefined, id: string
       const rows = list.map((client) => {
         const access = client.scopes.includes(OPERATE_SCOPE) ? 'operate' : client.scopes.includes(READ_SCOPE) ? 'read' : '-';
         const expired = client.tokenExpiresAt !== null && client.tokenExpiresAt <= now;
-        const status = client.revokedAt !== null ? 'revoked' : expired ? 'expired'
-          : client.activeFamilies > 0 ? isTokenClient(client) ? 'active' : 'unrevoked' : 'pending';
+        const status = client.revokedAt !== null ? 'revoked' : client.totalFamilies === 0 ? 'pending'
+          : client.activeFamilies === 0 ? 'grants revoked' : expired ? 'expired' : isTokenClient(client) ? 'active' : 'unrevoked';
         const signIn = !isTokenClient(client)
           ? `${[...new Set(client.redirectUris.map((uri) => new URL(uri).origin))].join(' ')} (${client.activeFamilies} unrevoked grants; diagnose for usability)`
           : client.tokenExpiresAt === NEVER_EXPIRES
