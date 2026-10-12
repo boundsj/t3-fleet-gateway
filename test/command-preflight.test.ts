@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { createServer as createHttpServer } from 'node:http';
+import { createServer, type Socket } from 'node:net';
 import { test, type TestContext } from 'node:test';
+import { runDoctor } from '../src/cli/doctor.ts';
+import { openServices } from '../src/gateway.ts';
+import { CredentialStore } from '../src/hosts/credentials.ts';
+import { createLogger } from '../src/log.ts';
 import { parseConfig, type HostConfig } from '../src/config.ts';
 import { checkMintExecutable, preflightCommand, PROBE_MAX_BYTES, resolveCommand } from '../src/hosts/commandPreflight.ts';
 import { runCommand } from '../src/t3/pairing.ts';
@@ -112,14 +118,7 @@ test('probe failures, missing executables, unreadable versions and oversized out
   });
 });
 
-test('probes time out and kill the direct child; injected runners that ignore cancellation are still bounded', async (t) => {
-  const marker = join(tempDir(t), 'alive');
-  const config = host([process.execPath], [process.execPath, '-e', `setTimeout(() => require('fs').writeFileSync(${JSON.stringify(marker)}, 'alive'), 500);`]);
-  const checks = await preflightCommand(config, { timeoutMs: 50 });
-  assert.equal(checks.at(-1)?.code, 'probe_timeout');
-  // A harmless second command runs long enough that an un-killed first child would write the marker.
-  await runCommand([process.execPath, '-e', 'setTimeout(() => {}, 550)']);
-  assert.equal(existsSync(marker), false);
+test('injected runners that ignore cancellation still have a bounded probe deadline', async () => {
   const keepAlive = setInterval(() => {}, 1000);
   try {
     const ignored = await preflightCommand(host([process.execPath], [process.execPath]), {
@@ -185,4 +184,156 @@ test('startup preflight completes before due renewal; shutdown during its probe 
   assert.equal(signal?.aborted, true);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(fake.registeredClientNames.length, registrations, 'late probe completion did not start renewal');
+});
+
+// The child announces readiness only after installing its SIGTERM handler. A closed socket
+// proves it exited; deadlines bound event waits, rather than sleeping and guessing readiness.
+async function resistantProbe(t: TestContext): Promise<{ argv: string[]; ready: Promise<void>; closed: Promise<void> }> {
+  const ready = Promise.withResolvers<void>();
+  const closed = Promise.withResolvers<void>();
+  let pid: number | undefined;
+  let socket: Socket | undefined;
+  let exited = false;
+  const server = createServer((connection) => {
+    socket = connection;
+    let data = '';
+    connection.on('data', (chunk) => {
+      data += chunk.toString();
+      if (data.includes('\n')) {
+        pid = Number(data.trim());
+        ready.resolve();
+      }
+    });
+    connection.on('close', () => { exited = true; closed.resolve(); });
+  });
+  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    if (pid && !exited) {
+      try { process.kill(pid, 'SIGKILL'); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      }
+    }
+    socket?.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const script = String.raw`process.on('SIGTERM', () => {}); const s = require('net').connect(${address.port}, '127.0.0.1',
+    () => s.write(process.pid + '\n'));`;
+  return { argv: [process.execPath, '-e', script], ready: ready.promise, closed: closed.promise };
+}
+
+async function within(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise.then(() => true), new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+test('real SIGTERM-resistant probe exits after its timeout', async (t) => {
+  const child = await resistantProbe(t);
+  const pending = preflightCommand(host([process.execPath], child.argv), { timeoutMs: 1000 });
+  assert.equal(await within(child.ready, 800), true, 'child installed its signal handler before the deadline');
+  const checks = await pending;
+  assert.equal(checks.at(-1)?.code, 'probe_timeout');
+  assert.equal(await within(child.closed, 1000), true, 'timeout must kill the direct child even when it ignores SIGTERM');
+});
+
+test('real SIGTERM-resistant startup probe exits after shutdown cancellation', async (t) => {
+  const child = await resistantProbe(t);
+  const gw = await startTestGateway(t, { jobEngine: { autoStart: false }, config: { hosts: [{
+    id: 'main', t3Url: 'http://127.0.0.1:9', mintPairingCode: [process.execPath], mintPairingCodeProbe: child.argv,
+  }] } });
+  assert.equal(await within(child.ready, 1000), true, 'child installed its signal handler before shutdown');
+  await gw.gateway.close();
+  assert.equal(await within(child.closed, 1000), true, 'shutdown must kill the direct child even when it ignores SIGTERM');
+});
+
+test('startup preflight does not delay shutdown on stalled MCP initialization', async (t) => {
+  const initialized = Promise.withResolvers<void>();
+  let requests = 0;
+  const server = createHttpServer((request) => {
+    requests++;
+    request.resume();
+    initialized.resolve(); // Accept the request but never answer MCP initialization.
+  });
+  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const config = { hosts: [{ id: 'main', t3Url: `http://127.0.0.1:${address.port}`, mintPairingCode: [process.execPath],
+    mintPairingCodeProbe: [process.execPath, 'synthetic-safe-probe'] }], projects: [] };
+  const dataDir = join(tempDir(t), 'data');
+  const seed = openServices({ config: parseConfig({ publicUrl: 'https://gateway.example', ...config }), dataDir,
+    logger: createLogger({ sink: () => {} }) });
+  new CredentialStore(seed.db).save({ hostId: 'main', accessToken: 'synthetic-token', t3ClientId: 'synthetic-client',
+    scope: '', access: 'auto', issuedAt: Date.now(), expiresAt: Date.now() + 30 * 86400000, verifiedAt: Date.now() });
+  await seed.close();
+  const probeStarted = Promise.withResolvers<void>();
+  const gw = await startTestGateway(t, { dataDir, config, jobEngine: { autoStart: false }, runCommand: async () => {
+    probeStarted.resolve();
+    return new Promise<string>(() => {});
+  } });
+  assert.equal(await within(Promise.race([initialized.promise, probeStarted.promise]), 1000), true);
+  const began = performance.now();
+  await gw.gateway.close();
+  assert.ok(performance.now() - began < 1000, 'preflight must not create a health connection that delays shutdown');
+  assert.equal(requests, 0, 'preflight uses completed cached health only; no initialization request is sent');
+});
+
+test('exact native T3 version prefix matches or warns without exposing output', async () => {
+  const config = host([process.execPath], [process.execPath, '--version']);
+  const version = '0.0.46-nightly.20261007.2774';
+  const matched = await preflightCommand(config, { serverVersion: version, runCommand: async () => `t3 v${version}\n` });
+  assert.equal(matched.at(-1)?.code, 'version_matches');
+  const differed = await preflightCommand(config, { serverVersion: '0.0.47', runCommand: async () => `t3 v${version}\n` });
+  assert.equal(differed.at(-1)?.code, 'version_disagreement');
+  assert.equal(differed.at(-1)?.level, 'warn');
+  for (const output of [`secret prefix t3 v${version}`, `t3 v${version}\nsecret suffix`, `t3 v${version} secret`]) {
+    const unverified = await preflightCommand(config, { serverVersion: version, runCommand: async () => output });
+    assert.equal(unverified.at(-1)?.code, 'version_unverified', 'never search arbitrary output for embedded versions');
+    assert.doesNotMatch(JSON.stringify(unverified), /secret|nightly|2774/);
+  }
+  assert.doesNotMatch(JSON.stringify([matched, differed]), /nightly|2774|0\.0\.47/);
+});
+
+
+test('preflight uses only completed unexpired health while doctor compares fresh health', async (t) => {
+  const fake = await startFakeT3({ serverVersion: '0.0.46-nightly.20261007.2774' });
+  t.after(() => fake.close());
+  const gw = await startTestGateway(t, { jobEngine: { autoStart: false }, config: { hosts: [{
+    id: 'main', t3Url: fake.url, mintPairingCode: fake.mintCommand(), mintPairingCodeProbe: [process.execPath, '--version'],
+  }] }, runCommand: (argv, options) => argv[1] === '--version' ? Promise.resolve(`t3 v${fake.serverVersion}\n`) : runCommand(argv, options) });
+  const registry = gw.services.registry;
+  await registry.enroll('main');
+  await registry.health('main');
+  const calls = () => fake.calls.filter((name) => name === 't3_environment_read').length;
+  const before = calls();
+  assert.equal((await registry.preflight('main')).at(-1)?.code, 'version_matches');
+  assert.equal(calls(), before, 'preflight does not refresh completed health');
+  gw.clock.advance(31_000);
+  assert.equal((await registry.preflight('main')).at(-1)?.code, 'version_unverified', 'expired cache is not used');
+  assert.equal(calls(), before, 'preflight does not refresh expired health');
+
+  fake.holdResponses.add('t3_environment_read');
+  const pending = registry.health('main', { fresh: true });
+  await fake.whenHeld('t3_environment_read');
+  try {
+    const preflight = registry.preflight('main');
+    assert.equal(await within(preflight, 1000), true, 'preflight does not await an in-flight health read');
+    assert.equal((await preflight).at(-1)?.code, 'version_unverified');
+    assert.equal(calls(), before + 1, 'preflight does not create another health request');
+  } finally {
+    fake.holdResponses.delete('t3_environment_read');
+    fake.releaseHeld();
+    await pending;
+  }
+  const checks = await runDoctor(gw.services, gw.dataDir);
+  assert.equal(calls(), before + 2, 'doctor reads fresh health even with a completed cache');
+  assert.ok(checks.some((check) => check.name === 'host main pairing command' && check.detail.startsWith('version_matches:')));
 });

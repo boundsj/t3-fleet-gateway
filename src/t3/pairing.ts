@@ -50,15 +50,17 @@ export interface CommandOptions {
 export function runCommand(argv: readonly string[], options: CommandOptions = {}): Promise<string> {
   const [file, ...args] = argv;
   if (!file) return Promise.reject(new GatewayError('pairing_command_failed', 'mintPairingCode is empty'));
+  if (options.signal?.aborted) return Promise.reject(new GatewayError('pairing_command_failed', 'Configured command cancelled.'));
   return new Promise((resolve, reject) => {
-    execFile(file, args, {
+    let onAbort: (() => void) | undefined;
+    const child = execFile(file, args, {
       timeout: options.timeoutMs ?? COMMAND_TIMEOUT_MS,
       maxBuffer: options.maxBuffer ?? 64 * 1024,
       windowsHide: true,
       killSignal: options.signal ? 'SIGKILL' : 'SIGTERM',
       ...(options.env ? { env: options.env } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
     }, (error, stdout) => {
+      if (onAbort) options.signal?.removeEventListener('abort', onAbort);
       if (error) {
         const exit = typeof error.code === 'number' ? `exit code ${error.code}`
           : error.code === 'ENOENT' ? 'executable missing' : error.code === 'EACCES' ? 'not executable' : 'failed';
@@ -67,6 +69,11 @@ export function runCommand(argv: readonly string[], options: CommandOptions = {}
       }
       resolve(stdout);
     });
+    // Node 26.0 execFile's AbortSignal handler sends SIGTERM regardless of killSignal,
+    // then clears its timeout. Own cancellation so a probe that ignores SIGTERM still exits.
+    onAbort = () => { child.kill('SIGKILL'); };
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
   });
 }
 

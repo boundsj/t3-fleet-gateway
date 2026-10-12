@@ -310,7 +310,7 @@ describe('cli', () => {
     const bin = join(env.dir, 'runtime', 'versions', '1.2.3');
     mkdirSync(bin, { recursive: true });
     const command = join(bin, 'synthetic-t3');
-    writeFileSync(command, `#!/bin/sh\necho '{"version":"1.2.3"}'\n`, { mode: 0o700 });
+    writeFileSync(command, `#!/bin/sh\necho 't3 v1.2.3'\n`, { mode: 0o700 });
     const config = JSON.parse(readFileSync(env.configPath, 'utf8'));
     config.hosts[0].mintPairingCode = ['synthetic-t3', 'secret-mint-argv'];
     config.hosts[0].mintPairingCodeProbe = ['synthetic-t3', '--version'];
@@ -320,6 +320,9 @@ describe('cli', () => {
     assert.match(passing.out, /OK    host main pairing command: executable_resolved/);
     assert.match(passing.out, /WARN  host main pairing command: version_pinned_path/);
     assert.match(passing.out, /WARN  host main pairing command: version_disagreement/);
+    writeFileSync(command, `#!/bin/sh\necho 't3 v${fake.serverVersion}'\n`);
+    const matching = await run(env, ['doctor'], undefined, serviceEnv);
+    assert.match(matching.out, /OK    host main pairing command: version_matches/);
     const missing = await run(env, ['doctor'], undefined, { PATH: '' });
     assert.match(missing.out, /FAIL  host main pairing command: executable_missing/);
     assert.equal(missing.code, 1);
@@ -333,7 +336,7 @@ describe('cli', () => {
     assert.match(served.out, /host.pairing_preflight/);
     assert.equal(served.code, 0, 'diagnostics do not prevent serving with an existing credential');
     assert.equal(fake.decisions.length, 1, 'doctor and startup never mint');
-    const outputs = [passing, missing, failed, denied, served].map((result) => result.out + result.err).join('\n');
+    const outputs = [passing, matching, missing, failed, denied, served].map((result) => result.out + result.err).join('\n');
     assert.doesNotMatch(outputs, /secret-mint-argv|secret-probe-output|secret-probe-stderr|--version/);
   });
 

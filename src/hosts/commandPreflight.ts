@@ -106,16 +106,17 @@ export async function preflightCommand(host: HostConfig, options: PreflightOptio
       return checks;
     }
     checks.push(check('ok', 'probe_succeeded', 'configured non-mutating probe exited successfully; minting was not attempted.'));
-    // Optional bounded bare or JSON version. No raw output (including a parsed version) is returned.
+    // Optional bounded bare, native T3 CLI or JSON version. No raw output (including a parsed version) is returned.
     let version: unknown = output.trim();
     try {
       version = (JSON.parse(output) as { version?: unknown } | null)?.version;
     } catch {
-      // A bare version can be compared too; exit success is useful even without a version.
+      // Match only the complete native CLI form, never an embedded version in other output.
+      if (typeof version === 'string' && version.startsWith('t3 v')) version = version.slice(4);
     }
     if (typeof version !== 'string' || !/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?$/.test(version) || version.length > 100) {
       checks.push(check('warn', 'version_unverified',
-        'probe provided no recognized version; use a bare x.y.z or {"version":"x.y.z"} to compare with T3.'));
+        'probe provided no recognized version; use x.y.z, t3 vx.y.z or {"version":"x.y.z"} to compare with T3.'));
     } else if (!options.serverVersion) {
       checks.push(check('warn', 'version_unverified', 'T3 server version is unavailable for comparison.'));
     } else if (version !== options.serverVersion) {

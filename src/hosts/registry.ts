@@ -54,7 +54,7 @@ export interface HostRegistryOptions {
 export class HostRegistry {
   readonly #hosts: Map<string, HostConfig>;
   readonly #clients = new Map<string, T3Client>();
-  readonly #health = new Map<string, { value: Promise<HostHealth>; at: number }>();
+  readonly #health = new Map<string, { value: Promise<HostHealth>; at: number; settled?: HostHealth }>();
   readonly #enrolling = new Map<string, Promise<EnrollResult>>();
   readonly #options: HostRegistryOptions;
 
@@ -104,9 +104,12 @@ export class HostRegistry {
     const now = this.#options.clock();
     const cached = this.#health.get(id);
     if (cached && !options.fresh && now - cached.at < HEALTH_TTL_MS) return cached.value;
-    const value = this.#checkHealth(id);
-    this.#health.set(id, { value, at: now });
-    return value;
+    const entry: { value: Promise<HostHealth>; at: number; settled?: HostHealth } = {
+      value: this.#checkHealth(id), at: now,
+    };
+    entry.value = entry.value.then((health) => { entry.settled = health; return health; });
+    this.#health.set(id, entry);
+    return entry.value;
   }
 
   async #checkHealth(id: string): Promise<HostHealth> {
@@ -126,8 +129,11 @@ export class HostRegistry {
   async preflight(id: string, options: { signal?: AbortSignal; serverVersion?: string | null } = {}): Promise<CommandCheck[]> {
     const host = this.host(id);
     let serverVersion = options.serverVersion;
-    if (serverVersion === undefined && host.mintPairingCodeProbe && this.credentialStatus(id).state !== 'missing' && !options.signal?.aborted) {
-      serverVersion = (await this.health(id)).t3Version;
+    if (serverVersion === undefined) {
+      // Startup diagnostics must neither initiate MCP initialization nor wait for a pending
+      // health read. Doctor supplies its fresh health version explicitly.
+      const cached = this.#health.get(id);
+      serverVersion = cached && this.#options.clock() - cached.at < HEALTH_TTL_MS ? cached.settled?.t3Version ?? null : null;
     }
     return preflightCommand(host, {
       ...options,
