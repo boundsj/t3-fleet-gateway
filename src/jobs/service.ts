@@ -457,7 +457,7 @@ export class JobService {
           : job.state === 'needs_input'
             ? 'The job is waiting for a permission approval, which only the operator can give in T3.'
             : 'The job has no pending questions.';
-      throw new GatewayError('not_found', `Request ${input.requestId} is not pending on job ${job.id}. ${hint}`);
+      throw new GatewayError('not_found', `That request is not pending on job ${job.id}. ${hint}`);
     }
     await client.respondToPendingRequest(job.threadId, input.requestId, input.answers);
     const remaining = pending.filter((id) => id !== input.requestId);
