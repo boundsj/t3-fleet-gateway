@@ -2,10 +2,43 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MAX_QUESTION_CHARS, MAX_QUESTION_OPTIONS, MAX_QUESTIONS } from '../src/jobs/service.ts';
 import type { JobDetailView } from '../src/mcp/workTools.ts';
-import { startJob, startJobHarness } from './helpers/jobs.ts';
+import { assertNotLogged, startJob, startJobHarness } from './helpers/jobs.ts';
 
 const textOf = (result: { content?: unknown }) => (result.content as { type: string; text: string }[])
   .filter((item) => item.type === 'text').map((item) => item.text).join('\n');
+
+for (const targeted of [false, true]) {
+  test(`a text-only client can answer a real-shaped Codex request ID${targeted ? ' after a targeted read' : ''}`, async (t) => {
+    const { fake, gw, agent, tick } = await startJobHarness(t);
+    const job = await startJob(agent);
+    await tick();
+    const thread = fake.threadForJob(job.jobId);
+    // Synthetic UUIDs, retaining the opaque ID shape observed during supervised live QA.
+    const opaqueId = 'runtime-request:provider:codex:provider-turn:provider-turn%3Aprovider%3Acodex%3Anative-turn%3A' +
+      '00000000-0000-4000-8000-000000000000:native-request:async%3Acall_00000000000000000000000000000000:' +
+      '00000000-0000-4000-8000-000000000001';
+    assert.ok(opaqueId.length > 200);
+    const question = { id: '0', header: 'QA', question: 'Synthetic marker choice?', options: [{ label: 'Blue', description: 'Synthetic blue' }] };
+    const shortId = fake.askQuestion(thread.threadId, [question]);
+    thread.questions.set(opaqueId, thread.questions.get(shortId)!);
+    thread.questions.delete(shortId);
+    await tick();
+    const first = await agent.client.callTool({ name: 'work_status', arguments: { jobId: job.jobId } });
+    const requestId = JSON.parse(textOf(first).match(/^Pending request: (.+)$/m)![1]!);
+    assert.equal(requestId, opaqueId, 'text returns the complete upstream ID');
+    if (targeted) {
+      const selected = await agent.client.callTool({ name: 'work_status', arguments: { jobId: job.jobId, pendingRequestId: requestId } });
+      assert.notEqual(selected.isError, true, textOf(selected));
+      assert.equal(JSON.parse(textOf(selected).match(/^Question: (.+)$/m)![1]!).question, question.question);
+    }
+    const answered = await agent.client.callTool({ name: 'work_respond', arguments: { jobId: job.jobId, requestId, answers: { '0': 'Blue' } } });
+    assert.notEqual(answered.isError, true, textOf(answered));
+    assert.deepEqual(fake.responses, [{ threadId: thread.threadId, requestId: opaqueId, answers: { '0': 'Blue' } }]);
+    assert.equal((await agent.callError('work_respond', { jobId: job.jobId, requestId: `${opaqueId}-foreign`, answers: {} })).code,
+      'not_found', 'a long ID still has to belong to this job');
+    assertNotLogged(gw, [opaqueId, question.question, 'Synthetic blue']);
+  });
+}
 
 test('question flags preserve true, false, null and absence without inventing defaults', async (t) => {
   const { fake, agent, tick } = await startJobHarness(t);

@@ -254,12 +254,24 @@ T3FG_E2E_PROJECT=pilot \
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `T3FG_E2E_APPROVAL_CODE` | required | A code from `pair`; it is used once and never printed |
-| `T3FG_E2E_PROJECT` | the first configured project | Project alias to run the jobs in |
+| `T3FG_E2E_PROJECT` | required | Explicit scratch project alias to run the jobs in |
 | `T3FG_E2E_URL` | `publicUrl` | Gateway base URL, for example `http://127.0.0.1:3790` to bypass the tunnel |
 | `T3FG_E2E_TIMEOUT_SECONDS` | `600` | How long to wait for each job transition |
 | `T3FG_E2E_POLL_SECONDS` | `5` | Delay between `work_feed` polls |
 
 `--config` (or `$T3FG_CONFIG`) is read for `publicUrl` and the project list only. If a job reaches `needs_input` (for example an approval under `approval-required`), the script says so and keeps waiting until the timeout, so you can approve it in T3. Each run registers a new agent client; remove old ones with `clients revoke`.
+
+The lifecycle script also discovers the tool list, checks `work_list`, reads complete replies with `work_messages`, and reports successful tool coverage. It exercises eight of the nine tools; `work_respond` needs a real question fixture. A lifecycle pass does not qualify questions, approvals, failures, delegation or a hosted connector.
+
+### Supervised qualification
+
+The supervised run on 2026-10-12 used v0.1.3, Node 26.0.0, T3 0.0.46-nightly.20261007.2774 and GPT-6.1-Sol workers in a dedicated scratch project, with a separate gateway configuration and database. Production gateway configuration and existing credentials were not changed. It confirmed the lifecycle, a real question and answer, an operator-approved scratch marker write, a standing coordinator's delegated child and automatic parent resumption, Read-scope refusal, exclusive feed paging and idempotent follow-ups.
+
+The question initially failed: T3 returned a Codex pending request ID longer than 200 characters, which the gateway's own inputs rejected. v0.1.4 removes that invented cap on the opaque request ID, retaining non-empty validation, live job/request membership, and the separate answer/question-id and mutation-key limits. The original live question was answered successfully after the fix; synthetic public text-only regressions fail on v0.1.3 and pass after the change. A sampled real Codex transition also showed a brief `waiting` thread/run with zero pending requests and no approval item. v0.1.4 keeps that active turn `running` rather than inventing an operator approval; actual questions or a positive pending count still require input.
+
+Failure qualification used a separate temporary T3 instance and Codex home with no copied provider credentials. A refused TCP connection kept the provider retrying and did not qualify a terminal failure. Replacing that fixture with an invalid QA-only loopback HTTP endpoint returning 401 produced an actual failed T3 run and gateway `t3_run_failed`; adopting its thread as a standing job preserved usability after another failed follow-up. A shell command exiting nonzero is not this fixture.
+
+Live SDK recovery cut only QA gateway ingress for 70 seconds with a 60-second access token. Saved credentials survived; reconnection refreshed without another approval and resumed the exclusive feed cursor. A separate proxy dropped a completed `work_start` response: the SDK did not retry the POST automatically, and a manual retry with identical input and request ID returned the same job (`created: false`). These are SDK results. Grok reported the original long-ID rejection, but a separate QA connection and real Grok/Notion recovery remain unverified; their production connections cannot see jobs in a separate QA database.
 
 ## Backup and restore
 

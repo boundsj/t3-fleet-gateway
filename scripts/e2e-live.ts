@@ -117,8 +117,8 @@ async function main(): Promise<void> {
   }
   const config = loadConfig(resolvePaths(env, args.config ? { configPath: args.config } : {}).configPath);
   const baseUrl = (env.T3FG_E2E_URL ?? config.publicUrl).replace(/\/$/, '');
-  const projectAlias = env.T3FG_E2E_PROJECT ?? config.projects[0]?.alias;
-  if (!projectAlias) throw new Error('No project configured; set T3FG_E2E_PROJECT');
+  const projectAlias = env.T3FG_E2E_PROJECT;
+  if (!projectAlias) throw new Error('Set T3FG_E2E_PROJECT to an explicit scratch project alias');
   line('INFO', 'target', `${baseUrl} project ${projectAlias}`);
 
   const metadata = await step('oauth metadata', async () => {
@@ -191,16 +191,26 @@ async function main(): Promise<void> {
 
   const client = new Client({ name: 't3-fleet-gateway-e2e', version: '0' });
   await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), { authProvider: { token: async () => accessToken } }));
+  const exercised = new Set<string>();
+  const ownedJobs = new Set<string>();
   const call: Tool = async (name, input) => {
     const result = await client.callTool({ name, arguments: input });
     if (result.isError === true) {
       const text = (result.content as { type: string; text?: string }[] | undefined)?.[0]?.text ?? '';
       throw new Error(`${name} failed: ${text.slice(0, 300)}`);
     }
+    exercised.add(name);
     return result.structuredContent as never;
   };
 
   try {
+    const discovered = await step('tool discovery', async () => {
+      const names = (await client.listTools()).tools.map((tool) => tool.name);
+      for (const name of ['fleet_status', 'work_start', 'work_continue', 'work_respond', 'work_cancel', 'work_status', 'work_messages', 'work_list', 'work_feed']) {
+        ensure(names.includes(name), `missing tool ${name}`);
+      }
+      return { value: names, detail: `${names.length} tools advertised` };
+    });
     await step('fleet_status', async () => {
       const status = await call<{
         hosts: { id: string; reachable: boolean | null }[];
@@ -223,6 +233,7 @@ async function main(): Promise<void> {
         title: 't3-fleet-gateway live e2e',
         requestId: randomUUID(),
       });
+      ownedJobs.add(result.job.jobId);
       return { value: result.job.jobId, detail: `${result.job.jobId} ${result.job.state} on ${result.job.branch}` };
     });
 
@@ -238,6 +249,18 @@ async function main(): Promise<void> {
       // Only a real T3 shows that the worker's reply is recognised and read back.
       ensure(/READY/.test(status.latestMessageExcerpt), `the excerpt (${status.latestMessageExcerpt.length} chars) does not mention READY`);
       return { value: undefined, detail: `thread ${status.threadId}, excerpt mentions READY` };
+    });
+
+    await step('work_list finds job A', async () => {
+      const listed = await call<{ jobs: { jobId: string }[] }>('work_list', { project: projectAlias, mine: true });
+      ensure(listed.jobs.some((job) => job.jobId === first), 'job A missing from its project list');
+      return { value: undefined };
+    });
+
+    await step('work_messages reads the full reply', async () => {
+      const page = await call<{ messages: { text: string; textTruncated: boolean }[] }>('work_messages', { jobId: first });
+      ensure(page.messages.some((message) => /READY/.test(message.text) && !message.textTruncated), 'no complete READY reply');
+      return { value: undefined, detail: 'complete reply mentions READY' };
     });
 
     await step('work_continue (job A)', async () => {
@@ -257,6 +280,13 @@ async function main(): Promise<void> {
       return { value: reached.cursor, detail: 'excerpt mentions DONE' };
     });
 
+    await step('work_messages reads both turns', async () => {
+      const page = await call<{ messages: { text: string }[] }>('work_messages', { jobId: first, limit: 2 });
+      ensure(page.messages.some((message) => /READY/.test(message.text)), 'first turn missing');
+      ensure(page.messages.some((message) => /DONE/.test(message.text)), 'follow-up turn missing');
+      return { value: undefined, detail: 'replies mention READY and DONE' };
+    });
+
     /** Start a job that should still be running when it is cancelled, and wait until it runs. */
     const startLongJob = async (label: string): Promise<string> => {
       const jobId = await step(`work_start (${label})`, async () => {
@@ -266,6 +296,7 @@ async function main(): Promise<void> {
           title: 't3-fleet-gateway live e2e (cancel)',
           requestId: randomUUID(),
         });
+        ownedJobs.add(result.job.jobId);
         return { value: result.job.jobId, detail: `${result.job.jobId} ${result.job.state}` };
       });
       await step(`${label} starts running`, async () => {
@@ -309,7 +340,19 @@ async function main(): Promise<void> {
       const result = await call<{ outcome: string }>('work_cancel', { jobId: first });
       return { value: undefined, detail: result.outcome };
     });
+    line('INFO', 'tool coverage', `${exercised.size}/${discovered.length} advertised tools called successfully`);
+    for (const name of discovered) if (!exercised.has(name)) line('INFO', 'not exercised', name);
   } finally {
+    // Request cancellation only for this run's jobs, including jobs left active by a failed assertion.
+    for (const jobId of ownedJobs) {
+      try {
+        const status = await call<{ state: string }>('work_status', { jobId });
+        if (status.state !== 'cancelled' && status.state !== 'failed') await call('work_cancel', { jobId });
+      } catch {
+        failures += 1;
+        line('FAIL', 'cleanup', `could not confirm cancellation of ${jobId}; inspect it in T3`);
+      }
+    }
     await client.close();
   }
 }
