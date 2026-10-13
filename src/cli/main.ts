@@ -9,7 +9,7 @@ import { createLogger, isLogLevel, silentLogger, type Logger } from '../log.ts';
 import { ApprovalCodes, DEFAULT_APPROVAL_CODE_TTL, MAX_APPROVAL_CODE_TTL, MAX_FAILURES_PER_HOUR } from '../oauth/approvalCodes.ts';
 import { ClientStore, isTokenClient, MAX_CLIENT_NAME_LENGTH, MAX_REGISTRATIONS_PER_HOUR } from '../oauth/clients.ts';
 import { diagnoseClient } from '../oauth/diagnostics.ts';
-import { OPERATE_SCOPE, READ_SCOPE, scopesForChoice } from '../oauth/scopes.ts';
+import { describeAccess, parseHostScope, parseScope, scopesForGrant, type HostChoice } from '../oauth/scopes.ts';
 import { NEVER_EXPIRES } from '../oauth/tokens.ts';
 import { FATAL_SHUTDOWN_MS, guardProcess } from '../processErrors.ts';
 import { DAY, HOUR, MINUTE, parseDuration, systemClock } from '../time.ts';
@@ -33,8 +33,10 @@ Commands:
   serve                     Run the gateway (HTTP server and credential renewal)
   pair [--ttl 15m]          Mint a one-time approval code for connecting an agent
   clients list              List registered agent clients
-  clients token --name <name> [--access operate|read] [--ttl 1y|never]
-                            Mint a bearer token for an agent that cannot sign in with OAuth
+  clients token --name <name> [--access operate|read] [--hosts all|<id>,<id>] [--ttl 1y|never]
+                            Mint a bearer token for an agent that cannot sign in with OAuth;
+                            --hosts limits it to those host ids (default all: every host,
+                            including hosts added later)
   clients diagnose <id>      Diagnose stored grants and authentication recovery (offline)
   clients revoke <id>       Revoke a client and every token issued to it
   hosts enroll <id>         Obtain a T3 credential for a host via pairing-code approval
@@ -108,7 +110,7 @@ function pair(paths: Paths, io: CliIo, ttlText: string | undefined): number {
     }
     io.out(`Approval code: ${code}`);
     io.out(`Expires ${shortTime(expiresAt)} (${relative(expiresAt - Date.now())}). It works once.`);
-    io.out('Enter it on the approval page your agent opens, then choose Read or Operate.');
+    io.out('Enter it on the approval page your agent opens, then choose Read or Operate, and All machines or Selected machines.');
     return 0;
   } finally {
     storage.db.close();
@@ -122,7 +124,23 @@ const MAX_TOKEN_TTL = 100 * 365 * DAY;
 interface TokenOptions {
   name?: string | undefined;
   access?: string | undefined;
+  hosts?: string | undefined;
   ttl?: string | undefined;
+}
+
+const HOSTS_USAGE = '--hosts must be all, or a comma-separated list of host ids from the config, for example mini,macbook';
+
+/** `--hosts`: omitted or `all` is every host (the fleet scopes); otherwise an explicit, non-empty list of host ids. */
+function parseHostsOption(value: string | undefined): HostChoice {
+  if (value === undefined || value === 'all') return 'all';
+  const ids = value.split(',');
+  if (ids.some((id) => id.length === 0 || parseHostScope(`host:${id}:read`) === undefined)) throw new UsageError(HOSTS_USAGE);
+  if (ids.includes('all')) throw new UsageError('--hosts all cannot be combined with host ids');
+  return [...new Set(ids)];
+}
+
+function describeHosts(hosts: HostChoice): string {
+  return hosts === 'all' ? 'all hosts, including hosts added later' : `host${hosts.length === 1 ? '' : 's'} ${hosts.join(', ')} only`;
 }
 
 /** `clients token`: a bearer token for one agent, shown once. The gateway keeps only its hash. */
@@ -131,15 +149,23 @@ async function clientToken(paths: Paths, io: CliIo, options: TokenOptions): Prom
   if (!name || name.length > MAX_CLIENT_NAME_LENGTH) throw new UsageError(`clients token needs --name, 1 to ${MAX_CLIENT_NAME_LENGTH} characters`);
   const access = options.access ?? 'operate';
   if (access !== 'operate' && access !== 'read') throw new UsageError('--access must be operate (start and steer work, the default) or read');
+  const hosts = parseHostsOption(options.hosts);
   const ttl = options.ttl === undefined ? DEFAULT_TOKEN_TTL : options.ttl === 'never' ? null : parseDuration(options.ttl);
   if (ttl === undefined || (ttl !== null && (ttl < HOUR || ttl > MAX_TOKEN_TTL))) {
     throw new UsageError('--ttl must be a duration from 1h to 100y, for example 90d or 1y, or never');
   }
-  return withServices(paths, silentLogger, io.env, async ({ tokens, clock }) => {
+  return withServices(paths, silentLogger, io.env, async ({ tokens, clock }, config) => {
+    const unknown = hosts === 'all' ? [] : hosts.filter((id) => !config.hosts.some((host) => host.id === id));
+    if (unknown.length > 0) {
+      throw new GatewayError(
+        'host_not_found',
+        `No host ${unknown.join(', ')} in the config. Configured hosts: ${config.hosts.map((host) => host.id).join(', ')}. No token was created.`,
+      );
+    }
     const expiresAt = ttl === null ? NEVER_EXPIRES : clock() + ttl;
-    const { clientId, token } = tokens.issueOperatorToken({ name, scopes: scopesForChoice(access), expiresAt });
+    const { clientId, token } = tokens.issueOperatorToken({ name, scopes: scopesForGrant(access, hosts), expiresAt });
     const expiry = ttl === null ? 'never expires' : `expires ${shortTime(expiresAt)} (${relative(ttl)})`;
-    io.out(`Created client ${clientId} ("${name}", ${access} access). Its token ${expiry}:`);
+    io.out(`Created client ${clientId} ("${name}", ${access} access to ${describeHosts(hosts)}). Its token ${expiry}:`);
     io.out(token);
     io.out("This is the only time the token is shown. Put it in the agent's bearer token setting (Authorization: Bearer <token>).");
     io.out(`Revoke it with: clients revoke ${clientId}`);
@@ -159,7 +185,7 @@ function clients(paths: Paths, io: CliIo, action: string | undefined, id: string
       }
       const now = Date.now();
       const rows = list.map((client) => {
-        const access = client.scopes.includes(OPERATE_SCOPE) ? 'operate' : client.scopes.includes(READ_SCOPE) ? 'read' : '-';
+        const access = describeAccess(client.scopes);
         const expired = client.tokenExpiresAt !== null && client.tokenExpiresAt <= now;
         const status = client.revokedAt !== null ? 'revoked' : client.totalFamilies === 0 ? 'pending'
           : client.activeFamilies === 0 ? 'grants revoked' : expired ? 'expired' : isTokenClient(client) ? 'active' : 'unrevoked';
@@ -175,7 +201,8 @@ function clients(paths: Paths, io: CliIo, action: string | undefined, id: string
     }
     if (action === 'diagnose') {
       if (!id) throw new UsageError('clients diagnose needs a client id (see clients list)');
-      const diagnostic = diagnoseClient(storage.db, systemClock, mcpResource(loadConfig(paths.configPath)), id);
+      const config = loadConfig(paths.configPath);
+      const diagnostic = diagnoseClient(storage.db, systemClock, mcpResource(config), id);
       if (!diagnostic) throw new GatewayError('not_found', `No client with id ${id}`);
       const time = (value: number | null): string => value === null ? 'unknown (not observed; old data or never succeeded)'
         : value === NEVER_EXPIRES ? 'never' : new Date(value).toISOString();
@@ -190,6 +217,11 @@ function clients(paths: Paths, io: CliIo, action: string | undefined, id: string
         const revokedAt = family.revokedAt === null ? 'no' : time(family.revokedAt);
         const reason = family.revocationReason ?? (family.revokedAt === null ? 'none' : 'unknown');
         io.out(`Grant ${family.id}: revoked at ${revokedAt}; reason ${reason}`);
+        const scopes = parseScope(family.scope);
+        io.out(`  granted access: ${scopes ? describeAccess(scopes) : 'none (unrecognized scope; grants nothing)'}`);
+        const gone = [...new Set((scopes ?? []).map(parseHostScope).filter((host) => host !== undefined).map((host) => host.hostId))]
+          .filter((hostId) => !config.hosts.some((host) => host.id === hostId));
+        if (gone.length > 0) io.out(`  not configured: ${gone.join(', ')} (no access there unless a host with that id is configured again)`);
         for (const kind of ['access', 'refresh'] as const) {
           if (family[kind].length === 0) io.out(`  ${kind}: none`);
           for (const grant of family[kind]) {
@@ -368,6 +400,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         ttl: { type: 'string' },
         name: { type: 'string' },
         access: { type: 'string' },
+        hosts: { type: 'string' },
         title: { type: 'string' },
         all: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
@@ -391,6 +424,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       ['ttl', values.ttl, 'pair and clients token', command === 'pair' || (command === 'clients' && action === 'token')],
       ['name', values.name, 'clients token', command === 'clients' && action === 'token'],
       ['access', values.access, 'clients token', command === 'clients' && action === 'token'],
+      ['hosts', values.hosts, 'clients token', command === 'clients' && action === 'token'],
       ['title', values.title, 'jobs adopt', command === 'jobs' && action === 'adopt'],
       ['all', values.all, 'jobs list', command === 'jobs' && action === 'list'],
     ] as const;
@@ -409,7 +443,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       case 'clients':
         if (action !== 'token') return clients(paths, io, action, id);
         if (id !== undefined) throw new UsageError(`Unexpected arguments: ${id}`);
-        return await clientToken(paths, io, { name: values.name, access: values.access, ttl: values.ttl });
+        return await clientToken(paths, io, { name: values.name, access: values.access, hosts: values.hosts, ttl: values.ttl });
       case 'hosts':
         return await hosts(paths, io, action, id);
       case 'throttle':

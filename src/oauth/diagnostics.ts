@@ -12,6 +12,8 @@ export interface GrantSummary {
 }
 export interface FamilyDiagnostic {
   id: string;
+  /** The scope the grant was approved with (narrowed refreshes may carry less). */
+  scope: string;
   revokedAt: number | null;
   revocationReason: string | null;
   usableAccess: boolean;
@@ -53,8 +55,8 @@ export function diagnoseClient(db: Database, clock: Clock, resource: string, id:
   const times = db.prepare('SELECT last_mcp_success_at, last_refresh_success_at FROM oauth_clients WHERE id = ?').get(id) as {
     last_mcp_success_at: number | null; last_refresh_success_at: number | null;
   };
-  const families = (db.prepare('SELECT id, resource, revoked_at, revoked_reason FROM token_families WHERE client_id = ? ORDER BY created_at, id')
-    .all(id) as { id: string; resource: string; revoked_at: number | null; revoked_reason: string | null }[]).map((family): FamilyDiagnostic => {
+  const families = (db.prepare('SELECT id, scope, resource, revoked_at, revoked_reason FROM token_families WHERE client_id = ? ORDER BY created_at, id')
+    .all(id) as { id: string; scope: string; resource: string; revoked_at: number | null; revoked_reason: string | null }[]).map((family): FamilyDiagnostic => {
     const access = summarize((db.prepare('SELECT expires_at, revoked_at FROM access_tokens WHERE family_id = ? ORDER BY created_at, rowid')
       .all(family.id) as { expires_at: number; revoked_at: number | null }[]).map((row) => {
       const state: GrantState = accessIsUsable({ ...row, resource: family.resource,
@@ -77,7 +79,7 @@ export function diagnoseClient(db: Database, clock: Clock, resource: string, id:
         : row.rotated_at !== null ? 'grace_retry' : 'usable';
       return { state, expires_at: row.expires_at };
     }));
-    return { id: family.id, revokedAt: family.revoked_at, revocationReason: family.revoked_reason,
+    return { id: family.id, scope: family.scope, revokedAt: family.revoked_at, revocationReason: family.revoked_reason,
       usableAccess: access.some((grant) => grant.state === 'usable'),
       usableRefresh: refresh.some((grant) => grant.state === 'usable' || grant.state === 'grace_retry'), access, refresh };
   });

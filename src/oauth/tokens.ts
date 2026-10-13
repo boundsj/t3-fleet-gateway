@@ -2,7 +2,7 @@ import { isValidPkceVerifier, pkceChallenge, randomId, randomToken, safeEqual, s
 import { transaction, type Database } from '../db/database.ts';
 import { DAY, MINUTE, SECOND, type Clock } from '../time.ts';
 import { OAuthError } from './errors.ts';
-import { formatScope, parseScope, type Scope } from './scopes.ts';
+import { formatScope, narrowScopes, parseScope, type Scope } from './scopes.ts';
 
 export const AUTHORIZATION_CODE_TTL = 60 * SECOND;
 /**
@@ -227,12 +227,10 @@ export class TokenService {
       }
       let scope = row.scope;
       if (request.scope !== undefined) {
-        const requested = parseScope(request.scope);
-        const granted = row.scope.split(' ');
-        if (!requested || requested.length === 0 || !requested.every((item) => granted.includes(item))) {
-          return { error: new OAuthError('invalid_scope', 'Requested scope exceeds the original grant') };
-        }
-        scope = formatScope(requested);
+        // Narrowing only: a grant restricted to selected hosts never becomes a fleet-wide one (scopes.ts).
+        const narrowed = narrowScopes(parseScope(row.scope) ?? [], parseScope(request.scope));
+        if (!narrowed) return { error: new OAuthError('invalid_scope', 'Requested scope exceeds the original grant') };
+        scope = formatScope(narrowed);
       }
       // A retry leaves the pairs already issued from this token alone: the client may have kept any of them.
       const isRetry = row.rotated_at !== null;

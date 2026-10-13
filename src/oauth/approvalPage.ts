@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { formatScope, OPERATE_SCOPE } from './scopes.ts';
+import { formatScope, isHostScope, OPERATE_SCOPE, parseHostScope, permits, permitsAny, READ_SCOPE } from './scopes.ts';
 import type { AuthorizationRequest } from './authorizationRequest.ts';
 
 const STYLE = `
@@ -11,7 +11,7 @@ fieldset{border:0;padding:0;margin:1rem 0}label{display:block;margin:.3rem 0}
 input[type=text]{font:inherit;font-family:ui-monospace,monospace;letter-spacing:.1em;padding:.4rem;width:12rem}
 button{font:inherit;padding:.45rem 1rem;margin-right:.5rem;border-radius:6px;border:1px solid #888;background:#fff}
 button[value=approve]{background:#1b1b1f;color:#fff;border-color:#1b1b1f}
-.error{color:#a40000;font-weight:600}.muted{color:#555;font-size:.9rem}
+.error{color:#a40000;font-weight:600}.muted{color:#555;font-size:.9rem}.hosts{margin-left:1.6rem}
 `;
 const STYLE_HASH = createHash('sha256').update(STYLE).digest('base64');
 
@@ -69,16 +69,42 @@ export function renderNoticePage(title: string, message: string): RenderedPage {
   return { html: layout(title, `<h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p>`), headers: pageHeaders() };
 }
 
+/** A configured host as the approval page shows it. */
+export interface ApprovalHost {
+  id: string;
+  label?: string | undefined;
+}
+
+/**
+ * The approval form: the approval code, Read or Operate, and All machines (the fleet scopes: every host,
+ * including hosts added later) or Selected machines (host scopes for the ticked hosts only). A request that
+ * names host scopes sets a ceiling: choices beyond it are shown disabled, and the server refuses them anyway.
+ */
 export function renderApprovalPage(options: {
   request: AuthorizationRequest;
+  hosts: readonly ApprovalHost[];
   issuedAt: number;
   signature: string;
   error?: string;
 }): RenderedPage {
   const { request } = options;
+  const requestedScopes = request.requestedScopes;
   const redirectOrigin = new URL(request.redirectUri).origin;
-  const requested = request.requestedScopes.length > 0 ? formatScope(request.requestedScopes) : 'not specified';
-  const preferOperate = request.requestedScopes.includes(OPERATE_SCOPE);
+  const requested = requestedScopes.length > 0 ? formatScope(requestedScopes) : 'not specified';
+  const preferOperate = permitsAny(requestedScopes, 'operate');
+  const hostSpecific = requestedScopes.some(isHostScope);
+  const allowAll = !hostSpecific || requestedScopes.includes(READ_SCOPE) || requestedScopes.includes(OPERATE_SCOPE);
+  const allowOperate = !hostSpecific || preferOperate;
+  const disabled = (allowed: boolean) => (allowed ? '' : ' disabled');
+  const checked = (on: boolean) => (on ? ' checked' : '');
+  const hostChoices = options.hosts
+    .map((host) => {
+      const allowed = !hostSpecific || permits(requestedScopes, 'read', host.id) || permits(requestedScopes, 'operate', host.id);
+      const preselected = hostSpecific && requestedScopes.some((scope) => parseHostScope(scope)?.hostId === host.id);
+      const name = host.label ? `${escapeHtml(host.label)} <code>${escapeHtml(host.id)}</code>` : `<code>${escapeHtml(host.id)}</code>`;
+      return `<label><input type="checkbox" name="host" value="${escapeHtml(host.id)}"${checked(preselected)}${disabled(allowed)}> ${name}</label>`;
+    })
+    .join('');
   const hidden: Record<string, string> = {
     response_type: 'code',
     client_id: request.client.id,
@@ -108,8 +134,13 @@ ${error}
 <label for="approval_code">Approval code</label>
 <input id="approval_code" name="approval_code" type="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="32" required>
 <fieldset><legend>Access to grant</legend>
-<label><input type="radio" name="access" value="read"${preferOperate ? '' : ' checked'}> Read: see hosts, projects and job status</label>
-<label><input type="radio" name="access" value="operate"${preferOperate ? ' checked' : ''}> Operate: also start, steer, answer and cancel jobs</label>
+<label><input type="radio" name="access" value="read"${checked(!preferOperate)}> Read: see hosts, projects and job status</label>
+<label><input type="radio" name="access" value="operate"${checked(preferOperate)}${disabled(allowOperate)}> Operate: also start, steer, answer and cancel jobs</label>
+</fieldset>
+<fieldset><legend>Machines</legend>
+<label><input type="radio" name="hosts_mode" value="all"${checked(!hostSpecific)}${disabled(allowAll)}> All machines: every host on this gateway, including hosts added later</label>
+<label><input type="radio" name="hosts_mode" value="selected"${checked(hostSpecific)}> Selected machines only (hosts added later are not included):</label>
+<div class="hosts">${hostChoices}</div>
 </fieldset>
 <button type="submit" name="decision" value="approve">Approve</button>
 <button type="submit" name="decision" value="deny" formnovalidate>Deny</button>

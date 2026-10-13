@@ -42,8 +42,8 @@ Each entry is a machine running a T3 Code server.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `id` | required | Short stable id (lowercase letters, digits, hyphens; up to 32). Used in project config, CLI commands and tool output. |
-| `label` | none | Human-friendly name shown in `fleet_status`. |
+| `id` | required | Short stable id (lowercase letters, digits, hyphens; up to 32). Used in project config, CLI commands, tool output and per-host grants (`host:<id>:read`, `clients token --hosts <id>`): renaming a host drops it from every grant restricted to selected machines, and a grant for a removed id applies again to a new host given that id. |
+| `label` | none | Human-friendly name shown in `fleet_status` and on the approval page, which anyone who registers a client can open. |
 | `t3Url` | required | T3 server origin. `http` only for loopback; `https` for remote hosts. |
 | `mintPairingCode` | `["t3","auth","pairing","create","--ttl","5m","--json"]` | Command (argv, no shell) that prints a T3 pairing code as JSON with a `credential` field. For a remote host use something like `["ssh","other-host","t3","auth","pairing","create","--ttl","5m","--json"]`. Adding `--label t3-fleet-gateway` makes the pairing easy to spot in T3. |
 | `mintPairingCodeProbe` | none | Optional exact argv for a non-mutating check you have verified is safe to run at `doctor` and startup. No shell; 1–32 arguments, at most 4,096 characters each. Never set this to the pairing/mint command. See "Renewal command preflight" below. |
@@ -126,4 +126,4 @@ OAuth TTLs govern gateway grants only; static bearer tokens from `clients token`
 }
 ```
 
-Then run `t3-fleet-gateway hosts enroll studio`. Adding a host is configuration plus enrollment.
+Then run `t3-fleet-gateway hosts enroll studio`. Adding a host is configuration plus enrollment. Agents approved for *All machines* (and every grant from before v0.1.5) can use it at once; agents approved for selected machines cannot until you approve them again with it ticked (see [operations.md](operations.md#connect-an-agent)).

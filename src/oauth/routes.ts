@@ -4,7 +4,7 @@ import type { Route } from '../http/server.ts';
 import type { Logger } from '../log.ts';
 import type { Clock } from '../time.ts';
 import type { ApprovalCodes } from './approvalCodes.ts';
-import { renderApprovalPage, renderErrorPage, renderNoticePage, renderReturnPage } from './approvalPage.ts';
+import { renderApprovalPage, renderErrorPage, renderNoticePage, renderReturnPage, type ApprovalHost } from './approvalPage.ts';
 import { ApprovedRequests } from './approvedRequests.ts';
 import {
   authorizationRedirect,
@@ -17,7 +17,7 @@ import {
 import type { ClientStore } from './clients.ts';
 import { OAuthError } from './errors.ts';
 import { authorizationServerMetadata, protectedResourceMetadata } from './metadata.ts';
-import { formatScope, scopesForChoice, type AccessChoice } from './scopes.ts';
+import { formatScope, scopesForGrant, withinRequest, type AccessChoice, type HostChoice } from './scopes.ts';
 import { AUTHORIZATION_CODE_TTL, type TokenEvent, type TokenService } from './tokens.ts';
 
 const OAUTH_BODY_LIMIT = 16 * 1024;
@@ -32,6 +32,28 @@ export interface OAuthDependencies {
   clients: ClientStore;
   approvals: ApprovalCodes;
   tokens: TokenService;
+  /** The configured hosts, offered on the approval page for a grant restricted to selected machines. */
+  hosts: readonly ApprovalHost[];
+}
+
+/**
+ * The machines chosen on the approval form. `hosts_mode` all is the fleet-wide grant; selected needs at least one
+ * ticked, configured host. A form rendered before host selection existed sends neither field and means all, as it
+ * did then; anything ambiguous or malformed is refused, never taken for all.
+ */
+function hostSelection(form: URLSearchParams, hosts: readonly ApprovalHost[]): { hosts: HostChoice } | { error: string } {
+  const modes = form.getAll('hosts_mode');
+  const picked = form.getAll('host');
+  if (modes.length > 1) return { error: 'Choose All machines or Selected machines, then approve.' };
+  const mode = modes[0];
+  if (mode === undefined || mode === 'all') {
+    if (picked.length === 0) return { hosts: 'all' };
+    return { error: 'Machines are ticked but All machines is chosen. Choose Selected machines to limit access to them, or untick them.' };
+  }
+  if (mode !== 'selected') return { error: 'Choose All machines or Selected machines, then approve.' };
+  if (picked.length === 0) return { error: 'Tick at least one machine for Selected machines, or choose All machines.' };
+  if (picked.some((id) => !hosts.some((host) => host.id === id))) return { error: 'A ticked machine is not configured on this gateway. Reload the page.' };
+  return { hosts: [...new Set(picked)] };
 }
 
 export function logTokenEvent(logger: Logger): (event: TokenEvent) => void {
@@ -45,6 +67,7 @@ export function logTokenEvent(logger: Logger): (event: TokenEvent) => void {
 export function oauthRoutes(deps: OAuthDependencies): Route[] {
   const { publicUrl, logger } = deps;
   const approved = new ApprovedRequests(deps.clock);
+  const hostIds = deps.hosts.map((host) => host.id);
 
   /**
    * Answer the approval form with a page that navigates to the client's redirect URI, never with a redirect: browsers
@@ -74,11 +97,11 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
 
   const showApprovalPage = (res: ServerResponse, request: AuthorizationRequest, status: number, error?: string, issuedAt = deps.clock()): void => {
     const signature = signAuthorizationRequest(deps.key, request, issuedAt);
-    sendHtml(res, status, renderApprovalPage({ request, issuedAt, signature, ...(error ? { error } : {}) }));
+    sendHtml(res, status, renderApprovalPage({ request, hosts: deps.hosts, issuedAt, signature, ...(error ? { error } : {}) }));
   };
 
   const authorizeGet = (_req: IncomingMessage, res: ServerResponse, url: URL): void => {
-    const result = parseAuthorizationRequest(url.searchParams, deps.clients, deps.tokens.resource);
+    const result = parseAuthorizationRequest(url.searchParams, deps.clients, deps.tokens.resource, hostIds);
     if (result.kind !== 'ok') return respondToParseFailure(res, result);
     logger.info('oauth.approval_page_shown', { clientId: result.request.client.id });
     showApprovalPage(res, result.request, 200);
@@ -86,7 +109,7 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
 
   const authorizePost = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const form = await readForm(req, OAUTH_BODY_LIMIT);
-    const result = parseAuthorizationRequest(form, deps.clients, deps.tokens.resource);
+    const result = parseAuthorizationRequest(form, deps.clients, deps.tokens.resource, hostIds);
     if (result.kind !== 'ok') return respondToParseFailure(res, result, true);
     const { request } = result;
     const clientId = request.client.id;
@@ -127,6 +150,17 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
       showApprovalPage(res, request, 400, 'Choose Read or Operate, then approve.', issuedAt);
       return;
     }
+    // Checked before the approval code is spent: a refused choice costs no code and counts as no failed attempt.
+    const selection = hostSelection(form, deps.hosts);
+    if ('error' in selection) {
+      showApprovalPage(res, request, 400, selection.error, issuedAt);
+      return;
+    }
+    const scopes = scopesForGrant(access as AccessChoice, selection.hosts);
+    if (!withinRequest(request.requestedScopes, scopes)) {
+      showApprovalPage(res, request, 400, 'That is more access than the agent asked for. Choose only the machines and access it requested.', issuedAt);
+      return;
+    }
     const throttle = deps.approvals.throttleState(signature);
     if (throttle !== 'ok') {
       logger.warn('oauth.approval_throttled', { clientId, limit: throttle === 'global_locked' ? 'global' : 'request' });
@@ -142,7 +176,6 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
       showApprovalPage(res, request, 400, 'That approval code was not accepted. Codes work once and expire; mint a new one with t3-fleet-gateway pair.', issuedAt);
       return;
     }
-    const scopes = scopesForChoice(access as AccessChoice);
     const issuedCodeAt = deps.clock();
     const code = deps.tokens.issueAuthorizationCode({
       clientId,

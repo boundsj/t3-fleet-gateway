@@ -211,7 +211,7 @@ describe('cli', () => {
       };
       await expectStatus('-', 'pending');
       const { request, pair } = grant();
-      await expectStatus('read', 'unrevoked');
+      await expectStatus('read \\(all hosts\\)', 'unrevoked');
       if (replay === 'refresh_token') {
         const child = refresh(pair.refresh_token);
         refresh(child.refresh_token);
@@ -225,7 +225,7 @@ describe('cli', () => {
       assert.match(diagnostic.out, new RegExp(`reason ${replay}_reuse`));
       assert.match(await expectStatus('-', 'grants revoked'), /\(0 unrevoked grants; diagnose for usability\)/);
       grant();
-      assert.match(await expectStatus('read', 'unrevoked'), /\(1 unrevoked grants; diagnose for usability\)/);
+      assert.match(await expectStatus('read \\(all hosts\\)', 'unrevoked'), /\(1 unrevoked grants; diagnose for usability\)/);
       clients.revoke(client.id);
       await expectStatus('-', 'revoked');
     }
@@ -241,7 +241,7 @@ describe('cli', () => {
     const { clientId } = tokens.issueOperatorToken({ name: 'Expired bearer', scopes: ['fleet:read'], expiresAt: systemClock() });
     const listed = await run(env, ['clients', 'list']);
     assert.equal(listed.code, 0, listed.err);
-    assert.match(listed.out, new RegExp(`${clientId}\\s+Expired bearer\\s+read\\s+expired\\s`));
+    assert.match(listed.out, new RegExp(`${clientId}\\s+Expired bearer\\s+read \\(all hosts\\)\\s+expired\\s`));
     assert.equal((await run(env, ['clients', 'revoke', clientId])).code, 0);
     assert.match((await run(env, ['clients', 'list'])).out, new RegExp(`${clientId}\\s+Expired bearer\\s+-\\s+revoked\\s`));
   });
@@ -265,10 +265,10 @@ describe('cli', () => {
     }
     assert.equal((await run(env, ['clients', 'list'])).out, 'No clients registered.', 'a refused request creates nothing');
     assert.equal((await run(env, ['clients', 'token', '--name', 'Synthetic long-lived', '--ttl', '100y'])).code, 0);
-    assert.match((await run(env, ['clients', 'list'])).out, /Synthetic long-lived\s+operate\s+active\s.*bearer token, expires \S+$/m);
+    assert.match((await run(env, ['clients', 'list'])).out, /Synthetic long-lived\s+operate \(all hosts\)\s+active\s.*bearer token, expires \S+$/m);
     const minted = await run(env, ['clients', 'token', '--name', 'Synthetic notebook agent']);
     assert.equal(minted.code, 0, minted.err);
-    const [, clientId = ''] = /^Created client (\S+) \("Synthetic notebook agent", operate access\)\. Its token expires \S+ \(in 365d\):$/m.exec(minted.out) ?? [];
+    const [, clientId = ''] = /^Created client (\S+) \("Synthetic notebook agent", operate access to all hosts, including hosts added later\)\. Its token expires \S+ \(in 365d\):$/m.exec(minted.out) ?? [];
     const token = minted.out.split('\n')[1] ?? '';
     assert.match(token, /^[\w-]{43}$/);
     const diagnostic = await run(env, ['clients', 'diagnose', clientId]);
@@ -278,11 +278,11 @@ describe('cli', () => {
     assert.match(diagnostic.out, /refresh: none/);
     assert.ok(!diagnostic.out.includes(token));
     const reader = await run(env, ['clients', 'token', '--name', 'Synthetic reader', '--access', 'read', '--ttl', 'never']);
-    assert.match(reader.out, /\("Synthetic reader", read access\)\. Its token never expires:/);
+    assert.match(reader.out, /\("Synthetic reader", read access to all hosts, including hosts added later\)\. Its token never expires:/);
     const readToken = reader.out.split('\n')[1] ?? '';
     const listed = (await run(env, ['clients', 'list'])).out;
-    assert.match(listed, new RegExp(`${clientId}\\s+Synthetic notebook agent\\s+operate\\s+active\\s.*bearer token, expires \\S+$`, 'm'));
-    assert.match(listed, /Synthetic reader\s+read\s+active\s.*bearer token, never expires$/m);
+    assert.match(listed, new RegExp(`${clientId}\\s+Synthetic notebook agent\\s+operate \\(all hosts\\)\\s+active\\s.*bearer token, expires \\S+$`, 'm'));
+    assert.match(listed, /Synthetic reader\s+read \(all hosts\)\s+active\s.*bearer token, never expires$/m);
     assert.match((await run(env, ['throttle', 'status'])).out, /registrations: +0\/30/, 'operator tokens do not count as registrations');
 
     const initialize = (bearer: string) =>

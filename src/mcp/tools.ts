@@ -2,10 +2,11 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import type * as z from 'zod';
 import { describeError } from '../errors.ts';
 import type { Logger } from '../log.ts';
-import type { Scope } from '../oauth/scopes.ts';
+import { OPERATE_SCOPE, permitsAny, type FleetScope, type Scope } from '../oauth/scopes.ts';
 
 export interface ToolContext {
   clientId: string;
+  /** Fleet scopes cover every host; host scopes only their host. Tools check the host of what they touch. */
   scopes: readonly Scope[];
 }
 
@@ -21,7 +22,8 @@ export interface GatewayTool<I extends z.ZodObject = z.ZodObject, O extends z.Zo
   title: string;
   /** Written for an LLM: what it does, when to use it, and what the result means. */
   description: string;
-  scope: Scope;
+  /** The level it needs: fleet:read or fleet:operate, or the same level on at least one host (then per host in `run`). */
+  scope: FleetScope;
   readOnly: boolean;
   inputSchema: I;
   outputSchema: O;
@@ -41,7 +43,8 @@ function errorResult(code: string, message: string) {
 
 /**
  * Register tools on a per-request server. Every tool is listed for every caller; a call without the
- * required scope returns a tool error naming the missing scope instead of running.
+ * required level on any host returns a tool error naming the missing scope instead of running. Tools
+ * enforce the host of each project or job themselves.
  */
 export function registerTools(server: McpServer, tools: readonly GatewayTool[], context: ToolContext, logger: Logger): void {
   for (const tool of tools) {
@@ -64,11 +67,13 @@ export function registerTools(server: McpServer, tools: readonly GatewayTool[], 
             errorCode,
             durationMs: Math.round(performance.now() - started),
           });
-        if (!context.scopes.includes(tool.scope)) {
+        const level = tool.scope === OPERATE_SCOPE ? 'operate' : 'read';
+        if (!permitsAny(context.scopes, level)) {
           done('error', 'insufficient_scope');
           return errorResult(
             'insufficient_scope',
-            `${tool.name} requires the ${tool.scope} scope. Reconnect this agent and choose Operate on the approval page.`,
+            `${tool.name} requires the ${tool.scope} scope, or ${level} access on a host. Reconnect this agent and choose ` +
+              `${level === 'operate' ? 'Operate' : 'Read'} on the approval page.`,
           );
         }
         try {
