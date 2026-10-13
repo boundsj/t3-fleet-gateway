@@ -11,7 +11,7 @@
 ### Changed
 
 - Restore the prepared expanded opt-in lifecycle script: tool discovery, `work_list`, full `work_messages` reads and explicit successful-tool coverage. An explicit scratch project alias is required.
-- Document supervised live results for questions, operator approval, isolated runtime failure, standing-job reuse, delegated child/parent resumption, SDK outage recovery and a lost start response. Actual Grok/Notion QA connector recovery remains unverified, so T3FG-3 remains open.
+- Document supervised live results for questions, operator approval, isolated runtime failure, standing-job reuse, delegated child/parent resumption, SDK outage recovery and a lost start response. An actual Notion Custom Agent's existing MCP connection passed a production fleet check; QA job operations and Grok/Notion recovery remain unverified, so T3FG-3 remains open.
 
 All notable changes are recorded here. The project follows [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
