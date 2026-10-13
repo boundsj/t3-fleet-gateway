@@ -259,7 +259,7 @@ T3FG_E2E_PROJECT=pilot \
 | `T3FG_E2E_TIMEOUT_SECONDS` | `600` | How long to wait for each job transition |
 | `T3FG_E2E_POLL_SECONDS` | `5` | Delay between `work_feed` polls |
 
-`--config` (or `$T3FG_CONFIG`) is read for `publicUrl` and the project list only. If a job reaches `needs_input` (for example an approval under `approval-required`), the script says so and keeps waiting until the timeout, so you can approve it in T3. Each run registers a new agent client; remove old ones with `clients revoke`.
+`--config` (or `$T3FG_CONFIG`) is read for `publicUrl` only. If a job reaches `needs_input` (for example an approval under `approval-required`), the script says so and keeps waiting until the timeout, so you can approve it in T3. Each run registers a new agent client; remove old ones with `clients revoke`.
 
 The lifecycle script also discovers the tool list, checks `work_list`, reads complete replies with `work_messages`, and reports successful tool coverage. It exercises eight of the nine tools; `work_respond` needs a real question fixture. A lifecycle pass does not qualify questions, approvals, failures, delegation or a hosted connector.
 
