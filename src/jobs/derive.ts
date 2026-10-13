@@ -191,8 +191,8 @@ function parseTime(value: string | undefined): number | null {
  * the messages read only; activity items never become the excerpt. The rules, in order:
  *
  * 1. `cancel_requested` becomes `cancelled` once nothing is active (below), else stays.
- * 2. `needs_input` when T3 lists pending questions, or the thread or the followed run is `waiting`
- *    (`pendingRequestCount` > 0 with nothing answerable means a permission approval).
+ * 2. `needs_input` when T3 lists pending questions, or active work has `pendingRequestCount` > 0
+ *    (with nothing answerable, a permission approval). A transient `waiting` status alone is not a request.
  * 3. `running` while the thread has an `activeRunId`, its `status` is preparing, queued, starting,
  *    running or waiting, or the run the gateway started (`lastRunId` in `recentRuns`) is still in one
  *    of those statuses.
@@ -214,8 +214,7 @@ export function observe(job: ObservedJob, read: ThreadRead, pendingQuestionIds: 
   const followed = job.lastRunId === null ? undefined : recentRuns.find((run) => run.runId === job.lastRunId);
   const latest = recentRuns.find((run) => run.runId === thread.latestRunId) ?? recentRuns[0];
   const active = thread.activeRunId !== null || isActiveStatus(thread.status) || (followed !== undefined && isActiveStatus(followed.status));
-  const blocked =
-    pendingQuestionIds.length > 0 || thread.status === 'waiting' || followed?.status === 'waiting' || (active && thread.pendingRequestCount > 0);
+  const blocked = pendingQuestionIds.length > 0 || (active && thread.pendingRequestCount > 0);
 
   let state: ObservedState;
   let reason = thread.status;

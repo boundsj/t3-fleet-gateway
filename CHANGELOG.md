@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.4 (2026-10-12)
+
+### Fixed
+
+- T3FG-11, found during T3FG-3 supervised live QA: accept T3-owned opaque pending request IDs unchanged in `work_respond` and targeted `work_status`. Real Codex IDs exceed the previous 200-character limit. Job/request membership, non-empty validation and the separate question-id, answer-size and idempotency-key limits remain enforced. Public text-only regressions reproduce both failures before the fix; the original real question resumes successfully after it.
+
+- T3FG-12: a transient T3 `waiting` status with zero pending requests no longer invents a permission approval. Actual questions and positive pending counts still produce `needs_input`. The native sample predates this state-rule fix; its synthetic regression fails before the fix and passes after it, and real v0.1.4 question resumption after the fix showed no false approval. Genuine approval detection with a positive pending count was observed on v0.1.4; operator completion and the end-to-end approval retest remain pending.
+
+### Changed
+
+- Restore the prepared expanded opt-in lifecycle script: tool discovery, `work_list`, full `work_messages` reads and explicit successful-tool coverage. An explicit scratch project alias is required.
+- Document the supervised run from the v0.1.3 baseline through the fix builds: lifecycle, isolated runtime failure, standing-job reuse, delegated child/parent resumption, SDK outage recovery and a lost start response. Completed operator approval used v0.1.3’s state rule; v0.1.4 question and lifecycle retests passed. An actual Notion Custom Agent's existing MCP connection passed a production v0.1.3 fleet check; QA job operations and Grok/Notion recovery remain unverified, so T3FG-3 remains open along with the pending v0.1.4 approval retest.
+
 All notable changes are recorded here. The project follows [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
 ## 0.1.3 (2026-10-12)

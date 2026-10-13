@@ -102,6 +102,15 @@ describe('state derivation', () => {
     assert.deepEqual(observe(job(), waiting, ['req-1']).pendingRequestIds, ['req-1']);
   });
 
+  test('a transient waiting status without a pending request does not invent an approval', () => {
+    // Observed from real Codex just after a question answer, while its turn was ending:
+    // thread and run were waiting, with zero pending requests and no waiting approval item.
+    const ending = read({ status: 'waiting', activeRunId: 'run-1', pendingRequestCount: 0 }, [{ runId: 'run-1', status: 'waiting' }]);
+    const seen = observe(job(), ending, []);
+    assert.equal(seen.state, 'running');
+    assert.notEqual(seen.reason, 'approval');
+  });
+
   test('a finished turn is idle and follows the latest run', () => {
     for (const status of ['completed', 'interrupted', 'cancelled', 'rolled_back', 'idle']) {
       const seen = observe(job(), read({ status }, [{ runId: 'run-2', status: status === 'idle' ? 'completed' : status }]), []);

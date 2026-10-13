@@ -35,6 +35,10 @@ const requestIdInput = z
   .regex(REQUEST_ID_PATTERN, 'use 1-128 letters, digits, dots, underscores, colons or hyphens')
   .describe('Your unique id for this request, for safe retries (for example a UUID)');
 
+// These opaque IDs belong to T3, whose real Codex IDs exceed 200 characters.
+// Preserve them unchanged; job/request membership is checked live before responding.
+const pendingRequestIdInput = z.string().min(1);
+
 const jobIdInput = z
   .string()
   .regex(/^[0-9a-z]{6,32}$/, 'a job id as returned by work_start')
@@ -281,7 +285,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     readOnly: true,
     inputSchema: z.object({
       jobId: jobIdInput,
-      pendingRequestId: z.string().min(1).max(200).optional().describe('Read this pending request instead of the first five; other ids stay listed'),
+      pendingRequestId: pendingRequestIdInput.optional().describe('Read this pending request instead of the first five; other ids stay listed'),
     }),
     outputSchema: jobDetailSchema,
     async run(input, context) {
@@ -483,7 +487,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     readOnly: false,
     inputSchema: z.object({
       jobId: jobIdInput,
-      requestId: z.string().min(1).max(200).describe('A pendingRequests[].requestId from work_status'),
+      requestId: pendingRequestIdInput.describe('A pendingRequests[].requestId from work_status, passed unchanged'),
       answers: z
         .record(z.string().max(200), z.unknown())
         .refine((answers) => Object.keys(answers).length <= MAX_QUESTIONS && JSON.stringify(answers).length <= MAX_ANSWERS_CHARS, {
