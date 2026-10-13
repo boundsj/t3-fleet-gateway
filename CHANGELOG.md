@@ -11,7 +11,7 @@
 ### Changed
 
 - Restore the prepared expanded opt-in lifecycle script: tool discovery, `work_list`, full `work_messages` reads and explicit successful-tool coverage. An explicit scratch project alias is required.
-- Document baseline v0.1.3 live results for the lifecycle, operator approval, isolated runtime failure, standing-job reuse, delegated child/parent resumption, SDK outage recovery and a lost start response, plus passing v0.1.4 question and lifecycle retests. An actual Notion Custom Agent's existing MCP connection passed a production v0.1.3 fleet check; QA job operations and Grok/Notion recovery remain unverified, so T3FG-3 remains open along with the pending v0.1.4 approval retest.
+- Document the supervised run from the v0.1.3 baseline through the fix builds: lifecycle, isolated runtime failure, standing-job reuse, delegated child/parent resumption, SDK outage recovery and a lost start response. Completed operator approval used v0.1.3’s state rule; v0.1.4 question and lifecycle retests passed. An actual Notion Custom Agent's existing MCP connection passed a production v0.1.3 fleet check; QA job operations and Grok/Notion recovery remain unverified, so T3FG-3 remains open along with the pending v0.1.4 approval retest.
 
 All notable changes are recorded here. The project follows [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
