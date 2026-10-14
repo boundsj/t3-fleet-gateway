@@ -3,7 +3,7 @@ import { MINUTE } from '../time.ts';
 import type { ClientStore, OAuthClient } from './clients.ts';
 import type { OAuthErrorCode } from './errors.ts';
 import { redirectUriMatches } from './redirectUris.ts';
-import { formatScope, parseScope, type Scope } from './scopes.ts';
+import { formatScope, parseHostScope, parseScope, type Scope } from './scopes.ts';
 
 /** How long an approval page stays valid after it was rendered. */
 export const APPROVAL_PAGE_TTL = 10 * MINUTE;
@@ -33,8 +33,16 @@ function sameResource(a: string, b: string): boolean {
   return a.replace(/\/$/, '') === b.replace(/\/$/, '');
 }
 
-/** Validate an authorization request (RFC 6749 4.1.1 with OAuth 2.1 and RFC 8707 rules). */
-export function parseAuthorizationRequest(params: URLSearchParams, clients: ClientStore, resource: string): AuthorizationParseResult {
+/**
+ * Validate an authorization request (RFC 6749 4.1.1 with OAuth 2.1 and RFC 8707 rules). `hostIds` are the
+ * configured hosts: a host scope must name one of them.
+ */
+export function parseAuthorizationRequest(
+  params: URLSearchParams,
+  clients: ClientStore,
+  resource: string,
+  hostIds: readonly string[],
+): AuthorizationParseResult {
   const clientId = params.get('client_id');
   if (!clientId || params.getAll('client_id').length > 1) return { kind: 'fatal', message: 'Missing or repeated client_id.' };
   const client = clients.getActive(clientId);
@@ -64,6 +72,8 @@ export function parseAuthorizationRequest(params: URLSearchParams, clients: Clie
   }
   const requestedScopes = parseScope(params.get('scope'));
   if (!requestedScopes) return fail('invalid_scope', 'Unknown scope requested');
+  const unknownHost = requestedScopes.map(parseHostScope).some((host) => host !== undefined && !hostIds.includes(host.hostId));
+  if (unknownHost) return fail('invalid_scope', 'A requested host scope names no configured host');
   return { kind: 'ok', request: { client, redirectUri, codeChallenge, state, requestedScopes, resource: requestedResource } };
 }
 

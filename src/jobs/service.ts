@@ -4,6 +4,7 @@ import { describeError, GatewayError } from '../errors.ts';
 import { resolveProjectId } from '../hosts/projects.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import type { Logger } from '../log.ts';
+import { permits, permittedHosts, type AccessLevel, type Scope } from '../oauth/scopes.ts';
 import { T3TransportError, type T3Client } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
 import type { ThreadItem, ThreadRead } from '../t3/schemas.ts';
@@ -14,7 +15,7 @@ import { newJobId } from './ids.ts';
 import { readWorkerMessages, type MessagePage, type MessageQuery } from './messages.ts';
 import { cancelRequestId } from './interrupt.ts';
 import { isTerminal, OPEN_STATES, type JobState } from './states.ts';
-import type { FeedEvent, Job, JobEvent, JobStore } from './store.ts';
+import { jobNotFound, type FeedEvent, type Job, type JobEvent, type JobScope, type JobStore } from './store.ts';
 
 /** Bounds on agent-supplied text. T3 accepts up to 120,000 characters per message. */
 export const MAX_TASK_CHARS = 20_000;
@@ -36,8 +37,13 @@ const TITLE_FROM_TASK_CHARS = 60;
 /** Pages of 100 messages read to find the end of a thread being adopted (messages view). */
 const MAX_ADOPT_PAGES = 1000;
 
+/**
+ * The agent calling a work tool. Its scopes decide which hosts it may read and operate on (oauth/scopes.ts):
+ * a project or job on a host it may not read is reported exactly as one that does not exist.
+ */
 export interface Caller {
   clientId: string;
+  scopes: readonly Scope[];
 }
 
 export interface StartInput {
@@ -198,11 +204,62 @@ export class JobService {
     return project;
   }
 
+  /**
+   * A project as an agent may use it: one on a host its grant does not let it read is unknown, as in the
+   * error for a missing project, whose list of known projects names only visible ones.
+   */
+  #projectFor(caller: Caller, alias: string, level: AccessLevel): ProjectConfig {
+    const project = this.#config.projects.find((candidate) => candidate.alias === alias);
+    if (project && permits(caller.scopes, level, project.host)) return project;
+    if (project && permits(caller.scopes, 'read', project.host)) {
+      throw new GatewayError(
+        'insufficient_scope',
+        `Project "${alias}" is on host ${project.host}, where this agent has read access only. Ask the operator for Operate access on that host.`,
+      );
+    }
+    const known = this.#config.projects.filter((candidate) => permits(caller.scopes, 'read', candidate.host)).map((candidate) => candidate.alias);
+    throw new GatewayError('not_found', `No project "${alias}". Known projects: ${known.join(', ') || '(none configured)'}. fleet_status lists them.`);
+  }
+
+  /**
+   * A job as an agent may use it, checked before anything is read from T3 or returned from the ledger: a job on
+   * a host the agent may not read is reported exactly as an unknown job id; one it may read but not operate is
+   * refused with insufficient_scope.
+   */
+  #jobFor(caller: Caller, jobId: string, level: AccessLevel): Job {
+    const job = this.store.get(jobId);
+    if (job && permits(caller.scopes, level, job.hostId)) return job;
+    if (job && permits(caller.scopes, 'read', job.hostId)) {
+      throw new GatewayError(
+        'insufficient_scope',
+        `Job ${job.id} is on host ${job.hostId}, where this agent has read access only. Ask the operator for Operate access on that host.`,
+      );
+    }
+    throw jobNotFound(jobId);
+  }
+
+  /** The rows of the ledger an agent may read: its grant's hosts, unless it covers all. */
+  #visible(caller: Caller, mine = false): JobScope {
+    const hosts = permittedHosts(caller.scopes, 'read');
+    return { ...(mine ? { clientId: caller.clientId } : {}), ...(hosts === 'all' ? {} : { hostIds: hosts }) };
+  }
+
   start(caller: Caller, input: StartInput): { job: Job; created: boolean } {
-    const project = this.project(input.project);
+    const project = this.#projectFor(caller, input.project, 'operate');
+    const key = this.store.idempotencyKey(caller.clientId, 'work_start', input.requestId);
+    // A retry returns the job of the first request, which the project config may since have moved to another host:
+    // the agent must still be allowed to operate on the job's own host.
+    const replayed = key && this.store.get(key.jobId);
+    if (replayed && !permits(caller.scopes, 'operate', replayed.hostId)) {
+      throw new GatewayError(
+        'insufficient_scope',
+        `requestId "${input.requestId}" belongs to a job on a host this agent may not operate on. Use a new requestId for new work.`,
+      );
+    }
     // A retry of a request made before the operator turned work_start off still gets its job back.
-    if (!project.allowWorkStart && !this.store.idempotencyKey(caller.clientId, 'work_start', input.requestId)) {
-      throw new GatewayError('start_disabled', startDisabledMessage(project.alias, this.store.standingJobs(project.alias)));
+    if (!project.allowWorkStart && !key) {
+      const standing = this.store.standingJobs(project.alias).filter((job) => permits(caller.scopes, 'read', job.hostId));
+      throw new GatewayError('start_disabled', startDisabledMessage(project.alias, standing));
     }
     const id = newJobId();
     const result = this.store.create({
@@ -222,18 +279,18 @@ export class JobService {
   }
 
   list(filter: { project?: string | undefined; states?: readonly JobState[] | undefined; mine?: boolean | undefined; limit: number }, caller: Caller): Job[] {
-    if (filter.project !== undefined) this.project(filter.project);
+    if (filter.project !== undefined) this.#projectFor(caller, filter.project, 'read');
     return this.store.list({
       limit: filter.limit,
       ...(filter.project === undefined ? {} : { projectAlias: filter.project }),
       ...(filter.states === undefined ? {} : { states: filter.states }),
-      ...(filter.mine ? { clientId: caller.clientId } : {}),
+      ...this.#visible(caller, filter.mine ?? false),
     });
   }
 
   /** One job with its recent events and, read live from T3, the questions it waits on. */
-  async status(jobId: string, pendingRequestId?: string): Promise<JobDetail> {
-    const job = this.store.require(jobId);
+  async status(caller: Caller, jobId: string, pendingRequestId?: string): Promise<JobDetail> {
+    const job = this.#jobFor(caller, jobId, 'read');
     if (pendingRequestId !== undefined && !job.pendingRequestIds.includes(pendingRequestId)) {
       throw new GatewayError('not_found', 'That request is not pending on this job. Read work_status without pendingRequestId for the current list.');
     }
@@ -255,8 +312,8 @@ export class JobService {
   }
 
   /** A page of the job thread's worker messages, read live from T3 (see messages.ts). */
-  async messages(jobId: string, query: MessageQuery): Promise<{ job: Job; page: MessagePage }> {
-    const job = this.store.require(jobId);
+  async messages(caller: Caller, jobId: string, query: MessageQuery): Promise<{ job: Job; page: MessagePage }> {
+    const job = this.#jobFor(caller, jobId, 'read');
     if (query.before !== undefined && query.after !== undefined) throw new GatewayError('invalid_argument', 'Pass before or after, not both.');
     if (job.threadId === null) throw new GatewayError('job_state_conflict', `Job ${jobId} has no T3 thread yet (${job.state}), so it has no messages.`);
     return { job, page: await readWorkerMessages(this.#registry.client(job.hostId), job.threadId, job.readPosition, query) };
@@ -388,7 +445,8 @@ export class JobService {
    * T3 clientRequestId, which T3 deduplicates.
    */
   async continue(caller: Caller, input: ContinueInput): Promise<ContinueResult> {
-    let job = this.store.require(input.jobId);
+    // Before the request id is looked up, so a replay never returns a stored result for a job the agent may not operate.
+    let job = this.#jobFor(caller, input.jobId, 'operate');
     const hash = inputHash('work_continue', { jobId: input.jobId, message: input.message });
     const key = this.store.idempotencyKey(caller.clientId, 'work_continue', input.requestId);
     if (key) {
@@ -443,8 +501,8 @@ export class JobService {
   }
 
   /** Answer one of the job's pending questions. Only requests T3 lists for the job's own thread are accepted. */
-  async respond(input: RespondInput): Promise<Job> {
-    const job = this.store.require(input.jobId);
+  async respond(caller: Caller, input: RespondInput): Promise<Job> {
+    const job = this.#jobFor(caller, input.jobId, 'operate');
     if (job.threadId === null || isTerminal(job.state)) {
       throw new GatewayError('job_state_conflict', `Job ${job.id} is ${job.state}; it has no question to answer.`);
     }
@@ -477,19 +535,19 @@ export class JobService {
    * is in flight or unconfirmed, the job becomes cancel_requested and the engine delivers the
    * interrupt later. A T3 refusal is returned and the job keeps its state.
    */
-  async cancel(input: { jobId: string }): Promise<CancelResult> {
-    const job = this.store.require(input.jobId);
+  async cancel(caller: Caller, input: { jobId: string }): Promise<CancelResult> {
+    const job = this.#jobFor(caller, input.jobId, 'operate');
     if (job.standing) return this.#interruptStanding(job);
     if (job.state === 'queued') {
       const cancelled = this.store.transition(job.id, { from: ['queued'], to: 'cancelled', detail: { reason: 'cancelled_before_launch' } });
-      return cancelled ? { job: cancelled, outcome: 'cancelled', delivered: true } : this.cancel(input);
+      return cancelled ? { job: cancelled, outcome: 'cancelled', delivered: true } : this.cancel(caller, input);
     }
     if (isTerminal(job.state)) return { job, outcome: job.state === 'cancelled' ? 'cancelled' : 'already_finished', delivered: true };
     const request = { from: ['dispatching', 'unknown', 'running', 'needs_input', 'idle'] as JobState[], to: 'cancel_requested' as const, detail: { reason: 'cancel_requested' } };
     if (job.threadId === null) {
       // The launch is in flight or unconfirmed: the engine interrupts the thread if it turns up.
       const requested = job.state === 'cancel_requested' ? job : this.store.transition(job.id, request);
-      return requested ? { job: requested, outcome: 'cancel_requested', delivered: false } : this.cancel(input);
+      return requested ? { job: requested, outcome: 'cancel_requested', delivered: false } : this.cancel(caller, input);
     }
     let status: string;
     try {
@@ -560,16 +618,19 @@ export class JobService {
     return { job: this.store.require(job.id), outcome: 'interrupt_requested', delivered: true };
   }
 
-  /** Events after `cursor` (exclusive) and the jobs needing attention. */
+  /**
+   * Events after `cursor` (exclusive) and the jobs needing attention. Cursors are global event ids; events of jobs
+   * the agent may not see are filtered out before the limit, so they never take a place on its page.
+   */
   feed(input: { cursor: number; limit: number; mine: boolean }, caller: Caller): Feed {
-    const clientId = input.mine ? caller.clientId : undefined;
-    const page = this.store.eventsAfter(input.cursor, input.limit + 1, clientId);
+    const scope = this.#visible(caller, input.mine);
+    const page = this.store.eventsAfter(input.cursor, input.limit + 1, scope);
     const events = page.slice(0, input.limit);
     return {
       events,
       nextCursor: events.at(-1)?.id ?? input.cursor,
       hasMore: page.length > input.limit,
-      attention: this.store.attention(this.#clock(), ATTENTION_RECENT_MS, MAX_ATTENTION, clientId),
+      attention: this.store.attention(this.#clock(), ATTENTION_RECENT_MS, MAX_ATTENTION, scope),
     };
   }
 }

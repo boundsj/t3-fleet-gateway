@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.5 (2026-10-13)
+
+### Added
+
+- Per-machine authorization. The approval page offers All machines (the fleet scopes: every host, including hosts added later) or Selected machines (`host:<id>:read` / `host:<id>:operate` for the ticked hosts only), and `clients token --hosts mini,macbook` (or `--hosts all`, the default) does the same for bearer tokens. Every tool enforces the hosts: `fleet_status`, `work_list`, `work_feed` events and attention show only permitted hosts (filtered before limits); direct job tools answer a job elsewhere as an unknown id, and `work_start` checks both the project's host and the host of a replayed request's job. Empty, malformed or unknown selections are refused before an approval code is spent or a token is stored. A refused approval page, including after a wrong approval code, is shown again with the machines and access the operator chose, never the request's defaults.
+- `clients list` and `clients diagnose` show granted access per host.
+
+### Compatibility
+
+- No schema migration. Grants, refresh tokens and bearer tokens issued before 0.1.5 keep their fleet-wide access, including hosts added later, with no reauthorization. Metadata still advertises only the fleet scopes. Refresh can keep or narrow a restricted grant, never widen it; a refresh that asks for the generic fleet scopes keeps the grant's own hosts.
+- `clients list` shows fleet-wide access as `operate (all hosts)` / `read (all hosts)`, and `clients token` names the hosts it covers.
+
+Covered by synthetic two-host tests through the public OAuth, MCP and CLI interfaces. No live multi-host qualification is claimed.
+
 ## 0.1.4 (2026-10-12)
 
 ### Fixed

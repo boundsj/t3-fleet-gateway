@@ -72,17 +72,50 @@ export async function loadApprovalPage(url: string): Promise<{ status: number; h
   return { status: response.status, html, headers: response.headers, fields: hiddenFields(html) };
 }
 
+/** `extra` adds fields that may repeat, such as the approval page's `host` checkboxes. */
 export async function submitApproval(
   baseUrl: string,
   fields: Record<string, string>,
-  form: { approval_code?: string; access?: string; decision?: string },
+  form: { approval_code?: string; access?: string; decision?: string; hosts_mode?: string },
+  extra: readonly [string, string][] = [],
 ): Promise<Response> {
+  const body = new URLSearchParams({ ...fields, decision: 'approve', access: 'read', ...form } as Record<string, string>);
+  for (const [name, value] of extra) body.append(name, value);
   return fetch(`${baseUrl}/oauth/authorize`, {
     method: 'POST',
     redirect: 'manual',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ ...fields, decision: 'approve', access: 'read', ...form } as Record<string, string>),
+    body,
   });
+}
+
+/** The radio buttons and checkboxes a page shows checked and enabled: what a browser submits if the operator changes none. */
+export function checkedFields(html: string): [string, string][] {
+  const fields: [string, string][] = [];
+  for (const match of html.matchAll(/<input type="(?:radio|checkbox)" name="([^"]+)" value="([^"]*)"([^>]*)>/g)) {
+    const flags = match[3] as string;
+    if (flags.includes(' checked') && !flags.includes(' disabled')) fields.push([match[1] as string, unescapeHtml(match[2] as string)]);
+  }
+  return fields;
+}
+
+/** Approve a page as shown, typing only the approval code: its hidden fields and checked choices, as a browser sends them. */
+export async function approveAsShown(baseUrl: string, html: string, approvalCode: string): Promise<Response> {
+  const body = new URLSearchParams({ ...hiddenFields(html), approval_code: approvalCode, decision: 'approve' });
+  for (const [name, value] of checkedFields(html)) body.append(name, value);
+  return fetch(`${baseUrl}/oauth/authorize`, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+}
+
+/** The approval form fields for a machine choice: all, or the ticked host ids. */
+export function machineFields(hosts: 'all' | readonly string[]): { form: { hosts_mode: string }; extra: [string, string][] } {
+  return hosts === 'all'
+    ? { form: { hosts_mode: 'all' }, extra: [] }
+    : { form: { hosts_mode: 'selected' }, extra: hosts.map((id) => ['host', id] as [string, string]) };
 }
 
 export async function tokenRequest(baseUrl: string, params: Record<string, string>): Promise<Response> {
@@ -105,12 +138,19 @@ export interface IssuedTokens {
 export async function signIn(
   baseUrl: string,
   mintCode: () => string,
-  options: { access?: 'read' | 'operate'; clientId?: string } = {},
+  options: { access?: 'read' | 'operate'; clientId?: string; hosts?: 'all' | readonly string[]; scope?: string } = {},
 ): Promise<{ clientId: string; tokens: IssuedTokens }> {
   const clientId = options.clientId ?? (await registerClient(baseUrl));
   const { verifier, challenge } = pkcePair();
-  const page = await loadApprovalPage(authorizeUrl(baseUrl, standardAuthorizeParams(clientId, challenge)));
-  const approval = await submitApproval(baseUrl, page.fields, { approval_code: mintCode(), access: options.access ?? 'read' });
+  const page = await loadApprovalPage(authorizeUrl(baseUrl, standardAuthorizeParams(clientId, challenge, { scope: options.scope })));
+  // Without `hosts` the form is submitted as a page from before host selection would have been: no machine fields.
+  const machines = options.hosts === undefined ? { form: {}, extra: [] } : machineFields(options.hosts);
+  const approval = await submitApproval(
+    baseUrl,
+    page.fields,
+    { approval_code: mintCode(), access: options.access ?? 'read', ...machines.form },
+    machines.extra,
+  );
   const location = await authorizationResponse(approval);
   const code = location.searchParams.get('code');
   if (!code) throw new Error(`no code in the authorization response: ${location.href}`);

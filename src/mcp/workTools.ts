@@ -289,7 +289,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     }),
     outputSchema: jobDetailSchema,
     async run(input, context) {
-      const detail = await jobs.status(input.jobId, input.pendingRequestId);
+      const detail = await jobs.status(context, input.jobId, input.pendingRequestId);
       const { job } = detail;
       const view: JobDetailView = {
         ...jobView(job, context),
@@ -362,7 +362,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       hasMore: z.boolean().describe('More messages wait in the direction you read: older ones, or newer ones with after'),
     }),
     async run(input, context) {
-      const { job, page } = await jobs.messages(input.jobId, {
+      const { job, page } = await jobs.messages(context, input.jobId, {
         before: input.before === undefined ? undefined : Number(input.before),
         after: input.after === undefined ? undefined : Number(input.after),
         limit: input.limit ?? 1,
@@ -497,7 +497,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     }),
     outputSchema: z.object({ job: jobSchema }),
     async run(input, context) {
-      const job = await jobs.respond(input);
+      const job = await jobs.respond(context, input);
       const view = jobView(job, context);
       return { structured: { job: view }, summary: `Answered ${input.requestId}. ${describeJob(view)}` };
     },
@@ -529,7 +529,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
         .describe('Standing job with nothing running: questions T3 still lists for it. They need an answer with work_respond'),
     }),
     async run(input, context) {
-      const result = await jobs.cancel(input);
+      const result = await jobs.cancel(context, input);
       const view = jobView(result.job, context);
       // A standing job is never closed: confirmed means its turn is not running.
       const confirmed = view.standing ? result.outcome !== 'interrupt_requested' : ['cancelled', 'failed', 'released'].includes(view.state);

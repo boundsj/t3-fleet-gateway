@@ -5,7 +5,7 @@ import type { HostRegistry } from '../hosts/registry.ts';
 import { jobCountsByHost } from '../jobs/counts.ts';
 import type { JobService } from '../jobs/service.ts';
 import { JOB_STATES } from '../jobs/states.ts';
-import { READ_SCOPE } from '../oauth/scopes.ts';
+import { permits, READ_SCOPE } from '../oauth/scopes.ts';
 import { isoTime } from '../time.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
 import { defineTool } from './tools.ts';
@@ -103,16 +103,20 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
       'long-lived T3 threads the operator registered there, such as a coordinator ("chief of staff") that plans and delegates ' +
       'the work itself. For such a project, talk to the coordinator: send it instructions with work_continue on its jobId and ' +
       'follow its replies with work_feed and work_status, rather than starting jobs. When allowWorkStart is false, work_start ' +
-      'is refused there and the standing jobs are the way in. Use this first to learn the project aliases and where to send ' +
+      'is refused there and the standing jobs are the way in. If the operator approved you for selected machines only, you ' +
+      'see just those hosts and their projects, and every work tool works only with jobs on them. Use this first to learn the ' +
+      'project aliases and where to send ' +
       'work, or to check why work is not progressing. Read-only; safe to call any time.',
     scope: READ_SCOPE,
     readOnly: true,
     inputSchema: z.object({}),
     outputSchema,
-    async run() {
+    async run(_input, context) {
+      // Only the hosts this agent's grant lets it read are listed, counted and checked; their projects and standing jobs likewise.
+      const visible = (hostId: string) => permits(context.scopes, 'read', hostId);
       const counts = jobCountsByHost(deps.db);
       const hosts = await Promise.all(
-        deps.config.hosts.map(async (host): Promise<HostStatus> => {
+        deps.config.hosts.filter((host) => visible(host.id)).map(async (host): Promise<HostStatus> => {
           const [health, credential] = [await deps.registry.health(host.id), deps.registry.credentialStatus(host.id)];
           const jobs = counts.get(host.id) ?? { running: 0, queued: 0 };
           return {
@@ -134,8 +138,8 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
           };
         }),
       );
-      const standing = deps.jobs.store.standingJobs();
-      const projects = deps.config.projects.map((project) => ({
+      const standing = deps.jobs.store.standingJobs().filter((job) => visible(job.hostId));
+      const projects = deps.config.projects.filter((project) => visible(project.host)).map((project) => ({
         alias: project.alias,
         description: project.description,
         host: project.host,

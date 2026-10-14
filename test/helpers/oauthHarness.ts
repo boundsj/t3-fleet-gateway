@@ -22,8 +22,15 @@ export interface OAuthHarness {
   tokens: TokenService;
 }
 
+/** Synthetic configured hosts the harness's approval page offers. */
+export const OAUTH_HOSTS = [{ id: 'mini', label: 'Synthetic mini' }, { id: 'macbook' }];
+
 /** The OAuth routes alone, on a loopback port, with a controllable clock and captured logs. */
-export async function startOAuthHarness(t: TestContext, settings = { accessTtlSeconds: 3600, refreshIdleTtlDays: 30 }): Promise<OAuthHarness> {
+export async function startOAuthHarness(
+  t: TestContext,
+  settings = { accessTtlSeconds: 3600, refreshIdleTtlDays: 30 },
+  hosts: readonly { id: string; label?: string }[] = OAUTH_HOSTS,
+): Promise<OAuthHarness> {
   const data = openDataDir(join(tempDir(t), 'data'));
   const db = openDatabase(data.databasePath);
   const clock = testClock();
@@ -36,7 +43,7 @@ export async function startOAuthHarness(t: TestContext, settings = { accessTtlSe
   const clients = new ClientStore(db, clock);
   const approvals = new ApprovalCodes(db, data.key, clock);
   const tokens = new TokenService(db, clock, { resource, ...settings }, logTokenEvent(logger));
-  route = createRouter(oauthRoutes({ publicUrl: baseUrl, key: data.key, clock, logger, clients, approvals, tokens }), logger);
+  route = createRouter(oauthRoutes({ publicUrl: baseUrl, key: data.key, clock, logger, clients, approvals, tokens, hosts }), logger);
   t.after(async () => {
     await server.close(100);
     db.close();

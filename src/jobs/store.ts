@@ -191,6 +191,35 @@ interface EventRow {
  */
 const MINE = '(jobs.client_id = ? OR jobs.standing = 1)';
 
+/**
+ * What one agent may see: `clientId` applies the `mine` filter (MINE), and `hostIds` limits rows to jobs on those
+ * hosts (an agent whose grant covers selected hosts only; none matches nothing). Both apply in SQL, before any limit,
+ * so jobs the agent may not see never take a place on its page.
+ */
+export interface JobScope {
+  clientId?: string | undefined;
+  hostIds?: readonly string[] | undefined;
+}
+
+function scopeClause(scope: JobScope): { sql: string; params: string[] } {
+  const parts: string[] = [];
+  const params: string[] = [];
+  if (scope.clientId !== undefined) {
+    parts.push(MINE);
+    params.push(scope.clientId);
+  }
+  if (scope.hostIds !== undefined) {
+    parts.push(scope.hostIds.length === 0 ? '0' : `jobs.host_id IN (${scope.hostIds.map(() => '?').join(', ')})`);
+    params.push(...scope.hostIds);
+  }
+  return { sql: parts.map((part) => `AND ${part}`).join(' '), params };
+}
+
+/** The error for a job id that is unknown, or that the caller may not see: the two are indistinguishable. */
+export function jobNotFound(id: string): GatewayError {
+  return new GatewayError('not_found', `No job ${id}. Use work_list to see jobs.`);
+}
+
 /** Placeholders for TERMINAL_STATES in `state NOT IN (…)`. */
 const NOT_OPEN = TERMINAL_STATES.map(() => '?').join(', ');
 
@@ -360,13 +389,13 @@ export class JobStore {
 
   require(id: string): Job {
     const job = this.get(id);
-    if (!job) throw new GatewayError('not_found', `No job ${id}. Use work_list to see jobs.`);
+    if (!job) throw jobNotFound(id);
     return job;
   }
 
-  /** Jobs newest first, optionally filtered. `clientId`: that agent's jobs and every standing job (MINE). */
-  list(filter: { projectAlias?: string; states?: readonly JobState[]; clientId?: string; limit: number }): Job[] {
-    const where: string[] = [];
+  /** Jobs newest first, optionally filtered. `clientId` and `hostIds`: see JobScope. */
+  list(filter: { projectAlias?: string; states?: readonly JobState[]; limit: number } & JobScope): Job[] {
+    const where: string[] = ['1'];
     const params: (string | number)[] = [];
     if (filter.projectAlias !== undefined) {
       where.push('project_alias = ?');
@@ -376,14 +405,10 @@ export class JobStore {
       where.push(`state IN (${filter.states.map(() => '?').join(', ')})`);
       params.push(...filter.states);
     }
-    if (filter.clientId !== undefined) {
-      where.push(MINE);
-      params.push(filter.clientId);
-    }
-    const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const scope = scopeClause(filter);
     const rows = this.#db
-      .prepare(`SELECT * FROM jobs ${clause} ORDER BY created_at DESC, rowid DESC LIMIT ?`)
-      .all(...params, filter.limit) as unknown as JobRow[];
+      .prepare(`SELECT * FROM jobs WHERE ${where.join(' AND ')} ${scope.sql} ORDER BY created_at DESC, rowid DESC LIMIT ?`)
+      .all(...params, ...scope.params, filter.limit) as unknown as JobRow[];
     return rows.map(toJob);
   }
 
@@ -590,34 +615,34 @@ export class JobStore {
     return rows.map(toEvent);
   }
 
-  /** Events after `cursor` (exclusive), oldest first, with their job's project and title. `clientId`: see MINE. */
-  eventsAfter(cursor: number, limit: number, clientId?: string): FeedEvent[] {
-    const mine = clientId === undefined ? '' : `AND ${MINE}`;
+  /** Events after `cursor` (exclusive), oldest first, with their job's project and title. `scope`: see JobScope. */
+  eventsAfter(cursor: number, limit: number, scope: JobScope = {}): FeedEvent[] {
+    const filter = scopeClause(scope);
     const rows = this.#db
       .prepare(
         `SELECT job_events.*, jobs.project_alias, jobs.title FROM job_events JOIN jobs ON jobs.id = job_events.job_id
-          WHERE job_events.id > ? ${mine} ORDER BY job_events.id LIMIT ?`,
+          WHERE job_events.id > ? ${filter.sql} ORDER BY job_events.id LIMIT ?`,
       )
-      .all(...(clientId === undefined ? [cursor, limit] : [cursor, clientId, limit])) as unknown as (EventRow & { project_alias: string; title: string })[];
+      .all(cursor, ...filter.params, limit) as unknown as (EventRow & { project_alias: string; title: string })[];
     return rows.map((row) => ({ ...toEvent(row), projectAlias: row.project_alias, title: row.title }));
   }
 
   /**
    * Jobs that want the agent's attention, most recent change first: blocked or unconfirmed jobs at any
    * age, and jobs that went idle or failed, or whose delegated work ended while idle, within `recentMs`.
-   * `clientId`: see MINE.
+   * `scope`: see JobScope.
    */
-  attention(now: number, recentMs: number, limit: number, clientId?: string): Job[] {
-    const mine = clientId === undefined ? '' : `AND ${MINE}`;
+  attention(now: number, recentMs: number, limit: number, scope: JobScope = {}): Job[] {
+    const filter = scopeClause(scope);
     const since = now - recentMs;
     const rows = this.#db
       .prepare(
         `SELECT * FROM jobs
           WHERE (state IN ('needs_input', 'unknown') OR (state IN ('idle', 'failed') AND state_changed_at >= ?)
-            OR (state = 'idle' AND delegated_ended_at >= ?)) ${mine}
+            OR (state = 'idle' AND delegated_ended_at >= ?)) ${filter.sql}
           ORDER BY MAX(state_changed_at, COALESCE(delegated_ended_at, 0)) DESC, rowid DESC LIMIT ?`,
       )
-      .all(...(clientId === undefined ? [since, since, limit] : [since, since, clientId, limit])) as unknown as JobRow[];
+      .all(since, since, ...filter.params, limit) as unknown as JobRow[];
     return rows.map(toJob);
   }
 

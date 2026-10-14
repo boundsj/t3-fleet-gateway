@@ -118,7 +118,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
     tools: (options.tools ?? gatewayTools)(services),
     logger,
   });
-  const router = createRouter([...oauthRoutes({ ...services, publicUrl: config.publicUrl }), mcp.route], logger);
+  const router = createRouter([...oauthRoutes({ ...services, publicUrl: config.publicUrl, hosts: config.hosts }), mcp.route], logger);
   let server;
   try {
     server = await listen(router, config.listen.host, options.port ?? config.listen.port);
