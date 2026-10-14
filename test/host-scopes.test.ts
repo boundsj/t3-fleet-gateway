@@ -10,9 +10,11 @@ import { startTestGateway, type TestGateway } from './helpers/gateway.ts';
 import { agentWithToken, assertNotLogged, type Agent } from './helpers/jobs.ts';
 import { startOAuthHarness, type OAuthHarness } from './helpers/oauthHarness.ts';
 import {
+  approveAsShown,
   authorizationResponse,
   authorizeUrl,
   CALLBACK,
+  checkedFields,
   loadApprovalPage,
   machineFields,
   pkcePair,
@@ -160,6 +162,117 @@ describe('host grants: approval page', () => {
     }, [['host', 'mini']]);
     assert.equal(swapped.status, 400);
     assert.match(await swapped.text(), /expired or was altered/);
+  });
+});
+
+const machineChoice = (html: string) => checkedFields(html).filter(([name]) => name !== 'access');
+const accessChoice = (html: string) => checkedFields(html).filter(([name]) => name === 'access').map(([, value]) => value);
+
+describe('host grants: a refused approval keeps the choice', () => {
+  test('a wrong approval code shows the chosen machines and access again; correcting only the code grants exactly them', async (t) => {
+    const h = await startOAuthHarness(t);
+    const cases: ['read' | 'operate', string[], string][] = [
+      ['read', ['mini'], 'host:mini:read'],
+      ['operate', ['mini'], 'host:mini:read host:mini:operate'],
+      ['read', ['macbook', 'mini'], 'host:macbook:read host:mini:read'],
+    ];
+    for (const [access, hosts, scope] of cases) {
+      // The agent asks for Operate on all machines, so the page's defaults are Operate and All machines.
+      const { clientId, verifier, page } = await openPage(h, 'fleet:read fleet:operate');
+      assert.deepEqual(accessChoice(page.html), ['operate']);
+      assert.deepEqual(machineChoice(page.html), [['hosts_mode', 'all']]);
+      const machines = machineFields(hosts);
+      const failuresBefore = h.approvals.globalFailures();
+      const wrong = await submitApproval(h.baseUrl, page.fields, { approval_code: 'WRONG-CODE', access, ...machines.form }, machines.extra);
+      assert.equal(wrong.status, 400);
+      const shown = await wrong.text();
+      assert.match(shown, /approval code was not accepted/);
+      assert.equal(h.approvals.globalFailures(), failuresBefore + 1, 'a wrong code is still a failed attempt');
+      assert.deepEqual(accessChoice(shown), [access], `${access} ${hosts}`);
+      const inPageOrder = ['mini', 'macbook'].filter((id) => hosts.includes(id)).map((id) => ['host', id]);
+      assert.deepEqual(machineChoice(shown), [['hosts_mode', 'selected'], ...inPageOrder], `${access} ${hosts}`);
+      const approval = await approveAsShown(h.baseUrl, shown, h.approvals.mint().code);
+      const tokens = await exchange(h, clientId, verifier, approval);
+      assert.equal(tokens.scope, scope, `${access} ${hosts}`);
+      assert.deepEqual(h.tokens.verifyAccessToken(tokens.access_token)?.scopes, scope.split(' '));
+    }
+  });
+
+  test('every refused choice is shown again as chosen, and a retry as shown is refused again rather than granting all', async (t) => {
+    const h = await startOAuthHarness(t);
+    const { clientId, verifier, page } = await openPage(h, 'fleet:read fleet:operate');
+    const code = h.approvals.mint().code;
+    type Retry = [Record<string, string>, [string, string][], string[], [string, string][], RegExp | undefined];
+    const selectedMini: [string, string][] = [['hosts_mode', 'selected'], ['host', 'mini']];
+    const retries: Retry[] = [
+      // form, repeated fields, access shown, machines shown, the refusal of a retry as shown (none: it would be granted)
+      [{ decision: 'later', access: 'read', hosts_mode: 'selected' }, [['host', 'mini']], ['read'], selectedMini, undefined],
+      [{ access: 'admin', hosts_mode: 'selected' }, [['host', 'mini']], [], selectedMini, /Choose Read or Operate/],
+      [{ access: 'read', hosts_mode: 'selected' }, [], ['read'], [['hosts_mode', 'selected']], /Tick at least one machine/],
+      [{ access: 'read', hosts_mode: 'selected' }, [['host', '<script>x</script>']], ['read'], [['hosts_mode', 'selected']], /Tick at least one/],
+      [{ access: 'read', hosts_mode: 'selected' }, [['host', 'mini'], ['host', 'studio']], ['read'], selectedMini, undefined],
+      [{ access: 'read', hosts_mode: 'all' }, [['host', 'mini']], ['read'], [['hosts_mode', 'all'], ['host', 'mini']], /Machines are ticked/],
+      [{ access: 'read' }, [['host', 'mini']], ['read'], selectedMini, undefined],
+      [{ access: 'read', hosts_mode: 'some' }, [], ['read'], [['hosts_mode', 'selected']], /Tick at least one machine/],
+      [{ access: 'read', hosts_mode: 'all' }, [['hosts_mode', 'selected']], ['read'], [['hosts_mode', 'selected']], /Tick at least one machine/],
+    ];
+    for (const [form, extra, access, machines, again] of retries) {
+      const label = JSON.stringify([form, extra]);
+      const refused = await submitApproval(h.baseUrl, page.fields, { approval_code: code, ...form }, extra);
+      assert.equal(refused.status, 400, label);
+      const shown = await refused.text();
+      assert.deepEqual(accessChoice(shown), access, label);
+      assert.deepEqual(machineChoice(shown), machines, label);
+      assert.equal(shown.includes('studio') || shown.includes('script>x'), false, `${label}: unconfigured input is not shown`);
+      if (again === undefined) continue;
+      const retry = await approveAsShown(h.baseUrl, shown, code);
+      assert.equal(retry.status, 400, label);
+      assert.match(await retry.text(), again, label);
+    }
+    assert.equal(count(h, 'SELECT COUNT(*) AS n FROM authorization_codes'), 0, 'no authorization code was issued');
+    assert.equal(h.approvals.globalFailures(), 0, 'no refusal spent or failed the approval code');
+    // A selection that kept configured hosts only is granted as shown.
+    const kept = await submitApproval(h.baseUrl, page.fields, { approval_code: 'WRONG-CODE', access: 'read', hosts_mode: 'selected' },
+      [['host', 'mini'], ['host', 'studio']]);
+    const approval = await approveAsShown(h.baseUrl, await kept.text(), code);
+    assert.equal((await exchange(h, clientId, verifier, approval)).scope, 'host:mini:read');
+  });
+
+  test('beyond a host request\'s ceiling, a retry shows no disabled choice checked and is refused again', async (t) => {
+    const h = await startOAuthHarness(t);
+    const { clientId, verifier, page } = await openPage(h, 'host:mini:read');
+    const code = h.approvals.mint().code;
+    const operate = await submitApproval(h.baseUrl, page.fields, { approval_code: code, access: 'operate', hosts_mode: 'selected' },
+      [['host', 'mini']]);
+    const operateShown = await operate.text();
+    assert.match(operateShown, /more access than the agent asked for/);
+    assert.match(operateShown, /name="access" value="operate" disabled>/);
+    assert.deepEqual(accessChoice(operateShown), []);
+    assert.match(await (await approveAsShown(h.baseUrl, operateShown, code)).text(), /Choose Read or Operate/);
+    const all = await submitApproval(h.baseUrl, page.fields, { approval_code: code, access: 'read', hosts_mode: 'all' });
+    const allShown = await all.text();
+    assert.match(allShown, /name="hosts_mode" value="all" disabled>/);
+    assert.deepEqual(machineChoice(allShown), [['hosts_mode', 'selected']]);
+    assert.match(await (await approveAsShown(h.baseUrl, allShown, code)).text(), /Tick at least one machine/);
+    const both = await submitApproval(h.baseUrl, page.fields, { approval_code: code, access: 'read', hosts_mode: 'selected' },
+      [['host', 'mini'], ['host', 'macbook']]);
+    const bothShown = await both.text();
+    assert.match(bothShown, /name="host" value="macbook" disabled>/);
+    assert.deepEqual(machineChoice(bothShown), [['hosts_mode', 'selected'], ['host', 'mini']]);
+    assert.equal(count(h, 'SELECT COUNT(*) AS n FROM authorization_codes'), 0);
+    const approval = await approveAsShown(h.baseUrl, bothShown, code);
+    assert.equal((await exchange(h, clientId, verifier, approval)).scope, 'host:mini:read');
+  });
+
+  test('a form without machine fields keeps the page defaults after a wrong code, as it meant all machines', async (t) => {
+    const h = await startOAuthHarness(t);
+    const { clientId, verifier, page } = await openPage(h);
+    const wrong = await submitApproval(h.baseUrl, page.fields, { approval_code: 'WRONG-CODE', access: 'read' });
+    const shown = await wrong.text();
+    assert.match(shown, /approval code was not accepted/);
+    assert.deepEqual(checkedFields(shown), [['access', 'read'], ['hosts_mode', 'all']]);
+    const approval = await approveAsShown(h.baseUrl, shown, h.approvals.mint().code);
+    assert.equal((await exchange(h, clientId, verifier, approval)).scope, 'fleet:read');
   });
 });
 

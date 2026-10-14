@@ -4,7 +4,7 @@
 
 ### Added
 
-- Per-machine authorization. The approval page offers All machines (the fleet scopes: every host, including hosts added later) or Selected machines (`host:<id>:read` / `host:<id>:operate` for the ticked hosts only), and `clients token --hosts mini,macbook` (or `--hosts all`, the default) does the same for bearer tokens. Every tool enforces the hosts: `fleet_status`, `work_list`, `work_feed` events and attention show only permitted hosts (filtered before limits); direct job tools answer a job elsewhere as an unknown id, and `work_start` checks both the project's host and the host of a replayed request's job. Empty, malformed or unknown selections are refused before an approval code is spent or a token is stored.
+- Per-machine authorization. The approval page offers All machines (the fleet scopes: every host, including hosts added later) or Selected machines (`host:<id>:read` / `host:<id>:operate` for the ticked hosts only), and `clients token --hosts mini,macbook` (or `--hosts all`, the default) does the same for bearer tokens. Every tool enforces the hosts: `fleet_status`, `work_list`, `work_feed` events and attention show only permitted hosts (filtered before limits); direct job tools answer a job elsewhere as an unknown id, and `work_start` checks both the project's host and the host of a replayed request's job. Empty, malformed or unknown selections are refused before an approval code is spent or a token is stored. A refused approval page, including after a wrong approval code, is shown again with the machines and access the operator chose, never the request's defaults.
 - `clients list` and `clients diagnose` show granted access per host.
 
 ### Compatibility

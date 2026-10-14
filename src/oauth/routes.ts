@@ -4,7 +4,14 @@ import type { Route } from '../http/server.ts';
 import type { Logger } from '../log.ts';
 import type { Clock } from '../time.ts';
 import type { ApprovalCodes } from './approvalCodes.ts';
-import { renderApprovalPage, renderErrorPage, renderNoticePage, renderReturnPage, type ApprovalHost } from './approvalPage.ts';
+import {
+  renderApprovalPage,
+  renderErrorPage,
+  renderNoticePage,
+  renderReturnPage,
+  type ApprovalChoice,
+  type ApprovalHost,
+} from './approvalPage.ts';
 import { ApprovedRequests } from './approvedRequests.ts';
 import {
   authorizationRedirect,
@@ -56,6 +63,22 @@ function hostSelection(form: URLSearchParams, hosts: readonly ApprovalHost[]): {
   return { hosts: [...new Set(picked)] };
 }
 
+/**
+ * The choice a refused form showed, to show it again: a retry, even one that only corrects the approval code, must
+ * not fall back to the request's defaults (All machines, or Operate), which may be more than the operator chose.
+ * Only configured hosts are kept, and anything but exactly All machines shows Selected machines, so an empty, unknown
+ * or malformed choice fails again on retry and never becomes all. A form without machine fields keeps the defaults.
+ */
+function submittedChoice(form: URLSearchParams, hosts: readonly ApprovalHost[]): ApprovalChoice {
+  const access = form.get('access');
+  const modes = form.getAll('hosts_mode');
+  const picked = form.getAll('host');
+  const choice: ApprovalChoice = { access: access === 'read' || access === 'operate' ? access : null };
+  if (modes.length === 0 && picked.length === 0) return choice;
+  const mode = modes.length === 1 && modes[0] === 'all' ? 'all' : 'selected';
+  return { ...choice, machines: { mode, hosts: hosts.map((host) => host.id).filter((id) => picked.includes(id)) } };
+}
+
 export function logTokenEvent(logger: Logger): (event: TokenEvent) => void {
   return (event) => {
     if (event.type === 'issued') logger.info('oauth.token_issued', { clientId: event.clientId, familyId: event.familyId, grant: event.grant });
@@ -95,9 +118,17 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
     else sendRedirect(res, location);
   };
 
-  const showApprovalPage = (res: ServerResponse, request: AuthorizationRequest, status: number, error?: string, issuedAt = deps.clock()): void => {
+  /** The approval page, new or, with `retry`, the same signed form shown again with an error and the operator's choice. */
+  const showApprovalPage = (
+    res: ServerResponse,
+    request: AuthorizationRequest,
+    status: number,
+    retry?: { error: string; issuedAt: number; choice: ApprovalChoice },
+  ): void => {
+    const issuedAt = retry?.issuedAt ?? deps.clock();
     const signature = signAuthorizationRequest(deps.key, request, issuedAt);
-    sendHtml(res, status, renderApprovalPage({ request, hosts: deps.hosts, issuedAt, signature, ...(error ? { error } : {}) }));
+    const shown = retry ? { error: retry.error, choice: retry.choice } : {};
+    sendHtml(res, status, renderApprovalPage({ request, hosts: deps.hosts, issuedAt, signature, ...shown }));
   };
 
   const authorizeGet = (_req: IncomingMessage, res: ServerResponse, url: URL): void => {
@@ -145,20 +176,23 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
       returnToClient(res, location, 'Access denied', `Access was denied for ${request.client.name}. Returning to the agent.`);
       return;
     }
+    // Every refusal below shows the form again with the operator's choice, never the defaults.
+    const showAgain = (error: string): void =>
+      showApprovalPage(res, request, 400, { error, issuedAt, choice: submittedChoice(form, deps.hosts) });
     const access = form.get('access');
     if (decision !== 'approve' || (access !== 'read' && access !== 'operate')) {
-      showApprovalPage(res, request, 400, 'Choose Read or Operate, then approve.', issuedAt);
+      showAgain('Choose Read or Operate, then approve.');
       return;
     }
     // Checked before the approval code is spent: a refused choice costs no code and counts as no failed attempt.
     const selection = hostSelection(form, deps.hosts);
     if ('error' in selection) {
-      showApprovalPage(res, request, 400, selection.error, issuedAt);
+      showAgain(selection.error);
       return;
     }
     const scopes = scopesForGrant(access as AccessChoice, selection.hosts);
     if (!withinRequest(request.requestedScopes, scopes)) {
-      showApprovalPage(res, request, 400, 'That is more access than the agent asked for. Choose only the machines and access it requested.', issuedAt);
+      showAgain('That is more access than the agent asked for. Choose only the machines and access it requested.');
       return;
     }
     const throttle = deps.approvals.throttleState(signature);
@@ -173,7 +207,7 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
     }
     if (!deps.approvals.redeem(form.get('approval_code') ?? '', signature, clientId)) {
       logger.warn('oauth.approval_failed', { clientId, reason: 'code_not_accepted' });
-      showApprovalPage(res, request, 400, 'That approval code was not accepted. Codes work once and expire; mint a new one with t3-fleet-gateway pair.', issuedAt);
+      showAgain('That approval code was not accepted. Codes work once and expire; mint a new one with t3-fleet-gateway pair.');
       return;
     }
     const issuedCodeAt = deps.clock();

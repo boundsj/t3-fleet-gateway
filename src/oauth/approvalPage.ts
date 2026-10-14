@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { formatScope, isHostScope, OPERATE_SCOPE, parseHostScope, permits, permitsAny, READ_SCOPE } from './scopes.ts';
+import { formatScope, isHostScope, OPERATE_SCOPE, parseHostScope, permits, permitsAny, READ_SCOPE, type AccessChoice } from './scopes.ts';
 import type { AuthorizationRequest } from './authorizationRequest.ts';
 
 const STYLE = `
@@ -76,9 +76,21 @@ export interface ApprovalHost {
 }
 
 /**
+ * What the operator chose on a form that is shown again with an error, so a retry keeps it instead of falling back
+ * to the request's defaults. `access` null checks neither level. `machines` holds configured host ids only; undefined
+ * (a form from before host selection, which meant all) shows the request's defaults.
+ */
+export interface ApprovalChoice {
+  access: AccessChoice | null;
+  machines?: { mode: 'all' | 'selected'; hosts: readonly string[] } | undefined;
+}
+
+/**
  * The approval form: the approval code, Read or Operate, and All machines (the fleet scopes: every host,
  * including hosts added later) or Selected machines (host scopes for the ticked hosts only). A request that
  * names host scopes sets a ceiling: choices beyond it are shown disabled, and the server refuses them anyway.
+ * A disabled choice is never shown checked (a browser would not submit it): beyond the ceiling, a kept access level
+ * is shown unchecked and a kept All machines as Selected machines, so a retry fails again rather than changing access.
  */
 export function renderApprovalPage(options: {
   request: AuthorizationRequest;
@@ -86,6 +98,7 @@ export function renderApprovalPage(options: {
   issuedAt: number;
   signature: string;
   error?: string;
+  choice?: ApprovalChoice;
 }): RenderedPage {
   const { request } = options;
   const requestedScopes = request.requestedScopes;
@@ -97,10 +110,16 @@ export function renderApprovalPage(options: {
   const allowOperate = !hostSpecific || preferOperate;
   const disabled = (allowed: boolean) => (allowed ? '' : ' disabled');
   const checked = (on: boolean) => (on ? ' checked' : '');
+  const access = options.choice ? options.choice.access : preferOperate ? 'operate' : 'read';
+  const machines = options.choice?.machines ?? {
+    mode: hostSpecific ? 'selected' : 'all',
+    hosts: hostSpecific ? requestedScopes.map((scope) => parseHostScope(scope)?.hostId).filter((id) => id !== undefined) : [],
+  };
+  const allMachines = machines.mode === 'all' && allowAll;
   const hostChoices = options.hosts
     .map((host) => {
       const allowed = !hostSpecific || permits(requestedScopes, 'read', host.id) || permits(requestedScopes, 'operate', host.id);
-      const preselected = hostSpecific && requestedScopes.some((scope) => parseHostScope(scope)?.hostId === host.id);
+      const preselected = allowed && machines.hosts.includes(host.id);
       const name = host.label ? `${escapeHtml(host.label)} <code>${escapeHtml(host.id)}</code>` : `<code>${escapeHtml(host.id)}</code>`;
       return `<label><input type="checkbox" name="host" value="${escapeHtml(host.id)}"${checked(preselected)}${disabled(allowed)}> ${name}</label>`;
     })
@@ -134,12 +153,12 @@ ${error}
 <label for="approval_code">Approval code</label>
 <input id="approval_code" name="approval_code" type="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="32" required>
 <fieldset><legend>Access to grant</legend>
-<label><input type="radio" name="access" value="read"${checked(!preferOperate)}> Read: see hosts, projects and job status</label>
-<label><input type="radio" name="access" value="operate"${checked(preferOperate)}${disabled(allowOperate)}> Operate: also start, steer, answer and cancel jobs</label>
+<label><input type="radio" name="access" value="read"${checked(access === 'read')}> Read: see hosts, projects and job status</label>
+<label><input type="radio" name="access" value="operate"${checked(access === 'operate' && allowOperate)}${disabled(allowOperate)}> Operate: also start, steer, answer and cancel jobs</label>
 </fieldset>
 <fieldset><legend>Machines</legend>
-<label><input type="radio" name="hosts_mode" value="all"${checked(!hostSpecific)}${disabled(allowAll)}> All machines: every host on this gateway, including hosts added later</label>
-<label><input type="radio" name="hosts_mode" value="selected"${checked(hostSpecific)}> Selected machines only (hosts added later are not included):</label>
+<label><input type="radio" name="hosts_mode" value="all"${checked(allMachines)}${disabled(allowAll)}> All machines: every host on this gateway, including hosts added later</label>
+<label><input type="radio" name="hosts_mode" value="selected"${checked(!allMachines)}> Selected machines only (hosts added later are not included):</label>
 <div class="hosts">${hostChoices}</div>
 </fieldset>
 <button type="submit" name="decision" value="approve">Approve</button>

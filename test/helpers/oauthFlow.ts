@@ -89,6 +89,28 @@ export async function submitApproval(
   });
 }
 
+/** The radio buttons and checkboxes a page shows checked and enabled: what a browser submits if the operator changes none. */
+export function checkedFields(html: string): [string, string][] {
+  const fields: [string, string][] = [];
+  for (const match of html.matchAll(/<input type="(?:radio|checkbox)" name="([^"]+)" value="([^"]*)"([^>]*)>/g)) {
+    const flags = match[3] as string;
+    if (flags.includes(' checked') && !flags.includes(' disabled')) fields.push([match[1] as string, unescapeHtml(match[2] as string)]);
+  }
+  return fields;
+}
+
+/** Approve a page as shown, typing only the approval code: its hidden fields and checked choices, as a browser sends them. */
+export async function approveAsShown(baseUrl: string, html: string, approvalCode: string): Promise<Response> {
+  const body = new URLSearchParams({ ...hiddenFields(html), approval_code: approvalCode, decision: 'approve' });
+  for (const [name, value] of checkedFields(html)) body.append(name, value);
+  return fetch(`${baseUrl}/oauth/authorize`, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+}
+
 /** The approval form fields for a machine choice: all, or the ticked host ids. */
 export function machineFields(hosts: 'all' | readonly string[]): { form: { hosts_mode: string }; extra: [string, string][] } {
   return hosts === 'all'
