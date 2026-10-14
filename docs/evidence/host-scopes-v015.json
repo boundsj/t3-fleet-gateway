@@ -1,0 +1,112 @@
+{
+  "sourceHead": "62b36b4c2a117f0cf69c23573f06b49943d011c2",
+  "gatewayVersion": "0.1.5",
+  "fixture": "two synthetic T3 hosts; not the real M3",
+  "results": [
+    {
+      "check": "Selected client sees only mini",
+      "passed": true
+    },
+    {
+      "check": "Selected job list excludes MacBook",
+      "passed": true
+    },
+    {
+      "check": "work_status blocks MacBook access",
+      "passed": true
+    },
+    {
+      "check": "work_messages blocks MacBook access",
+      "passed": true
+    },
+    {
+      "check": "work_continue blocks MacBook access",
+      "passed": true
+    },
+    {
+      "check": "work_respond blocks MacBook access",
+      "passed": true
+    },
+    {
+      "check": "work_cancel blocks MacBook access",
+      "passed": true
+    },
+    {
+      "check": "work_start blocks MacBook access",
+      "passed": true
+    },
+    {
+      "check": "Denied requests never reach the other T3 host",
+      "passed": true,
+      "detail": {
+        "deniedCalls": 6
+      }
+    },
+    {
+      "check": "Allowed host can read another client's job",
+      "passed": true
+    },
+    {
+      "check": "Allowed host can steer work",
+      "passed": true
+    },
+    {
+      "check": "Allowed host reads completed reply",
+      "passed": true
+    },
+    {
+      "check": "Feed and attention exclude MacBook",
+      "passed": true
+    },
+    {
+      "check": "Feed cursor is exclusive",
+      "passed": true
+    },
+    {
+      "check": "Read-only selected grant cannot mutate",
+      "passed": true
+    },
+    {
+      "check": "Legacy OAuth retains both hosts",
+      "passed": true
+    },
+    {
+      "check": "Legacy bearer retains both hosts",
+      "passed": true
+    },
+    {
+      "check": "Generic refresh keeps selected host boundary",
+      "passed": true
+    },
+    {
+      "check": "Refreshed client remains mini-only",
+      "passed": true
+    },
+    {
+      "check": "Allowed host can cancel work",
+      "passed": true
+    }
+  ],
+  "approvalRetry": {
+    "selectedHostsRetained": true,
+    "readChoiceRetained": true
+  },
+  "browserRetry": {
+    "errorShown": true,
+    "access": "read",
+    "hostsMode": "selected",
+    "selectedHosts": [
+      "mini"
+    ],
+    "noHorizontalOverflow": true
+  },
+  "mobileRetry": {
+    "width": 375,
+    "noHorizontalOverflow": true,
+    "access": "read",
+    "hostsMode": "selected",
+    "selectedHosts": [
+      "mini"
+    ]
+  }
+}
