@@ -12,6 +12,7 @@ npm run typecheck    # tsc --noEmit
 node --test test/oauth-token.test.ts   # one file
 node bin/t3-fleet-gateway.js --help    # CLI
 node scripts/e2e-live.ts               # live check against a running gateway and real T3; never in tests (docs/operations.md)
+npm run compat:check                   # manual developer check; read-only against T3, private local reports
 ```
 
 CI (`.github/workflows/check.yml`) runs `npm run check` on Node 24 and 26 (Linux) and 26 (macOS); `main` blocks force-pushes and deletion, and pull requests need CI green. No build step: Node 24+ runs `.ts` directly. There is no linter or formatter configured; match the surrounding style (2 spaces, single quotes, semicolons, ~140-column lines).
@@ -34,6 +35,7 @@ CI (`.github/workflows/check.yml`) runs `npm run check` on Node 24 and 26 (Linux
 | `src/db/migrations.ts` | Schema, including `jobs`, `job_events`, `idempotency_keys` for the job layer; migration 2 adds `jobs.standing` and the `released` state, migration 3 `jobs.delegated_work`, migration 4 `jobs.activity_position`, migration 5 the delegated work bounds (`delegated_untracked`, `delegated_untracked_run_id`, `delegated_ended_at`), migration 6 `latest_message_truncated`, migration 7 separate nullable MCP/refresh success timestamps |
 | `test/helpers/` | `fakeT3.ts` (fake T3: OAuth, an in-memory thread model driven by tests, with `t3_thread_read`'s two views (`messages`, the default: user and assistant messages and plans only; `activity`: every item; shared positions), activity items (`addActivity`), delegation as T3 coordinators do it (`delegate`, `finishDelegated`, `settleDelegated` for a child that ends with no parent run), reads of one item by `itemId` from `textOffset` (no item when it has none, as a live T3 answers), a record of every read's input (`reads`), failure injection, including held answers and launches that start no run; `stop()`/`start()` take the host down and back on the same port, `close()` releases it), `gateway.ts` (full gateway harness), `frontDoor.ts` (holds a test's public URL port in front of the gateway), `serveChild.ts` (runs `serve` in a child process that raises synthetic process errors), `jobs.ts` (gateway + fake T3 + Operate agent; `tick()` drives the engine), `oauthFlow.ts`, `agent.ts` (SDK OAuth provider) |
 | `scripts/e2e-live.ts` | Live end-to-end check, run by hand only |
+| `scripts/check-t3-compatibility.ts`, `scripts/lib/t3-{contract,probe}.ts` | On-demand developer MCP schema comparison and read-only smoke; separate discovery session, explicitly accepted private baseline, JSON reports; no scheduled/background work |
 
 ## Adding a tool
 

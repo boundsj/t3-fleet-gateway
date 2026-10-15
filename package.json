@@ -17,7 +17,8 @@
     "test": "node --test --test-timeout=30000 --test-reporter=spec \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
-    "e2e:live": "node scripts/e2e-live.ts"
+    "e2e:live": "node scripts/e2e-live.ts",
+    "compat:check": "node scripts/check-t3-compatibility.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "^2.3.1",
