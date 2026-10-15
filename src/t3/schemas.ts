@@ -56,24 +56,29 @@ export interface LaunchThreadInput {
   message: string;
 }
 
+/** Current T3 omits links. Keep older supplied links and normalize newer responses at the boundary. */
+function withThreadLink<T extends { threadId: string; link?: string | null }>(thread: T) {
+  return { ...thread, link: thread.link ?? `t3-thread://v1/${thread.threadId}` };
+}
+
 export const launchResultSchema = z.looseObject({
   threadId: z.string().min(1),
-  link: z.string(),
+  link: z.string().nullish(),
   projectId: z.string(),
   runId: z.string().nullable(),
   status: z.string().nullable(),
-});
+}).transform(withThreadLink);
 export type LaunchResult = z.infer<typeof launchResultSchema>;
 
 export const threadSummarySchema = z.looseObject({
   threadId: z.string(),
-  link: z.string(),
+  link: z.string().nullish(),
   title: z.string(),
   status: z.string(),
   latestRunId: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
-});
+}).transform(withThreadLink);
 export type ThreadSummary = z.infer<typeof threadSummarySchema>;
 
 export const threadListSchema = z.looseObject({
@@ -123,7 +128,7 @@ export type ThreadRun = z.infer<typeof threadRunSchema>;
 export const threadReadSchema = z.looseObject({
   thread: z.looseObject({
     threadId: z.string(),
-    link: z.string(),
+    link: z.string().nullish(),
     projectId: z.string(),
     title: z.string(),
     status: z.string(),
@@ -132,7 +137,7 @@ export const threadReadSchema = z.looseObject({
     pendingRequestCount: z.number().int(),
     branch: z.string().nullable(),
     updatedAt: z.string(),
-  }),
+  }).transform(withThreadLink),
   recentRuns: z.array(threadRunSchema),
   items: z.array(threadItemSchema),
   nextPosition: z.number().int().nullable(),

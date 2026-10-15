@@ -95,7 +95,7 @@ describe('standing jobs: adopt', () => {
     const adopted = await status(agent, job.id);
     assert.deepEqual([adopted.state, adopted.standing, adopted.startedByYou], ['idle', true, false]);
     assert.equal(adopted.latestMessageExcerpt, 'Synthetic old reply 2', "the thread's latest reply, for context");
-    assert.match(adopted.link ?? '', /^t3-thread:\/\/v1\/env-synthetic\//);
+    assert.equal(adopted.link, `t3-thread://v1/${threadId}`);
     const feed = await agent.call<FeedPage>('work_feed', {});
     assert.deepEqual(
       feed.events.map((event) => [event.jobId, event.type, event.toState, event.reason]),

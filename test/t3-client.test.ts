@@ -3,6 +3,7 @@ import { describe, test } from 'node:test';
 import * as z from 'zod';
 import { T3Client, T3TransportError } from '../src/t3/client.ts';
 import { parseToolResult, T3ToolError } from '../src/t3/results.ts';
+import { launchResultSchema } from '../src/t3/schemas.ts';
 import { startFakeT3 } from './helpers/fakeT3.ts';
 
 async function setup(t: import('node:test').TestContext, options: Parameters<typeof startFakeT3>[0] = {}) {
@@ -36,6 +37,20 @@ const LAUNCH = {
 
 describe('T3 result parsing', () => {
   const schema = z.object({ value: z.number() });
+
+  test('builds a link from an opaque thread id without URL encoding and still rejects invalid fields', () => {
+    const result = { threadId: 'mcp:synthetic-thread', projectId: 'project-1', runId: null, status: 'preparing' };
+    for (const payload of [result, { ...result, link: null }]) {
+      for (const response of [{ structuredContent: payload }, { content: [{ type: 'text', text: JSON.stringify(payload) }] }]) {
+        assert.equal(parseToolResult('t3_thread_launch', response, launchResultSchema).link, 't3-thread://v1/mcp:synthetic-thread');
+      }
+    }
+    for (const payload of [{ ...result, projectId: null }, { ...result, link: 42 }]) {
+      assert.throws(() => parseToolResult('t3_thread_launch', { structuredContent: payload }, launchResultSchema), {
+        code: 't3_invalid_response',
+      });
+    }
+  });
 
   test('prefers structuredContent and falls back to the JSON text block', () => {
     assert.deepEqual(parseToolResult('t', { structuredContent: { value: 1 }, content: [] }, schema), { value: 1 });
@@ -148,6 +163,23 @@ describe('T3 session sharing', () => {
 });
 
 describe('T3 thread tools', () => {
+  for (const legacy of [false, true]) {
+    test(`launch, list and both read views accept ${legacy ? 'legacy links' : 'current responses without links'}`, async (t) => {
+      const { fake, client } = await setup(t);
+      fake.legacyThreadLinks = legacy;
+      const launched = await client.launchThread(LAUNCH);
+      const expected = legacy ? fake.threads.get(launched.threadId)!.link : `t3-thread://v1/${launched.threadId}`;
+      assert.equal(launched.link, expected);
+      assert.equal((await client.listThreads({ projectId: 'project-1' })).threads[0]?.link, expected);
+      for (const view of ['messages', 'activity'] as const) {
+        const read = await client.readThread({ threadId: launched.threadId, view });
+        assert.equal(read.thread.link, expected);
+        assert.equal(read.thread.status, 'running');
+      }
+      assert.equal(fake.calls.filter((tool) => tool === 't3_thread_launch').length, 1, 'no duplicate launch');
+    });
+  }
+
   test('launch, read incrementally, list by marker, search, send and interrupt', async (t) => {
     const { fake, client } = await setup(t);
     const launched = await client.launchThread(LAUNCH);

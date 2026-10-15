@@ -187,6 +187,8 @@ export class FakeT3 {
   readonly holdResponses = new Set<string>();
   /** When set, t3_thread_launch creates the thread but starts no run on it (thread `idle`, no runs). */
   launchWithoutRun = false;
+  /** Older T3 versions supplied links; current published thread tools omit them. */
+  legacyThreadLinks = false;
   /** When set, interrupts are accepted but take effect only on completeInterrupts(). */
   deferInterrupts = false;
   /** When set, an interrupt leaves the thread's pending questions listed (T3 may keep them). */
@@ -802,7 +804,7 @@ export class FakeT3 {
     }
     return {
       threadId,
-      link: thread.link,
+      ...(this.legacyThreadLinks ? { link: thread.link } : {}),
       projectId,
       modelSelection: input.modelSelection ?? { model: 'synthetic-model' },
       runId: run?.runId ?? null,
@@ -833,7 +835,7 @@ export class FakeT3 {
   #summary(thread: FakeThread): Record<string, unknown> {
     return {
       threadId: thread.threadId,
-      link: thread.link,
+      ...(this.legacyThreadLinks ? { link: thread.link } : {}),
       title: thread.title,
       createdBy: 'agent',
       creationSource: 'mcp',

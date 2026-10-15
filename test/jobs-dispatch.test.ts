@@ -174,7 +174,7 @@ describe('dispatcher', () => {
     assert.equal(status.lastError.code, 'launch_not_started');
     assert.match(status.lastError.message, /started no run on it \(the launch answered internal_error\)/);
     assert.equal(status.threadId, thread.threadId);
-    assert.equal(status.link, `t3-thread://v1/env-synthetic/${thread.threadId}`);
+    assert.equal(status.link, `t3-thread://v1/${thread.threadId}`);
     assert.equal(fake.launches.length, 1);
   });
 

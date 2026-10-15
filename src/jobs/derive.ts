@@ -145,9 +145,8 @@ export interface Observation {
 }
 
 /**
- * The URL in a T3 thread link. T3 returns a markdown link, `[Title](t3-thread://v1/<environment>/<thread>)`,
- * meant to be pasted for a person; the target opens the thread in the T3 app. A bare URL is accepted
- * too. Returns null for anything else, including schemes other than t3-thread, https and http.
+ * The URL in a T3 thread link. Older T3 returns markdown; current responses are normalized to a bare
+ * t3-thread URL by the client schemas. Returns null for invalid links or other URL schemes.
  */
 export function threadLinkTarget(link: string): string | null {
   const text = link.trim();
