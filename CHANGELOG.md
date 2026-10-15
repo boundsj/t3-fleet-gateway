@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.6 (2026-10-15)
+
+### Fixed
+
+- T3 thread responses no longer have to include `link`. Current launch, list and read responses are normalized to the documented `t3-thread://v1/<threadId>` URL without encoding the opaque id. Older supplied links and existing job links remain supported. This restores watcher reads, launch reconciliation, standing-job adoption and message reads against current T3, without relaxing other required response fields or retrying launches.
+- A valid watcher observation clears a previous `t3_invalid_response` error, so recovered jobs no longer retain the stale schema failure. Genuine run failures keep their existing clearing rules.
+
+No database migration or configuration change.
+
 ## 0.1.5 (2026-10-13)
 
 ### Added

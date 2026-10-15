@@ -456,8 +456,8 @@ export class JobEngine {
       ...(seen.link === undefined ? {} : { threadLink: seen.link }),
       ...(seen.errorCode
         ? { lastErrorCode: seen.errorCode, lastErrorMessage: 'The T3 run failed. Open the thread in T3 for details.' }
-        : // A standing job outlives a failed run: the error clears once a new turn runs.
-          seen.state === 'running' && job.lastErrorCode === 't3_run_failed'
+        : // A valid observation clears a prior shape error; a failed run clears only once a new turn runs.
+          job.lastErrorCode === 't3_invalid_response' || (seen.state === 'running' && job.lastErrorCode === 't3_run_failed')
           ? { lastErrorCode: null, lastErrorMessage: null }
           : {}),
     };

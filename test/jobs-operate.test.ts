@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { HOUR, MINUTE } from '../src/time.ts';
-import { FAKE_ENVIRONMENT_ID } from './helpers/fakeT3.ts';
 import { assertNotLogged, connectAgent, jobState, startJob, startJobHarness, type Agent } from './helpers/jobs.ts';
 
 interface JobView {
@@ -445,7 +444,7 @@ describe('job links', () => {
     assert.equal((await status(agent, job.jobId)).link, null, 'no thread yet');
     await tick();
     const { threadId } = fake.threadForJob(job.jobId);
-    const link = `t3-thread://v1/${FAKE_ENVIRONMENT_ID}/${threadId}`;
+    const link = `t3-thread://v1/${threadId}`;
     assert.equal((await status(agent, job.jobId)).link, link, 'taken from the launch result');
     const summary = await agent.client.callTool({ name: 'work_status', arguments: { jobId: job.jobId } });
     assert.match(JSON.stringify(summary.content), new RegExp(`Open in T3: ${link}`));

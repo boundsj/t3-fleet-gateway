@@ -127,6 +127,8 @@ A network outage is separate from token expiry. Keep the OAuth credentials and s
 
 ## Status
 
+**v0.1.6** accepts current T3 thread responses without a `link` field, generates the documented thread URL, and retains older links. Watchers recover and clear stale response-shape errors after a successful observation. No database migration or configuration change.
+
 **v0.1.5** adds per-machine authorization: an agent can be approved (or a bearer token minted) for selected hosts only, enforced by the gateway on every tool. Grants and tokens issued before it keep their fleet-wide access without reauthorization. It is covered by synthetic two-host tests; no live multi-host qualification is claimed. See [approval-page and two-host evidence](docs/evidence/host-scopes-v015.md).
 
 **v0.1.4.** Released and deployed. Supervised scratch QA found and fixed an incompatible 200-character limit on T3's opaque pending request IDs. Real Codex questions can now be answered with `work_respond` and selected with `work_status.pendingRequestId`; a transient `waiting` status alone no longer invents an approval. v0.1.4 question and lifecycle retests passed, covering all nine tools together. Operator approval completed on v0.1.4 in both the isolated QA gateway and the production gateway's scratch project: the expected marker was written and the approval flag cleared. The native zero-count `waiting` sample was collected before the state-rule fix; its synthetic regression fails before the fix and passes after it, and real question resumption after the fix showed no false approval.

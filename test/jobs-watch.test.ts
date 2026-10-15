@@ -22,6 +22,27 @@ interface Status {
 }
 
 describe('watcher', () => {
+  test('recovers an existing job after T3 stops supplying links and clears the old shape error', async (t) => {
+    const { fake, gw, agent, tick } = await startJobHarness(t);
+    fake.legacyThreadLinks = true;
+    const job = await startJob(agent);
+    await tick();
+    const { threadId } = fake.threadForJob(job.jobId);
+    const existingLink = gw.gateway.services.jobs.store.get(job.jobId)!.threadLink;
+    fake.brokenReads.add(threadId);
+    await tick();
+    assert.equal((await agent.call<Status>('work_status', { jobId: job.jobId })).lastError?.code, 't3_invalid_response');
+    fake.brokenReads.delete(threadId);
+    fake.legacyThreadLinks = false;
+    fake.finishTurn(threadId, 'Synthetic reply after the T3 upgrade');
+    await tick();
+    const status = await agent.call<Status & { link: string | null }>('work_status', { jobId: job.jobId });
+    assert.equal(status.state, 'idle');
+    assert.equal(status.latestMessageExcerpt, 'Synthetic reply after the T3 upgrade');
+    assert.equal(status.lastError, null);
+    assert.equal(status.link, existingLink, 'preserves the link already stored on an existing job');
+  });
+
   test('a job runs, finishes its turn and goes idle with an excerpt of the final message', async (t) => {
     const { fake, gw, agent, tick } = await startJobHarness(t);
     const job = await startJob(agent, 'Synthetic task: tidy the changelog');
