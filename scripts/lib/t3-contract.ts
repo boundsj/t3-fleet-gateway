@@ -1,4 +1,4 @@
-import { AjvJsonSchemaValidator } from '@modelcontextprotocol/client/validators/ajv';
+import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/client/validators/cf-worker';
 import { RUNTIME_MODE_VALUES } from '../../src/t3/schemas.ts';
 
 export type AdvertisedTool = {
@@ -74,6 +74,70 @@ function canonicalSchema(value: unknown): unknown {
   }));
 }
 
+function pointerPart(value: string): string {
+  return value.replaceAll('~', '~0').replaceAll('/', '~1');
+}
+
+/** Exact schema locations inspected by the safety guard, excluding annotation and literal data. */
+function schemaNodes(schema: unknown): Map<string, unknown> {
+  const nodes = new Map<string, unknown>();
+  function visit(value: unknown, pointer: string): void {
+    nodes.set(pointer, value);
+    if (!isObject(value)) return;
+    for (const [key, child] of Object.entries(value)) {
+      const location = `${pointer}/${pointerPart(key)}`;
+      if ((SCHEMA_MAPS.has(key) || key === 'dependencies') && isObject(child)) {
+        for (const [name, subschema] of Object.entries(child)) {
+          if (key !== 'dependencies' || !Array.isArray(subschema)) visit(subschema, `${location}/${pointerPart(name)}`);
+        }
+      } else if (SCHEMA_VALUES.has(key)) {
+        visit(child, location);
+      } else if ((SCHEMA_ARRAYS.has(key) || key === 'items') && Array.isArray(child)) {
+        child.forEach((subschema, index) => visit(subschema, `${location}/${index}`));
+      } else if (key === 'items') {
+        visit(child, location);
+      }
+    }
+  }
+  visit(schema, '');
+  return nodes;
+}
+
+/**
+ * A $ref can activate data beneath examples/const/enum as a schema. Only allow
+ * root-local pointers to nodes the guard visits. Dynamic, anchor, external and nested-resource
+ * resolution need a fuller reference resolver; keep those contracts unverified instead.
+ */
+function hasUnsupportedReferences(nodes: ReadonlyMap<string, unknown>): boolean {
+  const references: unknown[] = [];
+  let nestedResource = false;
+  for (const [pointer, node] of nodes) {
+    if (!isObject(node)) continue;
+    if (Object.hasOwn(node, '$dynamicRef') || Object.hasOwn(node, '$recursiveRef')) return true;
+    if (pointer !== '' && Object.hasOwn(node, '$id')) nestedResource = true;
+    if (Object.hasOwn(node, '$ref')) references.push(node.$ref);
+  }
+  if (references.length && nestedResource) return true;
+  return references.some((reference) => {
+    if (typeof reference !== 'string' || !reference.startsWith('#')) return true;
+    try {
+      const pointer = decodeURIComponent(reference.slice(1));
+      if (pointer !== '' && !pointer.startsWith('/')) return true;
+      // Reject malformed pointer escapes; URI escapes above do not replace JSON Pointer escapes.
+      if (/~(?:[^01]|$)/u.test(pointer)) return true;
+      const target = nodes.get(pointer);
+      return !nodes.has(pointer) || (!isObject(target) && typeof target !== 'boolean');
+    } catch {
+      return true;
+    }
+  });
+}
+
+function snapshotSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  // Retain the entire raw structure when a ref could activate data we would otherwise strip/sort.
+  return (hasUnsupportedReferences(schemaNodes(schema)) ? canonicalData(schema) : canonicalSchema(schema)) as Record<string, unknown>;
+}
+
 function indexTools(tools: readonly AdvertisedTool[]): Map<string, AdvertisedTool> {
   const indexed = new Map<string, AdvertisedTool>();
   for (const tool of tools) {
@@ -90,8 +154,8 @@ export function snapshotContract(tools: readonly AdvertisedTool[]): Contract {
     const tool = indexed.get(name);
     if (!tool) return [];
     return [[name, {
-      inputSchema: canonicalSchema(tool.inputSchema) as Record<string, unknown>,
-      ...(tool.outputSchema === undefined ? {} : { outputSchema: canonicalSchema(tool.outputSchema) as Record<string, unknown> }),
+      inputSchema: snapshotSchema(tool.inputSchema),
+      ...(tool.outputSchema === undefined ? {} : { outputSchema: snapshotSchema(tool.outputSchema) }),
     }]];
   }));
 }
@@ -104,7 +168,7 @@ function changedPaths(before: unknown, after: unknown, path: string, paths: stri
     return;
   }
   for (const key of [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()) {
-    changedPaths(before[key], after[key], `${path}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`, paths);
+    changedPaths(before[key], after[key], `${path}/${pointerPart(key)}`, paths);
     if (paths.length >= 20) break;
   }
 }
@@ -164,14 +228,14 @@ const INPUT_SAMPLES: Record<(typeof REQUIRED_TOOLS)[number], Record<string, unkn
   t3_pending_request_respond: [{ threadId: THREAD_ID, requestId: REQUEST_ID, answers: { synthetic_question: { answers: ['blue'] } } }],
 };
 
-/** Ajv's bundled formats; reject unsupported formats before compilation, which otherwise logs raw names. */
+/** Formats supported by the SDK's CfWorker validator; other formats must remain unverified. */
 const FORMATS = new Set([
-  'date', 'time', 'date-time', 'iso-time', 'iso-date-time', 'duration', 'uri', 'uri-reference', 'uri-template',
+  'date', 'time', 'date-time', 'duration', 'uri', 'uri-reference', 'uri-template',
   'url', 'email', 'hostname', 'ipv4', 'ipv6', 'regex', 'uuid', 'json-pointer', 'json-pointer-uri-fragment',
-  'relative-json-pointer', 'byte', 'int32', 'int64', 'float', 'double', 'password', 'binary',
+  'relative-json-pointer',
 ]);
 
-// The SDK uses strict:false. Unknown keywords would otherwise be silently ignored and could falsely
+// Unknown keywords would otherwise be silently ignored and could falsely
 // pass a request constrained by a future vocabulary. Preserve them in snapshots and report unverified.
 const KEYWORDS = new Set([
   ...ANNOTATIONS, ...SCHEMA_MAPS, ...SCHEMA_VALUES, ...SCHEMA_ARRAYS,
@@ -180,21 +244,16 @@ const KEYWORDS = new Set([
   'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
   'minLength', 'maxLength', 'pattern', 'format', 'minProperties', 'maxProperties',
   'minItems', 'maxItems', 'uniqueItems', 'minContains', 'maxContains',
-  'default', 'deprecated', 'readOnly', 'writeOnly', 'contentEncoding', 'contentMediaType', 'nullable',
+  'default', 'deprecated', 'readOnly', 'writeOnly', 'contentEncoding', 'contentMediaType',
 ]);
 
-function hasUnsupportedSchema(value: unknown): boolean {
-  if (!isObject(value)) return false;
-  if (Object.keys(value).some((key) => !KEYWORDS.has(key))) return true;
-  if (value.format !== undefined && (typeof value.format !== 'string' || !FORMATS.has(value.format))) return true;
-  return Object.entries(value).some(([key, child]) => {
-    if (SCHEMA_MAPS.has(key) || key === 'dependencies') return isObject(child) && Object.values(child).some(hasUnsupportedSchema);
-    if (SCHEMA_VALUES.has(key)) return hasUnsupportedSchema(child);
-    if (SCHEMA_ARRAYS.has(key) || key === 'items') {
-      return Array.isArray(child) ? child.some(hasUnsupportedSchema) : hasUnsupportedSchema(child);
-    }
-    return false;
-  });
+function hasUnsupportedSchema(schema: unknown): boolean {
+  const nodes = schemaNodes(schema);
+  if (hasUnsupportedReferences(nodes)) return true;
+  return [...nodes.values()].some((node) => isObject(node) && (
+    Object.keys(node).some((key) => !KEYWORDS.has(key))
+    || (node.format !== undefined && (typeof node.format !== 'string' || !FORMATS.has(node.format)))
+  ));
 }
 
 export function checkInputs(tools: readonly AdvertisedTool[]): InputCheck[] {
@@ -204,8 +263,9 @@ export function checkInputs(tools: readonly AdvertisedTool[]): InputCheck[] {
     if (!tool) return { tool: name, status: 'fail', code: 'required_tool_missing' };
     try {
       if (hasUnsupportedSchema(tool.inputSchema)) return { tool: name, status: 'warn', code: 'input_schema_unsupported' };
-      // A fresh validator prevents one tool's $id from silently selecting another tool's cached schema.
-      const validate = new AjvJsonSchemaValidator().getValidator(tool.inputSchema);
+      // This SDK validator has no generated-code or console logging paths. Clone because its
+      // reference resolver annotates schemas; each tool also gets an independent reference table.
+      const validate = new CfWorkerJsonSchemaValidator().getValidator(structuredClone(tool.inputSchema));
       const accepted = INPUT_SAMPLES[name].every((input) => validate(input).valid);
       return { tool: name, status: accepted ? 'pass' : 'fail', code: accepted ? 'sample_inputs_accepted' : 'sample_input_rejected' };
     } catch {

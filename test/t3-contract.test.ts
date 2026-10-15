@@ -72,6 +72,25 @@ describe('T3 contract snapshots', () => {
     assert.deepEqual(compareContracts(before, after), [{ tool: TOOL, kind: 'changed', paths: ['/inputSchema/properties/view/default'] }]);
   });
 
+  test('retains referenced annotation schemas and indexed enum order instead of hiding semantic changes', () => {
+    const output = (type: string) => ({
+      type: 'object', properties: { result: { $ref: '#/examples/0' } }, examples: [{ type }],
+    });
+    const before = contract({ type: 'object' }, output('string'));
+    const after = contract({ type: 'object' }, output('number'));
+    assert.deepEqual(before[TOOL]!.outputSchema!.examples, [{ type: 'string' }]);
+    assert.deepEqual(compareContracts(before, after), [{ tool: TOOL, kind: 'changed', paths: ['/outputSchema/examples'] }]);
+
+    const alternatives = [{ type: 'string' }, { type: 'number' }];
+    const schema = (values: typeof alternatives) => ({
+      type: 'object', properties: { threadId: { $ref: '#/$defs/alternatives/enum/0' } },
+      $defs: { alternatives: { enum: values } },
+    });
+    assert.deepEqual(compareContracts(contract(schema(alternatives)), contract(schema([...alternatives].reverse()))), [
+      { tool: TOOL, kind: 'changed', paths: ['/inputSchema/$defs/alternatives/enum'] },
+    ]);
+  });
+
   test('detects required tool and optional output schema additions and removals', () => {
     const before = contract({ type: 'object' });
     const after = contract({ type: 'object' }, { type: 'object', properties: { value: { type: 'string' } } });
@@ -147,6 +166,64 @@ describe('T3 advertised input checks', () => {
       assert.deepEqual(inputCheck(TOOL, inputSchema), { tool: TOOL, status: 'warn', code: 'input_schema_unsupported' });
     }
     assert.deepEqual(warnings, []);
+  });
+
+  test('guards references into uninspected data before validation and never prints their values', (t) => {
+    const output: unknown[] = [];
+    for (const method of ['warn', 'log', 'error'] as const) t.mock.method(console, method, (...args: unknown[]) => output.push(args));
+    for (const target of [
+      { type: 'string', format: 'PRIVATE_FORMAT_FROM_REF' },
+      { type: 'string', futureConstraint: 'PRIVATE_CONSTRAINT_FROM_REF' },
+    ]) {
+      for (const [keyword, value, reference] of [
+        ['examples', [target], '#/examples/0'],
+        ['description', target, '#/description'],
+        ['const', target, '#/const'],
+      ] as const) {
+        const schema = { type: 'object', properties: { threadId: { $ref: reference } }, [keyword]: value };
+        assert.deepEqual(inputCheck(TOOL, schema), { tool: TOOL, status: 'warn', code: 'input_schema_unsupported' });
+      }
+    }
+    assert.deepEqual(output, []);
+  });
+
+  test('accepts guarded local pointers and keeps unsupported reference resolution unverified', (t) => {
+    const output: unknown[] = [];
+    for (const method of ['warn', 'log', 'error'] as const) t.mock.method(console, method, (...args: unknown[]) => output.push(args));
+    const local = {
+      type: 'object', properties: { threadId: { $ref: '#/$defs/identifier' } }, $defs: { identifier: { type: 'string' } },
+    };
+    const unchanged = structuredClone(local);
+    assert.equal(inputCheck(TOOL, local).status, 'pass');
+    assert.deepEqual(local, unchanged, 'validation must not annotate the caller schema');
+    assert.equal(inputCheck(TOOL, {
+      ...local, $defs: { identifier: { type: 'number' } },
+    }).status, 'fail', 'the referenced constraint actually applies');
+    for (const reference of [
+      { $ref: '#identifier' },
+      { $ref: 'https://example.invalid/schema#/$defs/identifier' },
+      { $dynamicRef: '#/$defs/identifier' },
+      { $recursiveRef: '#' },
+      { $ref: '#/$defs/missing' },
+      { $ref: '#/%XX' },
+    ]) {
+      assert.equal(inputCheck(TOOL, { ...local, properties: { threadId: reference } }).status, 'warn');
+    }
+    assert.equal(inputCheck(TOOL, { ...local, $defs: { identifier: { $id: 'nested', type: 'string' } } }).status, 'warn');
+    assert.deepEqual(output, []);
+  });
+
+  test('validator exceptions and unsupported extensions remain silent and unverified', (t) => {
+    const output: unknown[] = [];
+    for (const method of ['warn', 'log', 'error'] as const) t.mock.method(console, method, (...args: unknown[]) => output.push(args));
+    for (const rule of [
+      { type: 'string', pattern: '(PRIVATE_INVALID_PATTERN' },
+      { type: 'string', format: 'iso-date-time' },
+      { type: 'string', nullable: true },
+    ]) {
+      assert.equal(inputCheck(TOOL, { type: 'object', properties: { threadId: rule } }).status, 'warn');
+    }
+    assert.deepEqual(output, []);
   });
 
   test('a repeated schema ID does not reuse a different tool schema', () => {
