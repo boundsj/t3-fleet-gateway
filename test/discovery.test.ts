@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test, type TestContext } from 'node:test';
 import { parseConfig } from '../src/config.ts';
-import { CATALOG_TTL_MS, decodeCursor, encodeCursor, MAX_MODELS, MAX_PROVIDERS } from '../src/hosts/catalog.ts';
+import { CATALOG_TTL_MS, decodeCursor, encodeCursor, MAX_MODELS, MAX_PROVIDERS, snapshotId } from '../src/hosts/catalog.ts';
 import { startInputHash } from '../src/jobs/service.ts';
 import { MINUTE, SECOND } from '../src/time.ts';
 import { startFakeT3, syntheticProviders, type FakeOption, type FakeT3 } from './helpers/fakeT3.ts';
@@ -137,7 +137,7 @@ describe('discovery: off by default', () => {
     ]);
     const models = await agent.call<{ hosts: HostPage<ModelEntry>[] }>('fleet_models', { host: 'mini', refresh: true });
     assert.deepEqual(models.hosts.map((host) => [host.available, host.error?.code, host.models, host.providers]), [[false, 'discovery_disabled', [], []]]);
-    const cursor = encodeCursor({ hostId: 'mini', kind: 'projects', generation: 1, offset: 0 });
+    const cursor = encodeCursor({ hostId: 'mini', kind: 'projects', snapshot: snapshotId(), offset: 0 });
     assert.equal((await agent.call<{ hosts: HostPage<ProjectEntry>[] }>('fleet_projects', { host: 'mini', cursor })).hosts[0]!.error?.code, 'discovery_disabled');
 
     // Targets and selections are refused on a host without discovery, before any catalog read.
@@ -236,7 +236,7 @@ describe('discovery: fleet_projects and fleet_models', () => {
       assert.equal((await restricted.callError(tool, { host: 'studio' })).text, 'not_found: No host "studio". fleet_status lists the hosts you can use.');
     }
     assert.equal(macbook.calls.length, macbookCalls, 'nothing reached the hidden host');
-    const cursor = encodeCursor({ hostId: 'macbook', kind: 'projects', generation: 1, offset: 0 });
+    const cursor = encodeCursor({ hostId: 'macbook', kind: 'projects', snapshot: snapshotId(), offset: 0 });
     assert.equal((await restricted.callError('fleet_projects', { host: 'macbook', cursor })).code, 'not_found');
     assert.equal(macbook.calls.length, macbookCalls);
     // A read-only agent browses but cannot launch.
@@ -258,7 +258,8 @@ describe('discovery: fleet_projects and fleet_models', () => {
     assert.deepEqual([first.hosts[0]!.total, first.hosts[0]!.projects!.length], [7, 3]);
     assert.equal(countCalls(mini, 't3_project_list'), 1);
     const cursor = first.hosts[0]!.nextCursor!;
-    assert.deepEqual(decodeCursor(cursor), { hostId: 'mini', kind: 'projects', generation: decodeCursor(cursor)!.generation, offset: 3 });
+    assert.deepEqual(decodeCursor(cursor), { hostId: 'mini', kind: 'projects', snapshot: decodeCursor(cursor)!.snapshot, offset: 3 });
+    assert.match(decodeCursor(cursor)!.snapshot, /^[A-Za-z0-9_-]{16}$/, 'a random snapshot id, not a counter');
     assert.equal((await agent.callError('fleet_projects', { cursor })).text, 'invalid_argument: A cursor continues one host: pass host with it.');
     assert.equal((await agent.callError('fleet_projects', { host: 'mini', cursor, refresh: true })).code, 'invalid_argument');
     assert.equal((await agent.callError('fleet_models', { host: 'mini', cursor })).code, 'invalid_argument', 'a cursor from another tool');
@@ -645,5 +646,118 @@ describe('discovery: work_start with a target or a model selection', () => {
     assert.equal(status.state, 'failed');
     assert.equal(status.lastError?.code, 'invalid_request');
     assert.match(status.lastError?.message ?? '', /pass modelSelection to work_start \(fleet_models lists the choices\), or the operator sets defaultModelSelection for host "mini"/);
+  });
+});
+
+describe('discovery: review fixes', () => {
+  test('a direct target is classified from a fresh project read, so a title renamed after browsing cannot turn a coordinator into a discovered launch', async (t) => {
+    const mini = await startFakeT3();
+    const macbook = await startFakeT3();
+    t.after(() => mini.close());
+    t.after(() => macbook.close());
+    const coordinator = mini.launchDirect({ projectId: 'project-1', title: 'Synthetic coordinator', message: 'Synthetic' }).threadId;
+    mini.finishTurn(coordinator, 'Synthetic ready');
+    const launchesBefore = mini.launches.length;
+    const { gw, agent, tick } = await startFleet(t, {
+      mini,
+      macbook,
+      hosts: HOSTS(mini, macbook, { mini: { maxConcurrentJobs: 1 } }),
+      projects: [{ alias: 'cos', host: 'mini', t3ProjectTitle: 'Synthetic coordinator project', runtimeMode: 'auto', allowWorkStart: false }],
+    });
+    mini.projects[0]!.title = 'Synthetic coordinator project';
+    const standing = (await gw.services.jobs.adopt({ project: 'cos', threadId: coordinator, title: 'Synthetic CoS' })).job;
+    // Warm the browse cache: project-2 is a plain discovered project right now.
+    const browsed = await agent.call<{ hosts: HostPage<ProjectEntry>[] }>('fleet_projects', { host: 'mini' });
+    assert.deepEqual(browsed.hosts[0]!.projects!.map((project) => [project.projectId, project.launch.source, project.launch.allowed]), [
+      ['project-1', 'alias', false], ['project-2', 'discovered', true], ['project-3', 'discovered', true],
+    ]);
+    const reads = countCalls(mini, 't3_project_list');
+    // The operator renames projects in T3 within the cache TTL: the configured title now uniquely names project-2.
+    mini.projects[0]!.title = 'Synthetic project 1';
+    mini.projects[1]!.title = 'Synthetic coordinator project';
+    const refused = await agent.callError('work_start', { target: { host: 'mini', projectId: 'project-2' }, task: 'Synthetic', requestId: requestId() });
+    assert.equal(refused.code, 'start_disabled');
+    assert.match(refused.text, new RegExp(`Project "cos" does not accept work_start.*${standing.id}`));
+    assert.equal(countCalls(mini, 't3_project_list'), reads + 1, 'work_start read the host, not the browse cache');
+    assert.equal(gw.services.jobs.store.list({ limit: 10 }).filter((job) => !job.standing).length, 0, 'no job was created');
+    assert.equal(mini.launches.length, launchesBefore);
+    // A browse within the TTL still answers from the cache: only launches insist on a fresh read.
+    await agent.call('fleet_projects', { host: 'mini' });
+    assert.equal(countCalls(mini, 't3_project_list'), reads + 1);
+    // A host that cannot answer fails the request closed: nothing is resolved from the snapshot held before.
+    mini.failures.set('t3_project_list', { code: 'internal', message: 'Synthetic failure' });
+    const unreadable = await agent.callError('work_start', { target: { host: 'mini', projectId: 'project-3' }, task: 'Synthetic', requestId: requestId() });
+    assert.notEqual(unreadable.code, 'start_disabled');
+    assert.equal(gw.services.jobs.store.list({ limit: 10 }).filter((job) => !job.standing).length, 0, 'no job was created from the stale snapshot');
+    mini.failures.delete('t3_project_list');
+
+    // Right before the launch the policy is checked again: a queued targeted job whose project was renamed into a
+    // configured title by then fails instead of launching under the discovery policy.
+    const first = await agent.call<{ job: StartedJob }>('work_start', { target: { host: 'mini', projectId: 'project-3' }, task: 'Synthetic first', requestId: requestId() });
+    const queued = await agent.call<{ job: StartedJob }>('work_start', { target: { host: 'mini', projectId: 'project-1' }, task: 'Synthetic queued', requestId: requestId() });
+    await tick();
+    assert.deepEqual([await jobState(agent, first.job.jobId), await jobState(agent, queued.job.jobId)], ['running', 'queued']);
+    mini.projects[1]!.title = 'Synthetic project 2';
+    mini.projects[0]!.title = 'Synthetic coordinator project';
+    await agent.call('work_cancel', { jobId: first.job.jobId });
+    await tick();
+    const failed = await agent.call<{ state: string; lastError: { code: string; message: string } | null }>('work_status', { jobId: queued.job.jobId });
+    assert.equal(failed.state, 'failed');
+    assert.equal(failed.lastError?.code, 'launch_policy_changed');
+    assert.match(failed.lastError?.message ?? '', /T3 project project-1 on host mini is now configured under alias cos/);
+    assert.equal(mini.launches.length, launchesBefore + 1, 'the renamed project was never launched into');
+    assertNotLogged(gw, ['Synthetic coordinator project', 'Synthetic queued']);
+  });
+
+  test('a page cursor names its snapshot, so a cursor from before a restart is refused even when the new process has read once', async (t) => {
+    const mini = await startFakeT3({ projectCount: 5 });
+    const macbook = await startFakeT3();
+    t.after(() => mini.close());
+    t.after(() => macbook.close());
+    const { gw, agent } = await startFleet(t, { mini, macbook });
+    const first = await agent.call<{ hosts: HostPage<ProjectEntry>[] }>('fleet_projects', { host: 'mini', limit: 2 });
+    const cursor = first.hosts[0]!.nextCursor!;
+    await gw.gateway.close();
+    gw.door.disconnect();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const restarted = await startTestGateway(t, {
+      config: { hosts: HOSTS(mini, macbook), projects: PROJECTS },
+      dataDir: gw.dataDir, door: gw.door, clock: gw.clock, jobEngine: { autoStart: false },
+    });
+    const again = await connect(t, restarted, 'operate');
+    assert.match((await again.callError('fleet_projects', { host: 'mini', cursor })).text, /has been replaced or expired\. Start again without cursor/);
+    // The new process's first read would have been "generation 1" again under a counter; the old cursor must still not page it.
+    mini.projects.splice(1, 1);
+    const fresh = await again.call<{ hosts: HostPage<ProjectEntry>[] }>('fleet_projects', { host: 'mini', limit: 2 });
+    assert.notEqual(decodeCursor(fresh.hosts[0]!.nextCursor!)!.snapshot, decodeCursor(cursor)!.snapshot);
+    assert.match((await again.callError('fleet_projects', { host: 'mini', cursor })).text, /has been replaced or expired\. Start again without cursor/);
+    const rest = await again.call<{ hosts: HostPage<ProjectEntry>[] }>('fleet_projects', { host: 'mini', cursor: fresh.hosts[0]!.nextCursor!, limit: 10 });
+    assert.deepEqual([...fresh.hosts[0]!.projects!, ...rest.hosts[0]!.projects!].map((project) => project.projectId), ['project-1', 'project-3', 'project-4', 'project-5'], 'no duplicate, no mix of two reads');
+    // A guessed cursor with a well-formed id is refused too.
+    const guessed = encodeCursor({ hostId: 'mini', kind: 'projects', snapshot: snapshotId(), offset: 0 });
+    assert.equal((await again.callError('fleet_projects', { host: 'mini', cursor: guessed })).code, 'invalid_argument');
+  });
+
+  test('a selection or target with a field the gateway does not know is refused by the public schema, and no job exists', async (t) => {
+    const { mini, gw, agent, tick } = await startFleet(t);
+    const misplaced = await agent.callError('work_start', {
+      target: { host: 'mini', projectId: 'project-3' }, task: 'Synthetic', requestId: requestId(),
+      modelSelection: { instanceId: 'synthetic-provider', model: 'synthetic-model', reasoningEffort: 'high' },
+    });
+    assert.match(misplaced.text, /reasoningEffort/);
+    const extraTarget = await agent.callError('work_start', {
+      target: { host: 'mini', projectId: 'project-3', branch: 'synthetic' }, task: 'Synthetic', requestId: requestId(),
+    });
+    assert.match(extraTarget.text, /branch/);
+    assert.equal(gw.services.jobs.store.list({ limit: 10 }).length, 0, 'no job was created');
+    assert.equal(mini.launches.length, 0);
+    // The same option in its place is accepted and reaches T3.
+    const placed = await agent.call<{ job: StartedJob }>('work_start', {
+      target: { host: 'mini', projectId: 'project-3' }, task: 'Synthetic', requestId: requestId(),
+      modelSelection: { instanceId: 'synthetic-provider', model: 'synthetic-model', options: { 'synthetic-effort': 'high' } },
+    });
+    await tick();
+    assert.deepEqual(mini.launches.at(-1)?.modelSelection, { instanceId: 'synthetic-provider', model: 'synthetic-model', options: { 'synthetic-effort': 'high' } });
+    assert.deepEqual(placed.job.model, { source: 'explicit', selection: { instanceId: 'synthetic-provider', model: 'synthetic-model', options: { 'synthetic-effort': 'high' } } });
   });
 });

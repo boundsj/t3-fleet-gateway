@@ -160,7 +160,7 @@ async function readPage<S, T>(
       throw new GatewayError('invalid_argument', `That cursor is not from this tool for host ${host.id}. Start again without cursor.`);
     }
     const held = deps.catalog.held(host.id, kind) as Snapshot<S> | undefined;
-    if (!held || held.generation !== cursor.generation) {
+    if (!held || held.id !== cursor.snapshot) {
       throw new GatewayError('invalid_argument', `That cursor's catalog of host ${host.id} has been replaced or expired. Start again without cursor.`);
     }
     snapshot = held;
@@ -176,7 +176,7 @@ async function readPage<S, T>(
     items: page,
     snapshot,
     total,
-    nextCursor: end < total ? encodeCursor({ hostId: host.id, kind, generation: snapshot.generation, offset: end }) : null,
+    nextCursor: end < total ? encodeCursor({ hostId: host.id, kind, snapshot: snapshot.id, offset: end }) : null,
   };
 }
 

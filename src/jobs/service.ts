@@ -372,6 +372,11 @@ export class JobService {
    * with all of its settings; several matching aliases or an ambiguous title mapping require the alias;
    * otherwise the host's discovery policy applies, and launches need `discovery.allowWorkStart`. An
    * explicit selection must match the host's fresh capabilities exactly; nothing is substituted.
+   *
+   * The project list is read from the host now, never from the browse cache: the policy follows the
+   * projects' titles, and a project renamed since an agent browsed could otherwise be launched under
+   * the wrong policy. A host that cannot answer fails the request (the error propagates); nothing is
+   * resolved from an older snapshot. The dispatcher repeats this check right before the launch.
    */
   async #resolveLaunch(
     caller: Caller,
@@ -379,7 +384,7 @@ export class JobService {
     project: ProjectConfig | undefined,
     input: StartInput,
   ): Promise<{ spec: LaunchSpec; branchPrefix: string }> {
-    const projects = (await this.#catalog.projects(host.id)).value;
+    const projects = (await this.#catalog.projects(host.id, { refresh: true })).value;
     const mappings = mapProjects(this.#config, host.id, projects);
     let found: CatalogProject | undefined;
     let policy: ProjectConfig | HostConfig['discovery'];

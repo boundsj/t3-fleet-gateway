@@ -14,6 +14,7 @@ import { deliverInterrupt } from './interrupt.ts';
 import { validateSelection, type LaunchSpec, type ModelSelection } from './launchSpec.ts';
 import { jobMarker } from './service.ts';
 import type { Job, JobChanges, JobStore } from './store.ts';
+import { launchPolicy, mapProjects } from './targets.ts';
 
 /** Launches can take a while: T3 prepares the worktree before answering. */
 const LAUNCH_TIMEOUT_MS = 60 * SECOND;
@@ -237,7 +238,7 @@ export class JobEngine {
     // retry is safe, instead of making the launch itself ambiguous.
     await this.#options.registry.client(host.id).environmentRead();
     for (const job of queued) {
-      const plan = job.launchSpec ? await this.#planFromSpec(job, job.launchSpec) : await this.#planFromConfig(job);
+      const plan = job.launchSpec ? await this.#planFromSpec(host, job, job.launchSpec) : await this.#planFromConfig(job);
       if (!plan) continue;
       const dispatching = store.transition(job.id, {
         from: ['queued'],
@@ -266,14 +267,48 @@ export class JobEngine {
   }
 
   /**
-   * The launch of a job with a recorded spec. An explicit model selection is checked again against the
-   * host's capabilities read now: a host that cannot answer leaves the job queued (the host failure
-   * propagates), a selection the host no longer advertises fails the job before anything is launched.
+   * The launch of a job with a recorded spec. The host's project list and, for an explicit model
+   * selection, its capabilities are read now (never from the browse cache): a host that cannot answer
+   * leaves the job queued (the host failure propagates); a project that is gone, that a configured alias
+   * other than the recorded one now governs (a title renamed since), that no longer accepts work, or a
+   * selection the host no longer advertises fails the job before anything is launched.
    */
-  async #planFromSpec(job: Job, spec: LaunchSpec): Promise<LaunchPlan | undefined> {
+  async #planFromSpec(host: HostConfig, job: Job, spec: LaunchSpec): Promise<LaunchPlan | undefined> {
     const { config, catalog } = this.#options;
     if (spec.alias !== null && !config.projects.some((candidate) => candidate.alias === spec.alias)) {
       this.#failQueued(job, 'project_not_configured', `Project "${spec.alias}" is no longer configured.`);
+      return undefined;
+    }
+    try {
+      const projects = (await catalog.projects(job.hostId, { refresh: true })).value;
+      const mapping = mapProjects(config, job.hostId, projects).get(spec.projectId);
+      if (!mapping) {
+        this.#failQueued(job, 'project_not_found', `Host ${job.hostId} no longer has T3 project ${spec.projectId}.`);
+        return undefined;
+      }
+      const alias = spec.alias === null ? undefined : config.projects.find((candidate) => candidate.alias === spec.alias);
+      let changed: string | undefined;
+      if (alias) {
+        // The agent named the alias: it must still resolve to the recorded project (a title may have moved) and accept work.
+        if (!mapping.aliases.includes(alias)) changed = `project "${alias.alias}" no longer resolves to T3 project ${spec.projectId} on host ${job.hostId}`;
+        else if (!alias.allowWorkStart) changed = `project "${alias.alias}" no longer accepts work_start`;
+      } else {
+        const policy = launchPolicy(host, mapping);
+        if (policy.kind !== 'discovered') {
+          const aliases = policy.kind === 'alias' ? [policy.project.alias] : policy.aliases;
+          changed = `T3 project ${spec.projectId} on host ${job.hostId} is now configured under ${aliases.length === 1 ? 'alias' : 'aliases'} ${aliases.join(', ')}`;
+        } else if (!host.discovery.enabled || !host.discovery.allowWorkStart) {
+          changed = `host ${job.hostId} no longer accepts work_start into T3 projects without a configured alias`;
+        }
+      }
+      if (changed) {
+        this.#failQueued(job, 'launch_policy_changed', `Not launched: ${changed}. Start the work again under the current policy (fleet_projects shows it).`);
+        return undefined;
+      }
+    } catch (error) {
+      if (isHostFailure(error)) throw error;
+      const described = describeError(error);
+      this.#failQueued(job, described.code, `The project list of host ${job.hostId} could not be read before the launch: ${described.message}`);
       return undefined;
     }
     if (spec.model.source === 'explicit' && spec.model.selection) {

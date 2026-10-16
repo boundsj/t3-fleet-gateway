@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+
 import { GatewayError } from '../errors.ts';
 import type { OptionDescriptor, T3Capabilities, T3Project } from '../t3/schemas.ts';
 import { SECOND, type Clock } from '../time.ts';
@@ -59,11 +61,19 @@ export interface CatalogProvider {
   constraints: string[];
 }
 
-/** A completed, sanitized read of one host's catalog. `generation` increases with every new read. */
+/**
+ * A completed, sanitized read of one host's catalog. `id` is random and unique to this read (96 bits):
+ * a page cursor names it, so a cursor minted against an earlier read, or before a gateway restart,
+ * never pages a different snapshot (a counter would start again at 1 in a new process).
+ */
 export interface Snapshot<T> {
-  generation: number;
+  id: string;
   fetchedAt: number;
   value: T;
+}
+
+export function snapshotId(): string {
+  return randomBytes(12).toString('base64url');
 }
 
 export type CatalogKind = 'projects' | 'models';
@@ -137,7 +147,6 @@ export class CatalogService {
   readonly #clock: Clock;
   readonly #projects = new Map<string, Entry<CatalogProject[]>>();
   readonly #models = new Map<string, Entry<CatalogProvider[]>>();
-  #generation = 0;
 
   constructor(registry: HostRegistry, clock: Clock) {
     this.#registry = registry;
@@ -156,7 +165,7 @@ export class CatalogService {
     );
   }
 
-  /** The snapshot held for a host, however old: a page cursor continues from the generation it names. */
+  /** The snapshot held for a host, however old: a page cursor continues from the snapshot it names. */
   held(hostId: string, kind: CatalogKind): Snapshot<CatalogProject[]> | Snapshot<CatalogProvider[]> | undefined {
     return kind === 'projects' ? this.#projects.get(hostId)?.snapshot : this.#models.get(hostId)?.snapshot;
   }
@@ -174,7 +183,7 @@ export class CatalogService {
     const current = entry;
     const inflight = fetch()
       .then((value) => {
-        const snapshot: Snapshot<T> = { generation: ++this.#generation, fetchedAt: this.#clock(), value };
+        const snapshot: Snapshot<T> = { id: snapshotId(), fetchedAt: this.#clock(), value };
         current.snapshot = snapshot;
         return snapshot;
       })
@@ -186,23 +195,26 @@ export class CatalogService {
   }
 }
 
-/** An opaque page cursor bound to one host and one catalog snapshot. A snapshot replaced since is a fresh start. */
+/**
+ * An opaque page cursor bound to one host and one catalog snapshot (by its random id). A snapshot
+ * replaced since, by a refresh, the TTL or a restart, is a fresh start: the cursor is refused.
+ */
 export interface PageCursor {
   hostId: string;
   kind: CatalogKind;
-  generation: number;
+  snapshot: string;
   offset: number;
 }
 
 export function encodeCursor(cursor: PageCursor): string {
-  return Buffer.from(`v1\n${cursor.kind}\n${cursor.hostId}\n${cursor.generation}\n${cursor.offset}`).toString('base64url');
+  return Buffer.from(`v2\n${cursor.kind}\n${cursor.hostId}\n${cursor.snapshot}\n${cursor.offset}`).toString('base64url');
 }
 
 export function decodeCursor(text: string): PageCursor | undefined {
   if (!/^[A-Za-z0-9_-]{1,512}$/.test(text)) return undefined;
   const parts = Buffer.from(text, 'base64url').toString('utf8').split('\n');
-  if (parts.length !== 5 || parts[0] !== 'v1') return undefined;
-  const [, kind, hostId, generation, offset] = parts;
-  if ((kind !== 'projects' && kind !== 'models') || !hostId || !/^\d{1,15}$/.test(generation ?? '') || !/^\d{1,15}$/.test(offset ?? '')) return undefined;
-  return { kind, hostId, generation: Number(generation), offset: Number(offset) };
+  if (parts.length !== 5 || parts[0] !== 'v2') return undefined;
+  const [, kind, hostId, snapshot, offset] = parts;
+  if ((kind !== 'projects' && kind !== 'models') || !hostId || !snapshot || !/^[A-Za-z0-9_-]{16}$/.test(snapshot) || !/^\d{1,15}$/.test(offset ?? '')) return undefined;
+  return { kind, hostId, snapshot, offset: Number(offset) };
 }

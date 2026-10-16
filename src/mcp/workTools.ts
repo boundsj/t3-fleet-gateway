@@ -45,19 +45,21 @@ const jobIdInput = z
   .regex(/^[0-9a-z]{6,32}$/, 'a job id as returned by work_start')
   .describe('The jobId returned by work_start, or listed by work_list or (for standing jobs) fleet_status');
 
-const targetInput = z.object({
+// Strict: a field the gateway does not know (an option such as reasoningEffort beside `options`, say) is refused
+// with no job, instead of being dropped and the job launched without what the agent asked for.
+const targetInput = z.strictObject({
   host: z.string().min(1).max(32).describe('Host id'),
   projectId: z.string().min(1).max(200).describe('T3 project id from fleet_projects'),
 });
 
 const modelSelectionInput = z
-  .object({
+  .strictObject({
     instanceId: z.string().trim().min(1).max(MAX_SELECTION_ID_CHARS).describe('providerInstanceId from fleet_models'),
     model: z.string().trim().min(1).max(MAX_SELECTION_ID_CHARS).describe('modelId from fleet_models'),
     options: z
       .record(z.string().min(1).max(MAX_SELECTION_ID_CHARS), z.union([z.string().min(1).max(2000), z.boolean()]))
       .optional()
-      .describe('Option id to value: a choices[].id for a select option (a reasoning effort, say), true or false for a boolean option'),
+      .describe('Option id to value, inside this object: a choices[].id for a select option (a reasoning effort, say), true or false for a boolean option. Nothing else is accepted here'),
   })
   .refine((selection) => Object.keys(selection.options ?? {}).length <= MAX_SELECTION_OPTIONS && JSON.stringify(selection).length <= MAX_SELECTION_CHARS, {
     message: `at most ${MAX_SELECTION_OPTIONS} options and ${MAX_SELECTION_CHARS} characters`,
