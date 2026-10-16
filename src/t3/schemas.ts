@@ -23,6 +23,42 @@ export const projectListSchema = z.looseObject({
 });
 
 /**
+ * One model option T3 advertises in `orchestrator_capabilities` (T3's `ProviderOptionDescriptor`): a
+ * `select` with its choices (a reasoning effort, say) or a `boolean`. The type is read as a plain
+ * string so a kind added by a newer T3 is carried, unselectable, instead of failing the whole catalog.
+ */
+export const optionDescriptorSchema = z.looseObject({
+  id: z.string().min(1),
+  label: z.string(),
+  description: z.string().nullish(),
+  type: z.string(),
+  options: z
+    .array(z.looseObject({ id: z.string().min(1), label: z.string(), description: z.string().nullish(), isDefault: z.boolean().nullish() }))
+    .nullish(),
+  currentValue: z.union([z.string(), z.boolean()]).nullish(),
+});
+export type OptionDescriptor = z.infer<typeof optionDescriptorSchema>;
+
+/** The fields of `orchestrator_capabilities` the gateway relies on; T3's result has more (features, inherited model). */
+export const capabilitiesSchema = z.looseObject({
+  providers: z.array(
+    z.looseObject({
+      providerInstanceId: z.string().min(1),
+      driverKind: z.string(),
+      displayName: z.string().nullish(),
+      models: z.array(z.looseObject({ id: z.string().min(1), label: z.string().nullish(), options: z.array(optionDescriptorSchema).nullish() })),
+      runtimeModes: z.array(z.string()).nullish(),
+      /** Whether this provider may run a delegated child task inside T3: metadata, not proof that a top-level launch works. */
+      canRunChildTask: z.boolean().nullish(),
+      canRunCrossProviderChildTask: z.boolean().nullish(),
+      constraints: z.array(z.string()).nullish(),
+    }),
+  ),
+});
+export type T3Capabilities = z.infer<typeof capabilitiesSchema>;
+export type T3ProviderCapability = T3Capabilities['providers'][number];
+
+/**
  * Thread and run status values T3 documents. Outputs are parsed as plain strings so that a status
  * added by a newer T3 does not break watching; the job layer treats unrecognised values as active.
  */

@@ -126,7 +126,7 @@ describe('T3 advertised input checks', () => {
     await client.connect(new StreamableHTTPClientTransport(new URL('/mcp', fake.url), { authProvider: { token: async () => token } }));
     const tools = (await client.listTools()).tools;
     const checks = checkInputs(tools);
-    assert.equal(checks.length, 11);
+    assert.equal(checks.length, 12);
     assert.ok(checks.every((check) => check.status === 'pass'), JSON.stringify(checks));
     assert.deepEqual(fake.calls, [], 'discovery and schema validation must not call mutation or read tools');
   });
@@ -135,7 +135,7 @@ describe('T3 advertised input checks', () => {
     const tools = permissiveTools().filter((tool) => tool.name !== 't3_thread_send');
     tools.push({ name: 'unrelated', inputSchema: { type: 'object' } });
     const checks = checkInputs(tools);
-    assert.equal(checks.length, 11);
+    assert.equal(checks.length, 12);
     assert.deepEqual(checks.filter((check) => check.status !== 'pass'), [
       { tool: 't3_thread_send', status: 'fail', code: 'required_tool_missing' },
     ]);

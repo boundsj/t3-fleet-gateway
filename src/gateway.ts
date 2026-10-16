@@ -1,6 +1,7 @@
 import { mcpResource, type GatewayConfig } from './config.ts';
 import { openDataDir } from './dataDir.ts';
 import { openDatabase, type Database } from './db/database.ts';
+import { CatalogService } from './hosts/catalog.ts';
 import { CredentialStore } from './hosts/credentials.ts';
 import { warnProjectsWithoutModel } from './hosts/projects.ts';
 import { HostRegistry, type HostRegistryOptions } from './hosts/registry.ts';
@@ -10,6 +11,7 @@ import { JobEngine } from './jobs/engine.ts';
 import { JobService } from './jobs/service.ts';
 import { JobStore } from './jobs/store.ts';
 import type { Logger } from './log.ts';
+import { catalogTools } from './mcp/catalogTools.ts';
 import { createMcpEndpoint } from './mcp/endpoint.ts';
 import { fleetStatusTool } from './mcp/fleetStatus.ts';
 import type { GatewayTool } from './mcp/tools.ts';
@@ -31,6 +33,8 @@ export interface GatewayServices {
   approvals: ApprovalCodes;
   tokens: TokenService;
   registry: HostRegistry;
+  /** Per-host T3 project and model catalogs for agents (opt-in per host). */
+  catalog: CatalogService;
   jobs: JobService;
   close(): Promise<void>;
 }
@@ -68,6 +72,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
     ...(options.runCommand ? { runCommand: options.runCommand } : {}),
     ...(options.commandEnv ? { commandEnv: options.commandEnv } : {}),
   });
+  const catalog = new CatalogService(registry, clock);
   return {
     config,
     db,
@@ -78,7 +83,8 @@ export function openServices(options: ServiceOptions): GatewayServices {
     approvals: new ApprovalCodes(db, key, clock),
     tokens: new TokenService(db, clock, { resource: mcpResource(config), ...config.tokens }, logTokenEvent(logger)),
     registry,
-    jobs: new JobService({ config, store: new JobStore(db, clock, logger), registry, clock, logger }),
+    catalog,
+    jobs: new JobService({ config, store: new JobStore(db, clock, logger), registry, catalog, clock, logger }),
     async close() {
       await registry.close();
       db.close();
@@ -87,7 +93,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
 }
 
 export function gatewayTools(services: GatewayServices): GatewayTool[] {
-  return [fleetStatusTool(services), ...workTools(services.jobs)];
+  return [fleetStatusTool(services), ...catalogTools(services), ...workTools(services.jobs)];
 }
 
 export interface RunningGateway {
@@ -156,6 +162,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
     config,
     store: services.jobs.store,
     registry: services.registry,
+    catalog: services.catalog,
     clock: services.clock,
     logger,
     ...(options.jobEngine?.intervalMs === undefined ? {} : { intervalMs: options.jobEngine.intervalMs }),

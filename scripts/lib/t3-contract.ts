@@ -9,7 +9,7 @@ export type AdvertisedTool = {
 
 /** The downstream calls in src/t3/client.ts, including mutations inspected but never executed by the check. */
 export const REQUIRED_TOOLS = [
-  't3_environment_read', 't3_project_list', 't3_thread_launch', 't3_thread_read', 't3_thread_list',
+  't3_environment_read', 't3_project_list', 'orchestrator_capabilities', 't3_thread_launch', 't3_thread_read', 't3_thread_list',
   't3_thread_search', 't3_thread_send', 't3_thread_interrupt', 't3_pending_request_list',
   't3_pending_request_read', 't3_pending_request_respond',
 ] as const;
@@ -203,6 +203,7 @@ const LAUNCH = {
 const INPUT_SAMPLES: Record<(typeof REQUIRED_TOOLS)[number], Record<string, unknown>[]> = {
   t3_environment_read: [{}],
   t3_project_list: [{ limit: 100 }, { limit: 100, cursor: 100 }],
+  orchestrator_capabilities: [{}],
   t3_thread_launch: RUNTIME_MODE_VALUES.flatMap((runtimeMode) => [
     { ...LAUNCH, runtimeMode },
     { ...LAUNCH, runtimeMode, modelSelection: { instanceId: 'codex', model: 'synthetic-model' } },

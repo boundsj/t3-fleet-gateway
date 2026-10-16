@@ -12,30 +12,54 @@ The first supported agent is Grok Bot; any MCP client with OAuth support should 
 
 ## Try it
 
-Setup is two prompts. Agents like Grok Bot run in the cloud, so the gateway needs a public HTTPS URL; it listens only on loopback, so you expose it with a tunnel you run (Tailscale Funnel, Cloudflare Tunnel, ngrok, …).
+Setup is a few prompts. Agents like Grok Bot run in the cloud, so the gateway needs a public HTTPS URL; it listens only on loopback, so you expose it with a tunnel you run (Tailscale Funnel, Cloudflare Tunnel, ngrok, …).
 
-Give this to a coding agent on the always-on machine that runs T3 Code:
+**1. Set up the gateway.** Give this to a coding agent on the always-on machine that runs T3 Code:
 
 ```text
 Set up https://github.com/boundsj/t3-fleet-gateway on this machine by
 following its README. Enroll this machine's T3 Code server as a host
-and add these projects: <your projects>. Run the gateway as a service
-and expose it over HTTPS with <your tunnel>. Make sure `doctor` passes.
-Then give me the public /mcp URL. When I connect each Grok bot, mint
-a one-time approval code for it.
+and add these projects as aliases: <your projects>. Run the gateway as
+a service and expose it over HTTPS with <your tunnel>. Make sure
+`doctor` passes, then give me the public /mcp URL. When I connect an
+agent, mint a one-time approval code for it.
 ```
 
-Then make one Grok bot per project and give each one this:
+**2. Connect an agent.** One agent can run your whole fleet; you do not need a bot per project. Give it this:
 
 ```text
 Connect to my T3 fleet gateway at https://<your public URL>/mcp.
-You own the <project> project. Set up a 15-minute routine that checks
-only <project>'s jobs, keeps your place in the feed between checks,
-and stays quiet unless a job needs an answer, is ready for review,
-or failed.
+Call fleet_status and tell me which machines and projects you can
+use. When I ask you to get something done, start it with work_start
+in the right project, follow it with work_feed and work_status, read
+replies with work_messages, answer the worker's questions with
+work_respond, and tell me when it is ready for review or stuck.
 ```
 
-Each bot opens the gateway's approval page. Ask the agent from the first step for a code (`pair`; codes expire after 15 minutes by default) and choose **Operate**. Stagger the routines a few minutes apart so they don't all check at once.
+The agent opens the gateway's approval page. Ask the agent from step 1 for a code (`pair`; codes expire after 15 minutes by default) and choose **Operate**, and **All machines** or just the ones this agent should touch. If you want it to check in on its own, give it a routine with the cadence you like; the gateway does not set one up for you.
+
+**3. Let it discover (optional).** By default the agent sees exactly the project aliases you configured, and that stays the way to work. If you would rather not write a config entry for every project, turn on discovery for a machine:
+
+```text
+In my gateway config, enable discovery on host <id>: set
+"discovery": { "enabled": true } on it, restart the service, and run
+doctor. Keep allowWorkStart off for now: I want agents to browse the
+machine's T3 projects and models, not to start work outside the
+configured aliases yet.
+```
+
+Then the agent can look around and pick its tools:
+
+```text
+Call fleet_projects and fleet_models for host <id>. Which T3 projects
+are there, and which models and reasoning efforts does the machine
+offer? Then start this task in the project called "<name>": <task>.
+If the project has an alias, use it; otherwise use the target it
+lists. Pick the model and effort you think fit, say what you chose,
+and follow the job to completion.
+```
+
+Browsing does not grant launching. A project that has an alias is always started as that alias, with all of its rules (including a project that only accepts work through its coordinator). Starting work in a project *without* an alias needs one more switch on the host, `"discovery": { "enabled": true, "allowWorkStart": true }`, plus the runtime mode, base branch and branch prefix you want such jobs to use (see [docs/configuration.md](docs/configuration.md#discovery)). An agent's model choice is accepted only if that machine really advertises it; otherwise the start is refused and nothing is launched.
 
 The manual steps behind the first prompt are in [Setup](#setup) below.
 
@@ -52,11 +76,11 @@ T3 Code server(s)  ──► one T3 thread per job, in a fresh worktree on its o
 ```
 
 - One process on an always-on machine, listening on loopback; your tunnel is the only way in.
-- The gateway is an MCP server to agents and an MCP client to each T3 server. Instead of T3's raw tools, agents get a small job-level contract: `fleet_status` (hosts and projects), `work_start`, `work_continue`, `work_respond`, `work_cancel`, `work_status`, `work_messages` (a job's replies in full), `work_list` and `work_feed` (what changed since the agent's last check, from a cursor it keeps).
+- The gateway is an MCP server to agents and an MCP client to each T3 server. Instead of T3's raw tools, agents get a small job-level contract: `fleet_status` (hosts and configured projects), `fleet_projects` and `fleet_models` (a host's T3 projects, models and options, where you enabled discovery), `work_start`, `work_continue`, `work_respond`, `work_cancel`, `work_status`, `work_messages` (a job's replies in full), `work_list` and `work_feed` (what changed since the agent's last check, from a cursor it keeps).
 - Agents sign in through the gateway's own OAuth 2.1 server: on first connect an agent opens an approval page, and you type a one-time code minted on the gateway machine and choose **Read** (follow work) or **Operate** (start and steer work).
 - The gateway holds its own credential for each T3 server and renews it before it expires (T3 credentials last 30 days). Agent tokens never reach T3, and T3 credentials never leave the gateway.
 
-## One project, one bot: standing jobs
+## Talk to a coordinator: standing jobs
 
 By default each piece of work is a new T3 thread. If you run a long-lived thread that coordinates a project (a "chief of staff" that plans, delegates to child threads of its own and reports back), let the agent talk to that thread instead:
 
@@ -126,6 +150,8 @@ node bin/t3-fleet-gateway.js doctor                      # operator-route public
 A network outage is separate from token expiry. Keep the OAuth credentials and saved `work_feed.nextCursor`, restore ingress, then reconnect with those credentials: a usable saved refresh token can replace an expired access token without another approval. Resume `work_feed` after the saved cursor; reuse the same request id and input for any uncertain work mutation. Static bearer clients have no refresh; replace an expired/revoked token in the connector settings. Inspect and re-enable a disabled bot routine yourself: longer token lifetimes cannot restart it. Actual Grok/Notion retry thresholds remain unverified; [recovery instructions and tested SDK limits](docs/operations.md#authentication-and-outage-recovery) explain the evidence and next steps.
 
 ## Status
+
+**Unreleased: opt-in discovery** ([issue #12](https://github.com/boundsj/t3-fleet-gateway/issues/12)). Per host, `discovery.enabled` lets agents list that machine's T3 projects (`fleet_projects`) and its providers, models and options such as reasoning effort (`fleet_models`), read live from T3 and bounded; `work_start` then also takes a `target` by T3 project id and an explicit `modelSelection`, validated against what the host advertises. Launching into projects without an alias is a separate switch (`discovery.allowWorkStart`), and configured aliases keep all their rules. Everything is off by default and existing setups are unchanged. Covered by synthetic two-host tests and a bounded isolated smoke against one fresh QA-only T3 instance (28 of 28 checks, [evidence](docs/evidence/discovery.md)); not yet a live fleet, production or hosted-connector qualification.
 
 **v0.1.6** accepts current T3 thread responses without a `link` field, generates the documented thread URL, and retains older links. Watchers recover and clear stale response-shape errors after a successful observation. No database migration or configuration change.
 

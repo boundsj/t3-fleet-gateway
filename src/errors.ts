@@ -20,6 +20,8 @@ export type ErrorCode =
   | 'job_state_conflict'
   | 'request_id_conflict'
   | 'start_disabled'
+  | 'discovery_disabled'
+  | 'catalog_limit'
   | 'internal_error';
 
 export class GatewayError extends Error {
