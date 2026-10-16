@@ -3,7 +3,12 @@ import { resolve } from 'node:path';
 import type { HostConfig } from '../config.ts';
 import { runCommand, type CommandOptions } from '../t3/pairing.ts';
 
-export const PROBE_TIMEOUT_MS = 2_000;
+/**
+ * Ten seconds: a launchd agent with ProcessType Background runs its children at a lower CPU and I/O priority, and a
+ * non-mutating T3 version probe that answers in well under a second in the foreground was measured taking over two
+ * seconds there (docs/evidence/startup-probe.md). The deadline is the same bound at startup and in doctor.
+ */
+export const PROBE_TIMEOUT_MS = 10_000;
 export const PROBE_MAX_BYTES = 4_096;
 
 export interface CommandCheck {

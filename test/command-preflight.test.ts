@@ -89,7 +89,7 @@ test('custom probes run exactly configured argv with the same environment and bo
       assert.deepEqual(argv, probe, 'no appended --version');
       assert.equal(options?.env, env);
       assert.equal(options?.maxBuffer, PROBE_MAX_BYTES);
-      assert.equal(options?.timeoutMs, 2000);
+      assert.equal(options?.timeoutMs, 10_000, 'the default probe deadline is ten seconds (a Background launchd agent exceeded two)');
       assert.ok(options?.signal);
       return '{"version":"1.0.0"}';
     },
@@ -152,7 +152,7 @@ test('startup reports missing commands and shutdown aborts an in-flight configur
   await probeStarted.promise;
   const began = performance.now();
   await gw.gateway.close();
-  assert.ok(performance.now() - began < 1000, 'shutdown did not wait for the two-second probe deadline');
+  assert.ok(performance.now() - began < 1000, 'shutdown did not wait for the ten-second probe deadline');
   assert.equal(signal?.aborted, true);
   assert.ok(gw.logs.some((line) => line.includes('gateway.stopped')));
   assert.doesNotMatch(gw.logs.join('\n'), /do-not-mint|synthetic-safe-probe|probe_failed|probe_timeout/);
