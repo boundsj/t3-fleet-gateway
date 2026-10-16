@@ -297,7 +297,7 @@ The lifecycle script also discovers the tool list, checks `work_list`, reads com
 
 ### Discovery smoke (issue #12)
 
-The opt-in discovery feature has one bounded live check so far: an isolated smoke against a single fresh QA-only T3 instance with its own gateway data directory, credentials and a scratch git repository, driven through the public OAuth and MCP endpoints, with no access to the production gateway. It passed 28 of 28 checks at the initial implementation head; the reviewed head is rerun before the pull request. The sanitized case table and the assumptions it rests on are in [evidence/discovery.md](evidence/discovery.md). It is not a live fleet, production or hosted-connector (Grok, Notion) qualification, and the harness is private to that QA setup.
+The opt-in discovery feature has a bounded live smoke against a single fresh QA-only T3 instance with its own gateway data directory, credentials and a scratch git repository, driven through the public OAuth and MCP endpoints, with no access to the production gateway. It passed 28 of 28 checks at both the initial implementation head and the implementation with review fixes. The sanitized case table and the assumptions it rests on are in [evidence/discovery.md](evidence/discovery.md). It is not a live fleet, production or hosted-connector (Grok, Notion) qualification, and the harness is private to that QA setup.
 
 ### Supervised qualification
 

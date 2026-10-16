@@ -4,7 +4,7 @@ A bounded, isolated live check of opt-in per-host discovery: `fleet_projects`, `
 
 ## Setup
 
-- Implementation head checked: `820b8c3` (the initial head reviewed; the three review fixes that followed are covered by synthetic regressions in `test/discovery.test.ts`). The final reviewed head is rerun with the same harness before the pull request opens.
+- Implementation heads checked: `820b8c3` initially and `98f33bb` after the three review fixes, both with the same harness and 28 of 28 checks passing. The review fixes also have synthetic regressions in `test/discovery.test.ts`.
 - One fresh, QA-only T3 Code instance (nightly `0.0.46-nightly.20261014.3118`) with a scratch git repository as its only project. No production T3 instance was used.
 - A separate gateway data directory, OAuth clients and host credentials. The production gateway, its settings, credentials, data and service were not accessed.
 - Driven through the public OAuth and MCP endpoints only, as a hosted agent would be, using text content as well as structured content.
@@ -13,7 +13,7 @@ A bounded, isolated live check of opt-in per-host discovery: `fleet_projects`, `
 
 ## Results
 
-28 of 28 checks passed. No owned job remained afterwards.
+28 of 28 checks passed on both runs. All three jobs created across the initial probe and successful runs were cancelled. The QA gateway and T3 runtime were stopped, and their temporary data and credentials were removed; only sanitized evidence and the private setup harness were retained.
 
 | Area | Check | Result |
 | --- | --- | --- |
@@ -22,7 +22,7 @@ A bounded, isolated live check of opt-in per-host discovery: `fleet_projects`, `
 | Catalogs | Scratch project discovered by explicit target; text output carries a usable target | pass |
 | Catalogs | The real Codex model and `high` effort advertised; text output lists actionable model choices | pass |
 | Catalogs | One host unavailable: the healthy host's catalog is still returned | pass |
-| Authorization | Host-restricted reader sees one permitted host; `fleet_models` on the other is `not_found`; `work_start` there is `insufficient_scope` | pass |
+| Authorization | Host-restricted reader sees one permitted host; `fleet_models` on the other is `not_found`; a read-only client's `work_start` is `insufficient_scope` | pass |
 | Authorization | Gate and scope refusals create no jobs | pass |
 | Validation | Invalid selection refused with `invalid_argument`; no job created | pass |
 | Launch | Real launch is queued first; the requested model and effort are persisted before the launch | pass |
