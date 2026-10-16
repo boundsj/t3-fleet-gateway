@@ -152,6 +152,32 @@ Checks, in order: the config, data directory permissions, database integrity and
 
 Mint checks use doctor's actual environment: repeat with the service's PATH to verify service resolution. Missing/non-executable commands fail before a future renewal needs them, even when T3 is healthy and its credential is active. Version-pinned paths warn. Without `mintPairingCodeProbe`, wrapper internals, remote execution and CLI version remain explicitly unverified; nothing is minted to test them. Only an explicitly configured safe probe is run (two-second deadline, 4,096 bytes per output stream), with fixed diagnostics and no raw command output or argv. Version comparison accepts bare semver, exact native `t3 v<semver>` output and JSON `{"version":"x.y.z"}`. Doctor uses fresh health; startup uses only completed, unexpired cached health (otherwise comparison remains unverified), with no preflight health request. Disagreement warns without declaring incompatibility. See [configuration.md](configuration.md#renewal-command-preflight).
 
+## Developer compatibility check
+
+Run this manually after a T3 update or when investigating a possible API change:
+
+```sh
+npm run compat:check
+# Establish the first baseline, or accept inspected changes after successful checks:
+npm run compat:check -- --accept
+# Machine-readable output (direct invocation avoids npm's own header):
+node scripts/check-t3-compatibility.ts --json
+```
+
+This developer tool is separate from the running gateway and `doctor`. It installs no scheduler and adds no client-facing status fields or alerts. Each invocation performs fresh discovery and reads; it can later be called by a developer's chosen automation, at a twelve-hour interval or another cadence.
+
+The script uses the existing config and enrolled credentials (`T3FG_CONFIG`, `T3FG_DATA_DIR`, or `--config` / `--data-dir`). It opens the credential database read-only: no schema migrations, credential minting/renewal, job records or configuration writes. It never launches, sends, responds to, interrupts or creates a T3 thread. `--host <id>` restricts the check to one configured host.
+
+It walks all `tools/list` pages with bounds, rejecting repeated cursors, duplicate tools and incomplete discovery. It snapshots the eleven T3 tools used by the gateway: input schemas and optional output schemas. It ignores unrelated tools and descriptive annotations, normalizes object/set ordering, and preserves actual field names, defaults and ordered schemas. When schema references make that normalization unsafe, it conservatively retains the full structure; unsupported input references or validation features warn instead of claiming compatibility. Missing required tools fail. Other schema changes warn until reviewed; a changed schema is not automatically incompatible. Representative synthetic gateway inputs are validated locally against advertised input schemas, including mutation inputs and long opaque request IDs. Rejected samples fail; schemas the validator cannot assess warn. These samples do not prove all possible inputs or mutation behavior work. MCP discovery and optional output schemas are described in the [MCP tools specification](https://modelcontextprotocol.io/specification/2025-06-18/server/tools).
+
+The read-only smoke checks use the existing gateway parsers in a separate MCP session, so discovery cannot change their SDK validation behavior. They read the environment and up to five projects, try an existing thread in up to three projects (including settled threads), search one project, read one sampled thread in both `messages` and `activity` views with minimal text, and list its pending requests. One pending request is read if present. No thread or pending question available means explicit skipped coverage; the tool does not create work to fill that gap. Output-schema changes are compared, while live output parsing checks the fields consumed by the gateway. Unadvertised output schemas and unobserved states remain unverified.
+
+Results include the current/previous T3 version, affected tool names and bounded schema paths, fixed check codes, skipped coverage and `changedSinceLastCheck`. Version changes are reported separately from schema changes. The change flag excludes timestamps and routine variation in successful sampled coverage; repeated identical failures remain visible but do not produce a new change. Exit codes are **0** for PASS, **1** for failed checks, **2** for a missing baseline/schema drift/unsupported validation needing review, and **3** for invocation or local-state errors. PASS means the advertised inputs and available sampled reads passed; it is not full live qualification.
+
+The private state file is `~/.local/state/t3-fleet-gateway-compatibility/state.json` by default, overridable with `T3FG_COMPAT_STATE_DIR` or `--state-dir`. Its directory is mode 0700 and files 0600. It retains each host/endpoint's accepted schema baseline and the latest report; report output contains no tokens, thread contents, titles, questions, answers or raw error messages. `--accept` updates a host's baseline only after discovery and its available checks pass; failed or unsupported checks preserve the prior baseline. First use without `--accept` reports a missing baseline for review. Reports are replaced atomically, and concurrent runs using the same state directory are rejected with `check_in_progress`. If a process was killed and left `check.lock`, confirm no checker is running before removing that directory and retrying.
+
+Automated tests use only synthetic hosts (`test/t3-contract.test.ts`, `test/t3-compatibility.test.ts`). Scheduled checks, notifications and full mutation QA are outside this tool's scope.
+
 ## Run as a service
 
 Requirements: Node.js 24 or newer; the latest Node 24 or 26 release is recommended. Node 26.0 can raise a spurious `setTypeOfService EINVAL` when T3 resets a new connection (see below).

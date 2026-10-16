@@ -162,9 +162,12 @@ npm install
 npm run check      # typecheck and the full test suite
 npm test           # tests only (node:test)
 npm run typecheck  # tsc --noEmit
+npm run compat:check  # on-demand, read-only check of the configured T3 hosts
 ```
 
 Tests use a fake T3 server built with the MCP SDK and never touch a real T3. CI runs `npm run check` on Node 24 and 26 (Linux) and 26 (macOS). See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
+
+The developer compatibility check compares T3's advertised MCP schemas with a private accepted baseline and exercises the gateway's read parsers against existing threads. It reports changed tools, failed checks and skipped coverage. Use `-- --accept` to establish or deliberately replace the baseline after review, and `-- --json` for a machine-readable report. It installs no schedule and runs no jobs. See [manual compatibility checks](docs/operations.md#developer-compatibility-check).
 
 ## License
 
