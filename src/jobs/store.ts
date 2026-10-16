@@ -3,6 +3,7 @@ import { GatewayError } from '../errors.ts';
 import type { Logger } from '../log.ts';
 import type { Clock } from '../time.ts';
 import type { DelegatedTask } from './derive.ts';
+import { parseLaunchSpec, type LaunchSpec } from './launchSpec.ts';
 import { isTerminal, RUNNING_STATES, TERMINAL_STATES, type JobState } from './states.ts';
 
 export interface Job {
@@ -67,6 +68,11 @@ export interface Job {
    * starting: the `delegated_work_ended` event. Cleared when the job changes state.
    */
   delegatedEndedAt: number | null;
+  /**
+   * What a job started through a direct target or an explicit model selection resolved to (migration 8):
+   * the dispatcher launches from it. Null for alias-only jobs, which dispatch from the config as before.
+   */
+  launchSpec: LaunchSpec | null;
 }
 
 /** The client id recorded on standing jobs: the operator adopted them, no agent started them. Real client ids are longer. */
@@ -172,6 +178,7 @@ interface JobRow {
   delegated_untracked: number;
   delegated_untracked_run_id: string | null;
   delegated_ended_at: number | null;
+  launch_spec: string | null;
 }
 
 interface EventRow {
@@ -199,6 +206,8 @@ const MINE = '(jobs.client_id = ? OR jobs.standing = 1)';
 export interface JobScope {
   clientId?: string | undefined;
   hostIds?: readonly string[] | undefined;
+  /** Only jobs in one T3 project of one host (`work_list.target`); a queued alias-only job has no project id yet. */
+  target?: { hostId: string; projectId: string } | undefined;
 }
 
 function scopeClause(scope: JobScope): { sql: string; params: string[] } {
@@ -211,6 +220,10 @@ function scopeClause(scope: JobScope): { sql: string; params: string[] } {
   if (scope.hostIds !== undefined) {
     parts.push(scope.hostIds.length === 0 ? '0' : `jobs.host_id IN (${scope.hostIds.map(() => '?').join(', ')})`);
     params.push(...scope.hostIds);
+  }
+  if (scope.target !== undefined) {
+    parts.push('jobs.host_id = ? AND jobs.t3_project_id = ?');
+    params.push(scope.target.hostId, scope.target.projectId);
   }
   return { sql: parts.map((part) => `AND ${part}`).join(' '), params };
 }
@@ -281,6 +294,7 @@ function toJob(row: JobRow): Job {
     delegatedUntracked: row.delegated_untracked,
     delegatedUntrackedRunId: row.delegated_untracked_run_id,
     delegatedEndedAt: row.delegated_ended_at,
+    launchSpec: parseLaunchSpec(row.launch_spec),
   };
 }
 
@@ -306,6 +320,8 @@ function columnValue(key: keyof JobChanges, value: JobChanges[keyof JobChanges])
 export interface FeedEvent extends JobEvent {
   projectAlias: string;
   title: string;
+  hostId: string;
+  t3ProjectId: string | null;
 }
 
 /** Tools whose requestId makes a call idempotent. Keys are scoped per agent and per tool. */
@@ -323,12 +339,16 @@ export interface NewJob {
   clientId: string;
   requestId: string;
   inputHash: string;
+  /** A configured alias, or for a job targeted by T3 project id without one, the internal ref `@<host>/<projectId>`. */
   projectAlias: string;
   hostId: string;
   task: string;
   title: string;
   branch: string;
   runtimeMode: string;
+  /** Known at creation for jobs with a launch spec; alias-only jobs learn it at dispatch. */
+  t3ProjectId?: string | null;
+  launchSpec?: LaunchSpec | null;
 }
 
 /** An existing T3 thread the operator adopts as a standing job, with its state from a first read. */
@@ -483,10 +503,14 @@ export class JobStore {
       const now = this.#clock();
       this.#db
         .prepare(
-          `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode, created_at, updated_at, state_changed_at)
-           VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode, created_at, updated_at, state_changed_at,
+             t3_project_id, launch_spec)
+           VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(job.id, job.clientId, job.requestId, job.projectAlias, job.hostId, job.task, job.title, job.branch, job.runtimeMode, now, now, now);
+        .run(
+          job.id, job.clientId, job.requestId, job.projectAlias, job.hostId, job.task, job.title, job.branch, job.runtimeMode, now, now, now,
+          job.t3ProjectId ?? null, job.launchSpec ? JSON.stringify(job.launchSpec) : null,
+        );
       this.#insertEvent(job.id, 'created', null, 'queued', {}, now);
       this.#db
         .prepare('INSERT INTO idempotency_keys (client_id, request_id, tool, input_hash, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
@@ -620,11 +644,11 @@ export class JobStore {
     const filter = scopeClause(scope);
     const rows = this.#db
       .prepare(
-        `SELECT job_events.*, jobs.project_alias, jobs.title FROM job_events JOIN jobs ON jobs.id = job_events.job_id
+        `SELECT job_events.*, jobs.project_alias, jobs.title, jobs.host_id, jobs.t3_project_id FROM job_events JOIN jobs ON jobs.id = job_events.job_id
           WHERE job_events.id > ? ${filter.sql} ORDER BY job_events.id LIMIT ?`,
       )
-      .all(cursor, ...filter.params, limit) as unknown as (EventRow & { project_alias: string; title: string })[];
-    return rows.map((row) => ({ ...toEvent(row), projectAlias: row.project_alias, title: row.title }));
+      .all(cursor, ...filter.params, limit) as unknown as (EventRow & { project_alias: string; title: string; host_id: string; t3_project_id: string | null })[];
+    return rows.map((row) => ({ ...toEvent(row), projectAlias: row.project_alias, title: row.title, hostId: row.host_id, t3ProjectId: row.t3_project_id }));
   }
 
   /**

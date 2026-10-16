@@ -17,6 +17,7 @@ interface FleetStatus {
     maxConcurrentJobs: number;
     runningJobs: number;
     queuedJobs: number;
+    discovery: { enabled: boolean; allowWorkStart: boolean };
   }[];
   projects: {
     alias: string;
@@ -39,7 +40,7 @@ test('fleet_status reports hosts, credentials, job counts and projects', async (
   const gw = await startTestGateway(t, {
     config: {
       hosts: [
-        { id: 'alpha', label: 'Primary', t3Url: up.url, mintPairingCode: up.mintCommand(), maxConcurrentJobs: 3 },
+        { id: 'alpha', label: 'Primary', t3Url: up.url, mintPairingCode: up.mintCommand(), maxConcurrentJobs: 3, discovery: { enabled: true } },
         { id: 'beta', t3Url: down.url, mintPairingCode: down.mintCommand() },
         { id: 'gamma', t3Url: 'http://127.0.0.1:9' },
       ],
@@ -81,6 +82,8 @@ test('fleet_status reports hosts, credentials, job counts and projects', async (
   assert.equal(alpha?.maxConcurrentJobs, 3);
   assert.equal(alpha?.runningJobs, 2);
   assert.equal(alpha?.queuedJobs, 1);
+  assert.deepEqual(alpha?.discovery, { enabled: true, allowWorkStart: false });
+  assert.deepEqual(beta?.discovery, { enabled: false, allowWorkStart: false });
   assert.equal(beta?.reachable, false);
   assert.equal(beta?.error?.code, 'host_unreachable');
   assert.equal(beta?.credential.state, 'renewal_due');
@@ -92,7 +95,7 @@ test('fleet_status reports hosts, credentials, job counts and projects', async (
     { alias: 'docs', description: '', host: 'beta', runtimeMode: 'approval-required', modelConfigured: true, allowWorkStart: true, standingJobs: [] },
   ]);
   const text = JSON.stringify(result.content);
-  assert.match(text, /alpha: reachable, T3 1\.2\.3; credential expires in 30 days; 2 running, 1 queued \(max 3\)/);
+  assert.match(text, /alpha: reachable, T3 1\.2\.3; credential expires in 30 days; 2 running, 1 queued \(max 3\); discovery on \(fleet_projects, fleet_models; launches need a configured alias\)/);
   assert.match(text, /beta: unreachable; credential expires in 2 days, last renewal failed \(enrollment_failed\)/);
   assert.match(text, /project pilot on alpha \(auto, T3's default model\): Scratch repository/);
   assert.match(text, /project docs on beta \(approval-required\)/);

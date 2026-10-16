@@ -113,11 +113,11 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 7);
+    assert.equal(SCHEMA_VERSION, 8);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
       after.map(
-        ({ standing, delegated_work, activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, ...rest }) =>
+        ({ standing, delegated_work, activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, ...rest }) =>
           rest,
       ),
       before,
@@ -211,7 +211,7 @@ CREATE TABLE jobs (
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
     const after = (db.prepare('SELECT * FROM jobs').all() as Record<string, unknown>[]).map(
-      ({ activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, ...rest }) => [activity_position, rest],
+      ({ activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, ...rest }) => [activity_position, rest],
     );
     assert.deepEqual(after, before.map((row) => [null, row]), 'existing jobs keep every column and have no activity position yet');
     const store = new JobStore(db, () => 1_000, silentLogger);
@@ -245,7 +245,7 @@ CREATE TABLE jobs (
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
     const after = (db.prepare('SELECT * FROM jobs').all() as Record<string, unknown>[]).map(
-      ({ delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, ...rest }) => [[delegated_untracked, delegated_untracked_run_id, delegated_ended_at], rest],
+      ({ delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, ...rest }) => [[delegated_untracked, delegated_untracked_run_id, delegated_ended_at], rest],
     );
     assert.deepEqual(after, before.map((row) => [[0, null, null], row]), 'existing jobs keep every column, with nothing untracked or ended');
     const store = new JobStore(db, () => 1_000, silentLogger);
@@ -283,7 +283,7 @@ CREATE TABLE jobs (
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
     const after = (db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[]).map(
-      ({ latest_message_truncated, ...rest }) => [latest_message_truncated, rest],
+      ({ latest_message_truncated, launch_spec, ...rest }) => [latest_message_truncated, rest],
     );
     assert.deepEqual(after, before.map((row, index) => [[0, 1, 1, 0][index], row]), 'existing jobs keep every column; excerpts at the bound are cut');
     const store = new JobStore(db, () => 1_000, silentLogger);
@@ -319,12 +319,20 @@ CREATE TABLE jobs (
     `);
     const tables = ['token_families', 'refresh_tokens', 'access_tokens', 'jobs', 'job_events', 'idempotency_keys'];
     const clientsBefore = old.prepare('SELECT * FROM oauth_clients').all();
-    const before = tables.map((table) => old.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const before = tables.map((table) => old.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().map((row) => ({ ...row })));
     old.close();
     const db = openDatabase(path);
     t.after(() => db.close());
-    assert.equal(schemaVersion(db), 7);
-    assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
+    assert.equal(schemaVersion(db), SCHEMA_VERSION);
+    assert.deepEqual(
+      tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().map((row) => {
+        // Migration 8 adds launch_spec to jobs, NULL for every existing row.
+        const { launch_spec, ...rest } = { ...row } as Record<string, unknown>;
+        if (table === 'jobs') assert.equal(launch_spec, null);
+        return table === 'jobs' ? rest : { ...row };
+      })),
+      before,
+    );
     const clients = db.prepare('SELECT * FROM oauth_clients').all().map(({ last_mcp_success_at, last_refresh_success_at, ...rest }) => {
       assert.equal(last_mcp_success_at, null);
       assert.equal(last_refresh_success_at, null);
@@ -335,6 +343,64 @@ CREATE TABLE jobs (
     assert.equal((db.prepare('PRAGMA integrity_check').get() as { integrity_check: string }).integrity_check, 'ok');
     assert.throws(() => db.prepare('DELETE FROM job_events').run(), /append-only/);
     assert.throws(() => db.prepare("UPDATE job_events SET type = 'changed'").run(), /append-only/);
+    const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
+    t.after(() => fresh.close());
+    const schema = (target: typeof db) => target.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name").all();
+    assert.deepEqual(schema(db), schema(fresh));
+  });
+
+  test('migration 8 adds the launch spec to a populated version 7 database, keeping jobs, standing jobs, events, credentials and keys', (t) => {
+    const path = openDataDir(join(tempDir(t), 'data')).databasePath;
+    const old = new DatabaseSync(path);
+    old.exec('PRAGMA foreign_keys = ON');
+    migrate(old, MIGRATIONS.slice(0, 7));
+    assert.equal(schemaVersion(old), 7);
+    old.exec(`
+      INSERT INTO oauth_clients (id, name, redirect_uris, created_at, last_used_at, last_mcp_success_at) VALUES ('client-1', 'Synthetic agent', '[]', 1, 42, 50);
+      INSERT INTO token_families (id, client_id, scope, resource, created_at) VALUES ('family-1', 'client-1', 'fleet:operate', 'https://gateway.example.com/mcp', 1);
+      INSERT INTO refresh_tokens (token_hash, family_id, scope, created_at, expires_at) VALUES ('synthetic-refresh-hash', 'family-1', 'fleet:operate', 1, 9000);
+      INSERT INTO access_tokens (token_hash, family_id, refresh_token_hash, scope, created_at, expires_at)
+        VALUES ('synthetic-access-hash', 'family-1', 'synthetic-refresh-hash', 'fleet:operate', 1, 1000);
+      INSERT INTO host_credentials (host_id, t3_client_id, access_token, scope, access, issued_at, expires_at, verified_at)
+        VALUES ('main', 'synthetic-t3-client', 'synthetic-t3-token', 'orchestration', 'full-access', 1, 9000, 1);
+      INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, t3_project_id, state, task, title, branch, runtime_mode,
+        created_at, updated_at, state_changed_at, activity_position, latest_message_truncated)
+        VALUES ('jobqueue001', 'client-1', 'request-1', 'pilot', 'main', NULL, 'queued', 'Synthetic task', 'Synthetic title [job:jobqueue001]', 'fleet/jobqueue001', 'auto',
+          1, 2, 2, NULL, 0);
+      INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, t3_project_id, state, task, title, branch, runtime_mode, t3_thread_id,
+        created_at, updated_at, state_changed_at, standing, activity_position, read_position)
+        VALUES ('jobstand001', 'operator', 'adopted', 'pilot', 'main', 'project-1', 'idle', '', 'Synthetic coordinator', '', '', 'thread-1',
+          1, 2, 3, 1, 20, 12);
+      INSERT INTO job_events (job_id, type, to_state, created_at) VALUES ('jobqueue001', 'created', 'queued', 1);
+      INSERT INTO job_events (job_id, type, to_state, detail, created_at) VALUES ('jobstand001', 'created', 'idle', '{"reason":"adopted"}', 1);
+      INSERT INTO idempotency_keys (client_id, tool, request_id, input_hash, job_id, created_at)
+        VALUES ('client-1', 'work_start', 'request-1', 'synthetic-request-hash', 'jobqueue001', 1);
+    `);
+    const tables = ['oauth_clients', 'token_families', 'refresh_tokens', 'access_tokens', 'host_credentials', 'job_events', 'idempotency_keys'];
+    const before = tables.map((table) => old.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const jobsBefore = old.prepare('SELECT * FROM jobs ORDER BY rowid').all().map((row) => ({ ...row }));
+    old.close();
+
+    const db = openDatabase(path);
+    t.after(() => db.close());
+    assert.equal(schemaVersion(db), 8);
+    assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
+    const jobs = (db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[]).map(({ launch_spec, ...rest }) => [launch_spec, rest]);
+    assert.deepEqual(jobs, jobsBefore.map((row) => [null, row]), 'existing jobs keep every column and have no launch spec');
+    const store = new JobStore(db, () => 1_000, silentLogger);
+    assert.deepEqual([store.require('jobqueue001').launchSpec, store.require('jobstand001').launchSpec, store.require('jobstand001').standing], [null, null, true]);
+    const spec = {
+      v: 1 as const, projectId: 'project-9', projectName: 'Synthetic discovered', source: 'discovered' as const, alias: null,
+      baseRef: 'main', runtimeMode: 'approval-required', model: { source: 'explicit' as const, selection: { instanceId: 'synthetic-provider', model: 'synthetic-model' } },
+    };
+    store.create({
+      id: 'jobspec0001', clientId: 'client-1', requestId: 'request-2', inputHash: 'h2', projectAlias: '@main/project-9', hostId: 'main',
+      task: 'Synthetic', title: 'Synthetic [job:jobspec0001]', branch: 'fleet/jobspec0001', runtimeMode: 'approval-required', t3ProjectId: 'project-9', launchSpec: spec,
+    });
+    assert.deepEqual([store.require('jobspec0001').launchSpec, store.require('jobspec0001').t3ProjectId], [spec, 'project-9']);
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+    assert.equal((db.prepare('PRAGMA integrity_check').get() as { integrity_check: string }).integrity_check, 'ok');
+    assert.throws(() => db.prepare('DELETE FROM job_events').run(), /append-only/);
     const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
     t.after(() => fresh.close());
     const schema = (target: typeof db) => target.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name").all();

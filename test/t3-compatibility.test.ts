@@ -100,8 +100,9 @@ describe('on-demand developer compatibility tool', () => {
     assert.ok(f.fake.reads.some((read) => read.view === 'messages'));
     assert.ok(f.fake.reads.some((read) => read.view === 'activity'));
     assert.ok(f.fake.calls.length > 0);
-    const reads = new Set(['t3_environment_read', 't3_project_list', 't3_thread_list', 't3_thread_read',
+    const reads = new Set(['t3_environment_read', 't3_project_list', 'orchestrator_capabilities', 't3_thread_list', 't3_thread_read',
       't3_thread_search', 't3_pending_request_list', 't3_pending_request_read']);
+    assert.ok(f.fake.calls.includes('orchestrator_capabilities'), 'the capabilities catalog is smoke-read');
     assert.ok(f.fake.calls.every((call) => reads.has(call)), 'only known read-only tools were invoked');
     for (const [name, bytes] of Object.entries(before)) assert.deepEqual(readFileSync(join(f.dataDir, name)), bytes);
     assert.equal(statSync(f.stateDir).mode & 0o777, 0o700);

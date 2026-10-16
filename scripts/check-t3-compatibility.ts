@@ -11,7 +11,7 @@ import { loadConfig, resolvePaths } from '../src/config.ts';
 import { checkDataDirPermissions, DATABASE_FILE } from '../src/dataDir.ts';
 import { GatewayError } from '../src/errors.ts';
 import { CredentialStore } from '../src/hosts/credentials.ts';
-import { compareContracts, type Contract } from './lib/t3-contract.ts';
+import { compareContracts, REQUIRED_TOOLS, type Contract } from './lib/t3-contract.ts';
 import { probeHost, ProbeError, type ProbeCheck } from './lib/t3-probe.ts';
 
 const HELP = `Usage: node scripts/check-t3-compatibility.ts [options]
@@ -113,7 +113,7 @@ function summary(report: CompatibilityReport): string {
       `${host.changedSinceLastCheck ? 'new observation' : 'unchanged'}${host.versionChanged ? ' (version changed)' : ''}`);
     for (const change of host.changes) lines.push(`  ${change.kind} ${change.tool}: ${change.paths.join(', ')}`);
     for (const check of host.checks) lines.push(`  ${check.status.toUpperCase()} ${check.tool}: ${check.code}`);
-    lines.push(`  Output schemas advertised for ${host.outputSchemas}/11 consumed tools; unadvertised schemas remain unverified.`);
+    lines.push(`  Output schemas advertised for ${host.outputSchemas}/${REQUIRED_TOOLS.length} consumed tools; unadvertised schemas remain unverified.`);
   }
   lines.push('Read coverage is sampled. Launch/send/respond/interrupt inputs are checked locally; their behavior is not exercised.');
   if (report.hosts.some((host) => host.baseline === 'missing' || host.changes.length > 0 && host.baseline !== 'accepted')) {

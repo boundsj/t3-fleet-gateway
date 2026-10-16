@@ -1,5 +1,6 @@
 import { configuredModel, type GatewayConfig, type HostConfig, type ProjectConfig, type RuntimeMode } from '../config.ts';
 import { describeError, GatewayError } from '../errors.ts';
+import type { CatalogService } from '../hosts/catalog.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import { resolveProjectId } from '../hosts/projects.ts';
 import type { Logger } from '../log.ts';
@@ -10,6 +11,7 @@ import { MINUTE, SECOND, type Clock } from '../time.ts';
 import { readActivity, refreshDelegated, scanActivity } from './activity.ts';
 import { EXCERPT_CHARS, isActiveStatus, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { deliverInterrupt } from './interrupt.ts';
+import { validateSelection, type LaunchSpec, type ModelSelection } from './launchSpec.ts';
 import { jobMarker } from './service.ts';
 import type { Job, JobChanges, JobStore } from './store.ts';
 
@@ -57,6 +59,42 @@ export function launchMessage(job: Job): string {
   return `${job.task}\n\n---\nStarted through t3-fleet-gateway as job ${job.id}, in a fresh worktree on branch ${job.branch}.`;
 }
 
+/** What one launch sends: from the project config (alias-only jobs) or from the job's recorded launch spec. */
+interface LaunchPlan {
+  projectId: string;
+  baseRef: string;
+  modelSelection: Record<string, unknown> | undefined;
+  /** The configured alias whose cached project id a project error should drop, if any. */
+  alias: string | null;
+  /** Added to T3's refusal when it asks for a model this launch did not send. */
+  missingModelHint: string;
+}
+
+function planFromConfig(config: GatewayConfig, project: ProjectConfig, projectId: string): LaunchPlan {
+  const model = configuredModel(config, project);
+  return {
+    projectId,
+    baseRef: project.baseRef,
+    modelSelection: model?.selection,
+    alias: project.alias,
+    missingModelHint: model
+      ? ''
+      : ` If T3 asks for a model: the operator sets modelSelection for project "${project.alias}" or defaultModelSelection for host "${project.host}" in the gateway config.`,
+  };
+}
+
+function planFromSpec(spec: LaunchSpec, hostId: string): LaunchPlan {
+  return {
+    projectId: spec.projectId,
+    baseRef: spec.baseRef,
+    modelSelection: spec.model.selection ?? undefined,
+    alias: spec.alias,
+    missingModelHint: spec.model.selection
+      ? ''
+      : ` If T3 asks for a model: pass modelSelection to work_start (fleet_models lists the choices), or the operator sets defaultModelSelection for host "${hostId}".`,
+  };
+}
+
 interface HostState {
   unreachableSince: number | null;
   failures: number;
@@ -67,6 +105,7 @@ export interface JobEngineOptions {
   config: GatewayConfig;
   store: JobStore;
   registry: HostRegistry;
+  catalog: CatalogService;
   clock: Clock;
   logger: Logger;
   /** Time between ticks. Defaults to `watcher.pollSeconds`. */
@@ -198,60 +237,88 @@ export class JobEngine {
     // retry is safe, instead of making the launch itself ambiguous.
     await this.#options.registry.client(host.id).environmentRead();
     for (const job of queued) {
-      const project = this.#options.config.projects.find((candidate) => candidate.alias === job.projectAlias);
-      if (!project) {
-        store.transition(job.id, {
-          from: ['queued'],
-          to: 'failed',
-          changes: { lastErrorCode: 'project_not_configured', lastErrorMessage: `Project "${job.projectAlias}" is no longer configured.` },
-          detail: { reason: 'project_not_configured', code: 'project_not_configured' },
-        });
-        continue;
-      }
-      let projectId: string;
-      try {
-        projectId = await this.#projectId(project);
-      } catch (error) {
-        if (isHostFailure(error)) throw error;
-        const described = describeError(error);
-        store.transition(job.id, {
-          from: ['queued'],
-          to: 'failed',
-          changes: { lastErrorCode: 'project_not_found', lastErrorMessage: described.message },
-          detail: { reason: 'project_not_found', code: 'project_not_found' },
-        });
-        continue;
-      }
+      const plan = job.launchSpec ? await this.#planFromSpec(job, job.launchSpec) : await this.#planFromConfig(job);
+      if (!plan) continue;
       const dispatching = store.transition(job.id, {
         from: ['queued'],
         to: 'dispatching',
-        changes: { t3ProjectId: projectId, dispatchStartedAt: clock() },
+        changes: { t3ProjectId: plan.projectId, dispatchStartedAt: clock() },
       });
-      if (dispatching && !(await this.#launch(dispatching, project, projectId))) return;
+      if (dispatching && !(await this.#launch(dispatching, plan))) return;
     }
   }
 
+  /** The launch of an alias-only job: its project resolved on the host now. Undefined when the job failed instead. */
+  async #planFromConfig(job: Job): Promise<LaunchPlan | undefined> {
+    const { store, config } = this.#options;
+    const project = config.projects.find((candidate) => candidate.alias === job.projectAlias);
+    if (!project) {
+      this.#failQueued(job, 'project_not_configured', `Project "${job.projectAlias}" is no longer configured.`);
+      return undefined;
+    }
+    try {
+      return planFromConfig(config, project, await this.#projectId(project));
+    } catch (error) {
+      if (isHostFailure(error)) throw error;
+      this.#failQueued(job, 'project_not_found', describeError(error).message);
+      return undefined;
+    }
+  }
+
+  /**
+   * The launch of a job with a recorded spec. An explicit model selection is checked again against the
+   * host's capabilities read now: a host that cannot answer leaves the job queued (the host failure
+   * propagates), a selection the host no longer advertises fails the job before anything is launched.
+   */
+  async #planFromSpec(job: Job, spec: LaunchSpec): Promise<LaunchPlan | undefined> {
+    const { config, catalog } = this.#options;
+    if (spec.alias !== null && !config.projects.some((candidate) => candidate.alias === spec.alias)) {
+      this.#failQueued(job, 'project_not_configured', `Project "${spec.alias}" is no longer configured.`);
+      return undefined;
+    }
+    if (spec.model.source === 'explicit' && spec.model.selection) {
+      try {
+        const providers = (await catalog.models(job.hostId, { refresh: true })).value;
+        validateSelection(job.hostId, providers, spec.model.selection as unknown as ModelSelection);
+      } catch (error) {
+        if (isHostFailure(error)) throw error;
+        const described = describeError(error);
+        this.#failQueued(job, 'model_selection_invalid', `The job's model selection is no longer available on host ${job.hostId}: ${described.message}`);
+        return undefined;
+      }
+    }
+    return planFromSpec(spec, job.hostId);
+  }
+
+  #failQueued(job: Job, code: string, message: string): void {
+    this.#options.store.transition(job.id, {
+      from: ['queued'],
+      to: 'failed',
+      changes: { lastErrorCode: code, lastErrorMessage: message },
+      detail: { reason: code, code },
+    });
+  }
+
   /** Launch one job's thread. Returns false when no further job should be launched this tick. */
-  async #launch(job: Job, project: ProjectConfig, projectId: string): Promise<boolean> {
-    const { store, registry, config } = this.#options;
-    const model = configuredModel(config, project);
+  async #launch(job: Job, plan: LaunchPlan): Promise<boolean> {
+    const { store, registry } = this.#options;
     this.#inFlight.add(job.id);
     try {
       let launched: LaunchResult;
       try {
         launched = await registry.client(job.hostId).launchThread(
           {
-            projectId,
+            projectId: plan.projectId,
             title: job.title,
-            workspaceStrategy: { type: 'worktree', baseRef: project.baseRef, branch: job.branch, startFromOrigin: false },
+            workspaceStrategy: { type: 'worktree', baseRef: plan.baseRef, branch: job.branch, startFromOrigin: false },
             runtimeMode: job.runtimeMode as RuntimeMode,
-            ...(model ? { modelSelection: model.selection } : {}),
+            ...(plan.modelSelection ? { modelSelection: plan.modelSelection } : {}),
             message: launchMessage(job),
           },
           { timeoutMs: this.#launchTimeoutMs },
         );
       } catch (error) {
-        if (error instanceof T3ToolError) return await this.#launchRefused(job, project, projectId, error);
+        if (error instanceof T3ToolError) return await this.#launchRefused(job, plan, error);
         if (error instanceof T3TransportError && error.delivery === 'not_delivered') {
           store.transition(job.id, { from: ['dispatching'], to: 'queued', changes: { dispatchStartedAt: null }, detail: { reason: 'host_unreachable', code: error.code } });
           store.transition(job.id, { from: ['cancel_requested'], to: 'cancelled', detail: { reason: 'cancelled_before_launch' } });
@@ -285,19 +352,16 @@ export class JobEngine {
    * T3's code. If the lookup fails in any way, the job is unknown and reconciliation takes over:
    * failing it would free the slot while a thread may exist.
    */
-  async #launchRefused(job: Job, project: ProjectConfig, projectId: string, error: T3ToolError): Promise<boolean> {
-    const { store, config } = this.#options;
-    if (/project/.test(error.t3Code)) this.#projectIds.delete(project.alias);
+  async #launchRefused(job: Job, plan: LaunchPlan, error: T3ToolError): Promise<boolean> {
+    const { store } = this.#options;
+    if (plan.alias !== null && /project/.test(error.t3Code)) this.#projectIds.delete(plan.alias);
     // T3 refuses a launch without a model when the project has no default (T3's message says so).
-    const hint =
-      error.t3Code === 'invalid_request' && !configuredModel(config, project)
-        ? ` If T3 asks for a model: the operator sets modelSelection for project "${project.alias}" or defaultModelSelection for host "${project.host}" in the gateway config.`
-        : '';
+    const hint = error.t3Code === 'invalid_request' ? plan.missingModelHint : '';
     const failure = { lastErrorCode: error.t3Code, lastErrorMessage: `${error.message}${hint}` };
     if (!REFUSED_BEFORE_CREATION.has(error.t3Code)) {
       let found: FoundThread | undefined;
       try {
-        found = await this.#findThread(job.hostId, projectId, job.id);
+        found = await this.#findThread(job.hostId, plan.projectId, job.id);
       } catch (lookupError) {
         store.transition(job.id, { from: ['dispatching'], to: 'unknown', changes: failure, detail: { reason: 'launch_outcome_unknown', code: error.t3Code } });
         if (isHostFailure(lookupError)) throw lookupError;

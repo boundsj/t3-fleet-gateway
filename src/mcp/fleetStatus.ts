@@ -30,6 +30,12 @@ const hostSchema = z.object({
   maxConcurrentJobs: z.number().int(),
   runningJobs: z.number().int(),
   queuedJobs: z.number().int(),
+  discovery: z
+    .object({
+      enabled: z.boolean().describe('true: fleet_projects and fleet_models list this host\'s T3 projects, models and options'),
+      allowWorkStart: z.boolean().describe('true: work_start may target a discovered T3 project here by id; false: only configured aliases accept work'),
+    })
+    .describe('Opt-in discovery of T3 projects and model capabilities on this host'),
 });
 
 const outputSchema = z.object({
@@ -86,7 +92,10 @@ function describeHost(host: HostStatus): string {
           ? `credential rejected by T3 (the operator must run: t3-fleet-gateway hosts enroll ${host.id})`
           : `credential expires in ${host.credential.daysLeft} ${host.credential.daysLeft === 1 ? 'day' : 'days'}`;
   const renewal = host.credential.renewalError ? `, last renewal failed (${host.credential.renewalError.code})` : '';
-  return `${host.id}: ${reach}; ${credential}${renewal}; ${host.runningJobs} running, ${host.queuedJobs} queued (max ${host.maxConcurrentJobs})`;
+  const discovery = host.discovery.enabled
+    ? `; discovery on (fleet_projects, fleet_models${host.discovery.allowWorkStart ? '; work_start accepts target' : '; launches need a configured alias'})`
+    : '';
+  return `${host.id}: ${reach}; ${credential}${renewal}; ${host.runningJobs} running, ${host.queuedJobs} queued (max ${host.maxConcurrentJobs})${discovery}`;
 }
 
 export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostRegistry; db: Database; jobs: JobService }) {
@@ -104,9 +113,9 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
       'the work itself. For such a project, talk to the coordinator: send it instructions with work_continue on its jobId and ' +
       'follow its replies with work_feed and work_status, rather than starting jobs. When allowWorkStart is false, work_start ' +
       'is refused there and the standing jobs are the way in. If the operator approved you for selected machines only, you ' +
-      'see just those hosts and their projects, and every work tool works only with jobs on them. Use this first to learn the ' +
-      'project aliases and where to send ' +
-      'work, or to check why work is not progressing. Read-only; safe to call any time.',
+      'see just those hosts and their projects, and every work tool works only with jobs on them. A host with discovery.enabled ' +
+      'true also has T3 projects beyond these aliases and a model catalog: fleet_projects and fleet_models list them. Use this first ' +
+      'to learn the project aliases and where to send work, or to check why work is not progressing. Read-only; safe to call any time.',
     scope: READ_SCOPE,
     readOnly: true,
     inputSchema: z.object({}),
@@ -135,6 +144,7 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
             maxConcurrentJobs: host.maxConcurrentJobs,
             runningJobs: jobs.running,
             queuedJobs: jobs.queued,
+            discovery: { enabled: host.discovery.enabled, allowWorkStart: host.discovery.allowWorkStart },
           };
         }),
       );

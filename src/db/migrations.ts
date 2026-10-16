@@ -237,6 +237,15 @@ ALTER TABLE jobs ADD COLUMN delegated_ended_at INTEGER;
     sql: `ALTER TABLE oauth_clients ADD COLUMN last_mcp_success_at INTEGER;
           ALTER TABLE oauth_clients ADD COLUMN last_refresh_success_at INTEGER;`,
   },
+  {
+    version: 8,
+    name: 'launch spec',
+    // launch_spec: JSON (src/jobs/launchSpec.ts) recording what a job started through a direct target
+    // or with an explicit model selection resolved to: T3 project id and name, configured or discovered
+    // policy origin, alias, baseRef, runtimeMode, and the exact model selection with its source. NULL
+    // for jobs from before this migration and for ordinary alias-only jobs, which dispatch as before.
+    sql: `ALTER TABLE jobs ADD COLUMN launch_spec TEXT;`,
+  },
 ];
 
 /**

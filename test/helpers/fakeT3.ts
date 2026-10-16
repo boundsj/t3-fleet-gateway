@@ -51,6 +51,64 @@ export interface FakeItem {
   title?: string | null;
 }
 
+/** A model option as T3 advertises it in orchestrator_capabilities (a `select` with choices, or a `boolean`). */
+export interface FakeOption {
+  id: string;
+  label: string;
+  description?: string;
+  type: 'select' | 'boolean' | string;
+  options?: { id: string; label: string; description?: string; isDefault?: boolean }[];
+  currentValue?: string | boolean;
+}
+
+export interface FakeProvider {
+  providerInstanceId: string;
+  driverKind: string;
+  displayName: string | null;
+  models: { id: string; label: string | null; options?: FakeOption[] }[];
+  runtimeModes?: string[];
+  canRunChildTask: boolean;
+  canRunCrossProviderChildTask: boolean;
+  constraints: string[];
+}
+
+/** The synthetic catalog a fake host advertises by default: one provider, two models, a select and a boolean option. */
+export function syntheticProviders(): FakeProvider[] {
+  return [
+    {
+      providerInstanceId: 'synthetic-provider',
+      driverKind: 'synthetic',
+      displayName: 'Synthetic Provider',
+      models: [
+        {
+          id: 'synthetic-model',
+          label: 'Synthetic model',
+          options: [
+            {
+              id: 'synthetic-effort',
+              label: 'Synthetic effort',
+              description: 'How hard the synthetic model thinks',
+              type: 'select',
+              options: [
+                { id: 'low', label: 'Low' },
+                { id: 'medium', label: 'Medium', isDefault: true },
+                { id: 'high', label: 'High', description: 'Slow and thorough' },
+              ],
+              currentValue: 'medium',
+            },
+            { id: 'synthetic-fast', label: 'Synthetic fast mode', type: 'boolean', currentValue: false },
+          ],
+        },
+        { id: 'synthetic-large', label: null },
+      ],
+      runtimeModes: ['approval-required', 'auto-accept-edits', 'auto', 'full-access'],
+      canRunChildTask: true,
+      canRunCrossProviderChildTask: false,
+      constraints: [],
+    },
+  ];
+}
+
 export interface FakeThread {
   threadId: string;
   projectId: string;
@@ -132,6 +190,9 @@ const interruptInput = z.strictObject({
   clientRequestId: nullable(z.string()),
 });
 const pendingListInput = z.strictObject({ threadId: nullable(z.string()) });
+const projectListInput = z.strictObject({ cursor: nullable(z.int().min(0)), limit: nullable(z.int().min(1).max(100)) });
+/** orchestrator_capabilities takes no arguments. */
+const capabilitiesInput = z.strictObject({});
 const pendingReadInput = z.strictObject({ threadId: nullable(z.string()), requestId: z.string() });
 const pendingRespondInput = z.strictObject({ threadId: nullable(z.string()), requestId: z.string(), answers: z.record(z.string(), z.unknown()) });
 
@@ -158,6 +219,10 @@ export class FakeT3 {
   readonly serverVersion: string;
   tokenLifetimeSeconds: number;
   readonly projects: { id: string; title: string; deletedAt: string | null; defaultModelSelection: Record<string, unknown> | null }[];
+  /** The providers, models and options this host advertises in orchestrator_capabilities; tests change it between calls. */
+  providers: FakeProvider[] = syntheticProviders();
+  /** When set, t3_project_list answers every page with this same nextCursor (a catalog that never converges). */
+  projectListStuckCursor: number | null = null;
   /** Tool name to a T3 failure returned instead of a result. */
   readonly failures = new Map<string, { code: string; message: string }>();
   /** Tool name to a T3 failure returned after the call has taken effect (for example a launch that created the thread). */
@@ -595,17 +660,31 @@ export class FakeT3 {
         preferences: { backgroundActivity: { profile: 'balanced' } },
       })),
     );
-    server.registerTool(
-      't3_project_list',
-      { inputSchema: z.object({ cursor: z.number().int().nullable().optional(), limit: z.number().int().nullable().optional() }).loose() },
-      ({ cursor, limit }) =>
-        run('t3_project_list', () => {
-          const start = cursor ?? 0;
-          const size = limit ?? 50;
-          const page = this.projects.slice(start, start + size);
-          return { projects: page, nextCursor: start + size < this.projects.length ? start + size : null };
-        }),
-    );
+    tool('t3_project_list', projectListInput, ({ cursor, limit }) => {
+      const start = cursor ?? 0;
+      const size = limit ?? 50;
+      const page = this.projects.slice(start, start + size);
+      if (this.projectListStuckCursor !== null) return { projects: page, nextCursor: this.projectListStuckCursor };
+      return { projects: page, nextCursor: start + size < this.projects.length ? start + size : null };
+    });
+    tool('orchestrator_capabilities', capabilitiesInput, () => ({
+      parentThreadId: null,
+      inheritedProviderInstanceId: null,
+      inheritedModel: null,
+      runtimeMode: 'full-access',
+      interactionMode: 'default',
+      providers: this.providers,
+      features: {
+        appOwnedSubagents: true,
+        asyncPolling: true,
+        cancellation: true,
+        batchThreadCreation: true,
+        threadManagement: true,
+        incrementalThreadRead: true,
+        scheduledTasks: true,
+        maxBatchThreads: 10,
+      },
+    }));
     tool('t3_thread_launch', launchInput, (input) => this.#launch(input));
     tool('t3_thread_read', readInput, (input) => {
       this.reads.push(input);

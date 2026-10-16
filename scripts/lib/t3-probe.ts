@@ -107,6 +107,7 @@ export async function probeHost(options: {
     const projects = await step('t3_project_list', 'projects_read', () => smoke.callTool(
       't3_project_list', { limit: 5 }, projectListSchema, { readOnly: true },
     ));
+    await step('orchestrator_capabilities', 'capabilities_read', () => smoke.readCapabilities());
     let threadId: string | undefined;
     const candidates = projects?.projects.filter((project) => !project.deletedAt).slice(0, 3) ?? [];
     for (const project of candidates) {

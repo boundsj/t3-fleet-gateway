@@ -119,3 +119,47 @@ test('mint and probe stdout, stderr and argv never enter logs, returned diagnost
   const returned = JSON.stringify(checks) + JSON.stringify(gw.services.registry.credentialStatus('main'));
   for (const secret of secrets) assert.equal(returned.includes(secret), false);
 });
+
+test('no T3 project name, model, option or constraint from discovery ever appears in the logs or events', async (t) => {
+  const fake = await startFakeT3();
+  t.after(() => fake.close());
+  const { gw, agent, tick } = await startJobHarness(t, { fake, host: { discovery: { enabled: true, allowWorkStart: true, runtimeMode: 'auto' } } });
+  const content = {
+    project: 'Synthetic-project-name-4e1a',
+    model: 'synthetic-model-9c2b',
+    optionId: 'synthetic-option-7f3d',
+    choice: 'synthetic-choice-d8e1',
+    constraint: 'Synthetic-constraint-b6a0',
+    task: 'Synthetic-discovered-task-33af',
+  };
+  fake.projects[1]!.title = content.project;
+  fake.providers = [{
+    providerInstanceId: 'synthetic-provider', driverKind: 'synthetic', displayName: 'Synthetic', canRunChildTask: true, canRunCrossProviderChildTask: false,
+    constraints: [content.constraint],
+    models: [{ id: content.model, label: null, options: [{ id: content.optionId, label: 'Synthetic', type: 'select', options: [{ id: content.choice, label: 'Synthetic' }] }] }],
+  }];
+  await agent.call('fleet_projects', { refresh: true });
+  await agent.call('fleet_models', { refresh: true });
+  const { job } = await agent.call<{ job: { jobId: string } }>('work_start', {
+    target: { host: 'main', projectId: 'project-2' }, task: content.task, requestId: 'disc-1',
+    modelSelection: { instanceId: 'synthetic-provider', model: content.model, options: { [content.optionId]: content.choice } },
+  });
+  await agent.callError('work_start', {
+    target: { host: 'main', projectId: 'project-2' }, task: content.task, requestId: 'disc-2',
+    modelSelection: { instanceId: 'synthetic-provider', model: content.model, options: { [content.optionId]: 'Synthetic-wrong-value-1c9e' } },
+  });
+  await tick();
+  fake.providers[0]!.models[0]!.options![0]!.options = [];
+  const second = await agent.call<{ job: { jobId: string } }>('work_start', {
+    target: { host: 'main', projectId: 'project-2' }, task: content.task, requestId: 'disc-3',
+    modelSelection: { instanceId: 'synthetic-provider', model: content.model },
+  });
+  gw.services.jobs.store.update(second.job.jobId, {});
+  await tick();
+  await agent.call('work_status', { jobId: job.jobId });
+  await agent.call('work_feed', {});
+  assert.ok(gw.logs.some((line) => line.includes('"event":"job.created"')));
+  assertNotLogged(gw, [...Object.values(content), 'Synthetic-wrong-value']);
+  const events = JSON.stringify(gw.services.db.prepare('SELECT * FROM job_events').all());
+  for (const value of [...Object.values(content), 'Synthetic-wrong-value-1c9e']) assert.equal(events.includes(value), false, 'content leaked into events');
+});

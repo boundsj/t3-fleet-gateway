@@ -47,6 +47,33 @@ const originUrl = (what: string) =>
 /** A T3 `modelSelection` object, passed through as T3 expects it, for example `{ instanceId, model }`. */
 const modelSelectionSchema = z.looseObject({ model: z.unknown() });
 
+/**
+ * Opt-in discovery of a host's T3 projects and model capabilities (fleet_projects, fleet_models), and
+ * the policy for launching into a T3 project that has no configured alias. Off by default: with
+ * `enabled` false the host's catalogs are never read for agents, `work_start` accepts only configured
+ * aliases there, and no per-job model selection. `allowWorkStart` separately permits launches into
+ * unconfigured projects; `runtimeMode`, `baseRef` and `branchPrefix` are the policy for those launches.
+ */
+const discoverySchema = z.strictObject({
+  enabled: z.boolean().default(false),
+  allowWorkStart: z.boolean().default(false),
+  runtimeMode: z.enum(RUNTIME_MODES).default('approval-required'),
+  baseRef: z.string().min(1).max(200).default('main'),
+  branchPrefix: z
+    .string()
+    .max(64)
+    .regex(/^[A-Za-z0-9._/-]*$/, 'use letters, digits, dots, underscores, hyphens and slashes')
+    .default('fleet/'),
+});
+
+export const DEFAULT_DISCOVERY: z.output<typeof discoverySchema> = {
+  enabled: false,
+  allowWorkStart: false,
+  runtimeMode: 'approval-required',
+  baseRef: 'main',
+  branchPrefix: 'fleet/',
+};
+
 const hostSchema = z.strictObject({
   id: slug(32),
   label: z.string().min(1).max(80).optional(),
@@ -57,6 +84,7 @@ const hostSchema = z.strictObject({
   access: z.enum(T3_ACCESS_LEVELS).default('auto'),
   maxConcurrentJobs: z.int().min(1).max(32).default(2),
   defaultModelSelection: modelSelectionSchema.nullable().default(null),
+  discovery: discoverySchema.default(DEFAULT_DISCOVERY),
 });
 
 const projectSchema = z
@@ -120,6 +148,21 @@ const configSchema = z
     config.hosts.forEach((host, index) => {
       if (hostIds.has(host.id)) ctx.addIssue({ code: 'custom', path: ['hosts', index, 'id'], message: `duplicate host id "${host.id}"` });
       hostIds.add(host.id);
+      if (host.discovery.allowWorkStart && !host.discovery.enabled) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['hosts', index, 'discovery', 'allowWorkStart'],
+          message: 'discovery.allowWorkStart needs discovery.enabled true',
+        });
+      }
+      // Browsing a read-only host is fine; only launches need a runtime mode the host allows.
+      if (host.discovery.allowWorkStart && !runtimeModeAllowed(host.discovery.runtimeMode, host.access)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['hosts', index, 'discovery', 'runtimeMode'],
+          message: `discovery.runtimeMode "${host.discovery.runtimeMode}" exceeds host "${host.id}" access "${host.access}"`,
+        });
+      }
     });
     const aliases = new Set<string>();
     config.projects.forEach((project, index) => {
@@ -145,6 +188,7 @@ const configSchema = z
 export type GatewayConfig = z.infer<typeof configSchema>;
 export type HostConfig = GatewayConfig['hosts'][number];
 export type ProjectConfig = GatewayConfig['projects'][number];
+export type DiscoveryConfig = HostConfig['discovery'];
 
 /** Where a project's launches get their model in the gateway config, or null to leave it to the T3 project's default. */
 export function configuredModel(config: GatewayConfig, project: ProjectConfig): { source: 'project' | 'host'; selection: Record<string, unknown> } | null {

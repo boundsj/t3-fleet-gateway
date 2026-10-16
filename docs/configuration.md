@@ -49,9 +49,32 @@ Each entry is a machine running a T3 Code server.
 | `mintPairingCodeProbe` | none | Optional exact argv for a non-mutating check you have verified is safe to run at `doctor` and startup. No shell; 1–32 arguments, at most 4,096 characters each. Never set this to the pairing/mint command. See "Renewal command preflight" below. |
 | `access` | `"auto"` | The T3 approval level the gateway requests when it enrolls: `read-only`, `approval-required`, `auto-accept-edits`, `auto` or `full-access`. T3 treats it as the ceiling for the runtime mode of threads the gateway starts, so a project's `runtimeMode` may not exceed it. Changing it takes a new `hosts enroll`. |
 | `maxConcurrentJobs` | `2` (1 to 32) | Jobs holding a slot at once on this host: `dispatching`, `running`, `needs_input`, `cancel_requested` and `unknown` count; `idle` does not. Further jobs wait as `queued`, first in, first out. |
-| `defaultModelSelection` | `null` | T3 `modelSelection` object (must contain `model`) for launches in projects on this host that set no `modelSelection` of their own, for example `{ "instanceId": "codex", "model": "<model id>" }`. T3's `orchestrator_capabilities` tool lists the provider instances and models. |
+| `defaultModelSelection` | `null` | T3 `modelSelection` object (must contain `model`) for launches in projects on this host that set no `modelSelection` of their own, for example `{ "instanceId": "codex", "model": "<model id>" }`. T3's `orchestrator_capabilities` tool lists the provider instances and models, and so does `fleet_models` once discovery is enabled. |
+| `discovery` | all off | Opt-in discovery of this host's T3 projects and model catalog for agents, and the policy for launching into T3 projects that have no `projects[]` entry. See "Discovery" below. |
 
 Which `access` to choose: the host's `access` is only a ceiling. What a job may do without asking is decided per project by `runtimeMode`, which defaults to `approval-required`. [`config.example.json`](../config.example.json) therefore enrolls the host with `full-access`, so any project on it can be given a looser mode later without re-enrolling, and keeps its project at `approval-required`. Use a lower `access` if you want the host itself to rule out looser modes.
+
+#### Discovery
+
+Off by default. With `discovery` left out, nothing changes: agents see only the configured aliases, `work_start` takes only aliases, and the gateway never reads a host's project list or model catalog for an agent.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Let agents list this host's T3 projects (`fleet_projects`: ids, names and how to start work in each) and its provider instances, models and model options (`fleet_models`), read live from T3 and kept for 30 seconds. Also required for `work_start` to accept a `target` or a `modelSelection` on this host. A `read-only` host can enable this for browsing. |
+| `allowWorkStart` | `false` | Let `work_start` launch into a T3 project of this host that has no configured alias, by `target: { host, projectId }`. Needs `enabled`. Projects that do have an alias are always governed by that alias (below). |
+| `runtimeMode` | `"approval-required"` | T3 runtime mode for launches into unconfigured projects. When `allowWorkStart` is true it must not exceed the host's `access`. |
+| `baseRef` | `"main"` | Branch or ref such launches start their worktree from. |
+| `branchPrefix` | `"fleet/"` | Branch prefix for such launches: `<branchPrefix><jobId>`. |
+
+Discovery and launching are separate gates, and the per-agent grants still apply: an agent sees a host's catalogs only if it may read that host, and starts work there only with Operate on it. A host with `enabled: true` and `allowWorkStart: false` lets agents browse and choose a model for the configured aliases, but every launch still goes through an alias.
+
+How a launch into a discovered project is governed:
+
+- **A project exactly one alias maps to** (by `t3ProjectId`, or by a `t3ProjectTitle` only that project has) is launched as that alias, with every setting of the alias: `allowWorkStart` (so `false` still refuses with `start_disabled` and names the standing jobs), `runtimeMode`, `baseRef`, `branchPrefix` and the model defaults. Targeting by id never gets around a configured project. The job shows the alias as its project.
+- **A project several aliases map to**, or one an alias's title mapping matches ambiguously, cannot be targeted by id: the agent must pass the alias it means.
+- **A project no alias maps to** follows this host's discovery policy, and needs `allowWorkStart`. Its model is the host's `defaultModelSelection`, else the T3 project's own default model, else the agent must pass `modelSelection`; a launch with no model anywhere is refused before a job exists. The job's project is shown as the internal ref `@<host>/<projectId>`.
+
+An agent's `modelSelection` (`{ instanceId, model, options? }`) is checked against the host's freshly read catalog when the job is created and again right before it is launched: provider instance and model must be advertised, every option id must be one the model advertises, a `select` option takes one of its choice ids and a `boolean` option a boolean. Anything else is refused and nothing is substituted or launched; a selection that disappears from the catalog while the job is queued fails the job with `model_selection_invalid` before any launch. Omitting it keeps the configured whole-object default (project, then host, then the T3 project default), with no merging across levels. What such a job resolved to is recorded with the job (`launch_spec`), so a later config or catalog change does not move it.
 
 #### Renewal command preflight
 

@@ -16,7 +16,8 @@ import {
   type JobService,
 } from '../jobs/service.ts';
 import { JOB_STATES, STATE_MEANINGS } from '../jobs/states.ts';
-import type { Job, JobEvent } from '../jobs/store.ts';
+import { MAX_SELECTION_CHARS, MAX_SELECTION_ID_CHARS, MAX_SELECTION_OPTIONS } from '../jobs/launchSpec.ts';
+import type { FeedEvent, Job, JobEvent } from '../jobs/store.ts';
 import { OPERATE_SCOPE, READ_SCOPE } from '../oauth/scopes.ts';
 import { HOUR, isoTime } from '../time.ts';
 import { defineTool, type GatewayTool, type ToolContext } from './tools.ts';
@@ -44,11 +45,45 @@ const jobIdInput = z
   .regex(/^[0-9a-z]{6,32}$/, 'a job id as returned by work_start')
   .describe('The jobId returned by work_start, or listed by work_list or (for standing jobs) fleet_status');
 
+const targetInput = z.object({
+  host: z.string().min(1).max(32).describe('Host id'),
+  projectId: z.string().min(1).max(200).describe('T3 project id from fleet_projects'),
+});
+
+const modelSelectionInput = z
+  .object({
+    instanceId: z.string().trim().min(1).max(MAX_SELECTION_ID_CHARS).describe('providerInstanceId from fleet_models'),
+    model: z.string().trim().min(1).max(MAX_SELECTION_ID_CHARS).describe('modelId from fleet_models'),
+    options: z
+      .record(z.string().min(1).max(MAX_SELECTION_ID_CHARS), z.union([z.string().min(1).max(2000), z.boolean()]))
+      .optional()
+      .describe('Option id to value: a choices[].id for a select option (a reasoning effort, say), true or false for a boolean option'),
+  })
+  .refine((selection) => Object.keys(selection.options ?? {}).length <= MAX_SELECTION_OPTIONS && JSON.stringify(selection).length <= MAX_SELECTION_CHARS, {
+    message: `at most ${MAX_SELECTION_OPTIONS} options and ${MAX_SELECTION_CHARS} characters`,
+  });
+
+const modelSourceSchema = z.enum(['explicit', 'project', 'host', 't3_default']);
+
 const jobSchema = z.object({
   jobId: z.string(),
   state: z.enum(JOB_STATES),
-  project: z.string(),
+  project: z
+    .string()
+    .describe('The configured project alias, or for a job targeted by T3 project id without one, the internal ref @<host>/<projectId>'),
   host: z.string(),
+  projectId: z.string().nullable().describe('The T3 project id: known from the start for targeted jobs, from dispatch for alias jobs'),
+  projectName: z.string().nullable().describe('The T3 project title, recorded for jobs started with a target or a modelSelection'),
+  source: z
+    .enum(['alias', 'discovered'])
+    .describe("alias: launched with a configured project's settings; discovered: into a T3 project no alias names, with the host's discovery policy"),
+  model: z
+    .object({
+      source: modelSourceSchema.describe('explicit: your modelSelection; project or host: the gateway config; t3_default: the T3 project default'),
+      selection: z.record(z.string(), z.unknown()).nullable().describe('The exact modelSelection sent to T3; null when T3 chose'),
+    })
+    .nullable()
+    .describe('Recorded for jobs started with a target or a modelSelection; null for alias-only jobs, whose model comes from the config at dispatch'),
   title: z
     .string()
     .describe("The T3 thread title; a launched job's ends with the marker [job:<jobId>], a standing job's is the title the operator gave it"),
@@ -174,11 +209,16 @@ export type JobView = z.infer<typeof jobSchema>;
 export type JobDetailView = z.infer<typeof jobDetailSchema>;
 
 export function jobView(job: Job, context: ToolContext): JobView {
+  const spec = job.launchSpec;
   return {
     jobId: job.id,
     state: job.state,
     project: job.projectAlias,
     host: job.hostId,
+    projectId: job.t3ProjectId,
+    projectName: spec?.projectName ?? null,
+    source: spec?.source ?? 'alias',
+    model: spec ? { source: spec.model.source, selection: spec.model.selection } : null,
     title: job.title,
     branch: job.branch,
     standing: job.standing,
@@ -223,21 +263,29 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'when its host has a free slot. Follow it with work_feed (recommended: poll with the last cursor) or work_status. ' +
       'Idempotent: always pass a unique requestId per new piece of work; retrying with the same requestId and the same input ' +
       'returns the same job (created=false) instead of starting another, and reusing a requestId with different input is ' +
-      'rejected. Request ids are scoped to this tool: one you also use with work_continue does not collide. Write the task as a complete instruction for a coding agent that cannot ask you anything mid-way except ' +
-      'through questions you answer with work_respond. Use fleet_status to learn the project aliases. If fleet_status lists ' +
+      'rejected (a changed target, model or options counts as different input). Request ids are scoped to this tool: one you also use with work_continue does not collide. Write the task as a complete instruction for a coding agent that cannot ask you anything mid-way except ' +
+      'through questions you answer with work_respond. Name the project in exactly one way: project, an alias from fleet_status ' +
+      '(the usual way), or target { host, projectId } from fleet_projects for a T3 project without an alias, on a host whose ' +
+      'discovery is enabled and whose launch.allowed is true there. A target that a configured alias maps to is launched as that ' +
+      'alias, with all of its settings, so targeting by id never gets around a project\'s rules. Optionally pass modelSelection ' +
+      '{ instanceId, model, options? } built from fleet_models of that host; it must match what the host advertises exactly ' +
+      '(a wrong model, option or value is invalid_argument and nothing is started), and without it the configured defaults apply ' +
+      '(project, then host, then the T3 project default). If fleet_status lists ' +
       'standingJobs for the project (a coordinator thread the operator runs), give the work to that job with work_continue ' +
       'instead of starting a new one; in a project with allowWorkStart false this tool fails with start_disabled and names them.',
     scope: OPERATE_SCOPE,
     readOnly: false,
     inputSchema: z.object({
-      project: z.string().min(1).max(64).describe('Project alias from fleet_status'),
+      project: z.string().min(1).max(64).optional().describe('Project alias from fleet_status (pass this or target)'),
+      target: targetInput.optional().describe('A T3 project by host and id from fleet_projects, when it has no alias (pass this or project)'),
+      modelSelection: modelSelectionInput.optional().describe('Explicit provider instance, model and options from fleet_models; omit for the configured defaults'),
       task: z.string().min(1).max(MAX_TASK_CHARS).describe('What the worker should do, as a complete instruction'),
       requestId: requestIdInput,
       title: z.string().min(1).max(MAX_TITLE_CHARS).optional().describe('Short thread title; defaults to the first line of the task'),
     }),
     outputSchema: z.object({ job: jobSchema, created: z.boolean().describe('false when this requestId was already used: the existing job') }),
     async run(input, context) {
-      const { job, created } = jobs.start(context, input);
+      const { job, created } = await jobs.start(context, input);
       const view = jobView(job, context);
       const prefix = created ? 'Started job' : 'Already started (same requestId):';
       return { structured: { job: view, created }, summary: `${prefix} ${describeJob(view)}. Poll work_feed or work_status for progress.` };
@@ -248,19 +296,21 @@ export function workTools(jobs: JobService): GatewayTool[] {
     name: 'work_list',
     title: 'List jobs',
     description:
-      'List jobs, newest first, optionally filtered by project, by state, or to the jobs you started. Use it to find a jobId ' +
+      'List jobs, newest first, optionally filtered by project alias, by target (host and T3 project id, for projects without an ' +
+      'alias; a queued alias job has no project id yet), by state, or to the jobs you started. Use it to find a jobId ' +
       `or to see what is active. Read-only. States: ${STATE_GUIDE}`,
     scope: READ_SCOPE,
     readOnly: true,
     inputSchema: z.object({
-      project: z.string().min(1).max(64).optional().describe('Only jobs in this project alias'),
+      project: z.string().min(1).max(300).optional().describe('Only jobs in this project alias (or an internal @<host>/<projectId> ref as shown in job views)'),
+      target: targetInput.optional().describe('Only jobs in this T3 project on this host'),
       states: z.array(z.enum(JOB_STATES)).max(JOB_STATES.length).optional().describe('Only jobs in these states'),
       mine: z.boolean().optional().describe('Only jobs started by this agent, plus standing jobs (which every agent drives)'),
       limit: z.int().min(1).max(MAX_LIST_LIMIT).optional().describe(`Default 20, at most ${MAX_LIST_LIMIT}`),
     }),
     outputSchema: z.object({ jobs: z.array(jobSchema) }),
     async run(input, context) {
-      const found = jobs.list({ project: input.project, states: input.states, mine: input.mine, limit: input.limit ?? 20 }, context);
+      const found = jobs.list({ project: input.project, target: input.target, states: input.states, mine: input.mine, limit: input.limit ?? 20 }, context);
       const views = found.map((job) => jobView(job, context));
       const summary = views.length === 0 ? 'No matching jobs.' : views.map(describeJob).join('\n');
       return { structured: { jobs: views }, summary };
@@ -416,14 +466,19 @@ export function workTools(jobs: JobService): GatewayTool[] {
         .describe('Only events and jobs from work this agent started, plus standing jobs (which no agent starts but every agent drives)'),
     }),
     outputSchema: z.object({
-      events: z.array(eventSchema.extend({ project: z.string(), title: z.string() })),
+      events: z.array(eventSchema.extend({
+        project: z.string(),
+        title: z.string(),
+        host: z.string(),
+        projectId: z.string().nullable().describe('The T3 project id, once the job knows it'),
+      })),
       nextCursor: z.string().describe('Pass this as cursor next time'),
       hasMore: z.boolean().describe('More events are waiting: call again with nextCursor'),
       attention: z.array(jobSchema.extend({ why: z.string() })),
     }),
     async run(input, context) {
       const feed = jobs.feed({ cursor: Number(input.cursor ?? 0), limit: input.limit ?? 50, mine: input.mine ?? false }, context);
-      const events = feed.events.map((event) => ({ ...eventView(event), project: event.projectAlias, title: event.title }));
+      const events = feed.events.map((event: FeedEvent) => ({ ...eventView(event), project: event.projectAlias, title: event.title, host: event.hostId, projectId: event.t3ProjectId }));
       const attention = feed.attention.map((job) => ({ ...jobView(job, context), why: attentionReason(job) }));
       const lines = [
         `${events.length} event(s)${feed.hasMore ? ', more waiting' : ''}; nextCursor ${feed.nextCursor}.`,

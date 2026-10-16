@@ -9,7 +9,8 @@
       "mintPairingCode": ["t3", "auth", "pairing", "create", "--ttl", "5m", "--label", "t3-fleet-gateway", "--json"],
       "access": "full-access",
       "maxConcurrentJobs": 2,
-      "defaultModelSelection": { "instanceId": "codex", "model": "example-model-id" }
+      "defaultModelSelection": { "instanceId": "codex", "model": "example-model-id" },
+      "discovery": { "enabled": false, "allowWorkStart": false, "runtimeMode": "approval-required", "baseRef": "main", "branchPrefix": "fleet/" }
     }
   ],
   "projects": [

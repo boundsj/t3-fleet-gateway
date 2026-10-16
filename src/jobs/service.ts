@@ -1,6 +1,7 @@
-import type { GatewayConfig, ProjectConfig } from '../config.ts';
+import { configuredModel, type GatewayConfig, type HostConfig, type ProjectConfig } from '../config.ts';
 import { sha256Hex } from '../crypto.ts';
 import { describeError, GatewayError } from '../errors.ts';
+import type { CatalogProject, CatalogService } from '../hosts/catalog.ts';
 import { resolveProjectId } from '../hosts/projects.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import type { Logger } from '../log.ts';
@@ -12,10 +13,12 @@ import { HOUR, SECOND, type Clock } from '../time.ts';
 import { scanActivity } from './activity.ts';
 import { EXCERPT_CHARS, holdsReadPosition, isActiveStatus, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { newJobId } from './ids.ts';
+import { canonicalSelection, validateSelection, type LaunchSpec, type ModelSelection } from './launchSpec.ts';
 import { readWorkerMessages, type MessagePage, type MessageQuery } from './messages.ts';
 import { cancelRequestId } from './interrupt.ts';
 import { isTerminal, OPEN_STATES, type JobState } from './states.ts';
 import { jobNotFound, type FeedEvent, type Job, type JobEvent, type JobScope, type JobStore } from './store.ts';
+import { launchPolicy, mapProjects, parseProjectRef, projectRef } from './targets.ts';
 
 /** Bounds on agent-supplied text. T3 accepts up to 120,000 characters per message. */
 export const MAX_TASK_CHARS = 20_000;
@@ -46,8 +49,12 @@ export interface Caller {
   scopes: readonly Scope[];
 }
 
+/** Exactly one of `project` (a configured alias) or `target` (a T3 project by id on a host with discovery enabled). */
 export interface StartInput {
-  project: string;
+  project?: string | undefined;
+  target?: { host: string; projectId: string } | undefined;
+  /** An explicit provider, model and options from fleet_models; without it the configured defaults apply. */
+  modelSelection?: ModelSelection | undefined;
   task: string;
   requestId: string;
   title?: string | undefined;
@@ -109,6 +116,7 @@ export interface JobServiceOptions {
   config: GatewayConfig;
   store: JobStore;
   registry: HostRegistry;
+  catalog: CatalogService;
   clock: Clock;
   logger: Logger;
 }
@@ -144,8 +152,27 @@ export function inputHash(tool: string, input: Record<string, unknown>): string 
   return sha256Hex(JSON.stringify([tool, keys.map((key) => [key, input[key] ?? null])]));
 }
 
+/**
+ * The idempotency hash of a work_start request. An alias-only request without a model selection hashes
+ * exactly as before this build, so earlier request ids replay. A request with a target or a selection
+ * hashes its canonical target and selection (option keys sorted), so reordered options match and a
+ * changed target or selection under the same request id conflicts.
+ */
+export function startInputHash(input: StartInput): string {
+  if (input.target === undefined && input.modelSelection === undefined) {
+    return inputHash('work_start', { project: input.project, task: input.task, title: input.title });
+  }
+  return inputHash('work_start', {
+    project: input.project ?? null,
+    target: input.target === undefined ? null : { host: input.target.host, projectId: input.target.projectId },
+    modelSelection: input.modelSelection === undefined ? null : canonicalSelection(input.modelSelection),
+    task: input.task,
+    title: input.title,
+  });
+}
+
 /** Why work_start is refused in a project, and where to send the work instead. */
-function startDisabledMessage(alias: string, standing: Job[]): string {
+export function startDisabledMessage(alias: string, standing: Job[]): string {
   const where =
     standing.length === 0
       ? 'It has no standing job yet; ask the operator to adopt one (t3-fleet-gateway jobs adopt).'
@@ -182,6 +209,7 @@ export class JobService {
   readonly store: JobStore;
   readonly #config: GatewayConfig;
   readonly #registry: HostRegistry;
+  readonly #catalog: CatalogService;
   readonly #clock: Clock;
   readonly #logger: Logger;
   /** Set by the running gateway so new work is dispatched without waiting for the next poll. */
@@ -191,6 +219,7 @@ export class JobService {
     this.store = options.store;
     this.#config = options.config;
     this.#registry = options.registry;
+    this.#catalog = options.catalog;
     this.#clock = options.clock;
     this.#logger = options.logger;
   }
@@ -244,45 +273,214 @@ export class JobService {
     return { ...(mine ? { clientId: caller.clientId } : {}), ...(hosts === 'all' ? {} : { hostIds: hosts }) };
   }
 
-  start(caller: Caller, input: StartInput): { job: Job; created: boolean } {
-    const project = this.#projectFor(caller, input.project, 'operate');
+  /**
+   * A host as an agent may use it: one that is not configured, or that its grant does not let it read,
+   * is unknown; one it may read but not operate is refused with insufficient_scope.
+   */
+  #hostFor(caller: Caller, hostId: string, level: AccessLevel): HostConfig {
+    const host = this.#config.hosts.find((candidate) => candidate.id === hostId);
+    if (host && permits(caller.scopes, level, host.id)) return host;
+    if (host && permits(caller.scopes, 'read', host.id)) {
+      throw new GatewayError('insufficient_scope', `This agent has read access only on host ${host.id}. Ask the operator for Operate access on that host.`);
+    }
+    throw new GatewayError('not_found', `No host "${hostId}". fleet_status lists the hosts you can use.`);
+  }
+
+  /**
+   * Start a job. The host is authorized first, then the request id is checked: a repeated request returns
+   * its job (if the agent may still operate on that job's host), a reused one with different input is
+   * refused, all before anything is read from T3. An alias-only request without a model selection is
+   * recorded at once and resolved at dispatch, as before. A request with a target or a model selection is
+   * resolved now against the host's catalogs (read-only), and its launch spec is recorded with the job.
+   */
+  async start(caller: Caller, input: StartInput): Promise<{ job: Job; created: boolean }> {
+    if ((input.project === undefined) === (input.target === undefined)) {
+      throw new GatewayError('invalid_argument', 'Pass exactly one of project (a configured alias) or target ({ host, projectId } from fleet_projects).');
+    }
+    const project = input.project === undefined ? undefined : this.#projectFor(caller, input.project, 'operate');
+    const host = project ? this.#hostFor(caller, project.host, 'operate') : this.#hostFor(caller, input.target!.host, 'operate');
+    const hash = startInputHash(input);
     const key = this.store.idempotencyKey(caller.clientId, 'work_start', input.requestId);
     // A retry returns the job of the first request, which the project config may since have moved to another host:
     // the agent must still be allowed to operate on the job's own host.
     const replayed = key && this.store.get(key.jobId);
-    if (replayed && !permits(caller.scopes, 'operate', replayed.hostId)) {
+    if (key && (!replayed || !permits(caller.scopes, 'operate', replayed.hostId))) {
       throw new GatewayError(
         'insufficient_scope',
         `requestId "${input.requestId}" belongs to a job on a host this agent may not operate on. Use a new requestId for new work.`,
       );
     }
-    // A retry of a request made before the operator turned work_start off still gets its job back.
-    if (!project.allowWorkStart && !key) {
-      const standing = this.store.standingJobs(project.alias).filter((job) => permits(caller.scopes, 'read', job.hostId));
-      throw new GatewayError('start_disabled', startDisabledMessage(project.alias, standing));
+    if (key && replayed) {
+      if (key.inputHash !== hash) {
+        throw new GatewayError('request_id_conflict', `requestId "${input.requestId}" was already used for a different request. Use a new requestId for new work.`);
+      }
+      // A retry of a request made before the operator turned work_start off still gets its job back.
+      return { job: replayed, created: false };
     }
+    if (project && input.target === undefined && input.modelSelection === undefined) {
+      if (!project.allowWorkStart) throw this.#startDisabled(caller, project);
+      const id = newJobId();
+      const result = this.store.create({
+        id,
+        clientId: caller.clientId,
+        requestId: input.requestId,
+        inputHash: hash,
+        projectAlias: project.alias,
+        hostId: project.host,
+        task: input.task,
+        title: threadTitle(id, input.task, input.title),
+        branch: `${project.branchPrefix}${id}`,
+        runtimeMode: project.runtimeMode,
+      });
+      if (result.created) this.wake();
+      return result;
+    }
+    if (!host.discovery.enabled) {
+      throw new GatewayError(
+        'discovery_disabled',
+        `Host ${host.id} has discovery disabled: work_start there takes a configured project alias (fleet_status lists them) and no target or modelSelection.`,
+      );
+    }
+    const { spec, branchPrefix } = await this.#resolveLaunch(caller, host, project, input);
     const id = newJobId();
     const result = this.store.create({
       id,
       clientId: caller.clientId,
       requestId: input.requestId,
-      inputHash: inputHash('work_start', { project: input.project, task: input.task, title: input.title }),
-      projectAlias: project.alias,
-      hostId: project.host,
+      inputHash: hash,
+      projectAlias: spec.alias ?? projectRef(host.id, spec.projectId),
+      hostId: host.id,
       task: input.task,
       title: threadTitle(id, input.task, input.title),
-      branch: `${project.branchPrefix}${id}`,
-      runtimeMode: project.runtimeMode,
+      branch: `${branchPrefix}${id}`,
+      runtimeMode: spec.runtimeMode,
+      t3ProjectId: spec.projectId,
+      launchSpec: spec,
     });
     if (result.created) this.wake();
     return result;
   }
 
-  list(filter: { project?: string | undefined; states?: readonly JobState[] | undefined; mine?: boolean | undefined; limit: number }, caller: Caller): Job[] {
-    if (filter.project !== undefined) this.#projectFor(caller, filter.project, 'read');
+  #startDisabled(caller: Caller, project: ProjectConfig): GatewayError {
+    const standing = this.store.standingJobs(project.alias).filter((job) => permits(caller.scopes, 'read', job.hostId));
+    return new GatewayError('start_disabled', startDisabledMessage(project.alias, standing));
+  }
+
+  /**
+   * Resolve a target or a model selection against the host's catalogs (read-only; nothing is created
+   * until this returns). A target that exactly one configured alias maps to is launched as that alias,
+   * with all of its settings; several matching aliases or an ambiguous title mapping require the alias;
+   * otherwise the host's discovery policy applies, and launches need `discovery.allowWorkStart`. An
+   * explicit selection must match the host's fresh capabilities exactly; nothing is substituted.
+   */
+  async #resolveLaunch(
+    caller: Caller,
+    host: HostConfig,
+    project: ProjectConfig | undefined,
+    input: StartInput,
+  ): Promise<{ spec: LaunchSpec; branchPrefix: string }> {
+    const projects = (await this.#catalog.projects(host.id)).value;
+    const mappings = mapProjects(this.#config, host.id, projects);
+    let found: CatalogProject | undefined;
+    let policy: ProjectConfig | HostConfig['discovery'];
+    let alias: string | null;
+    if (project) {
+      found = project.t3ProjectId === undefined
+        ? [...mappings.values()].find((mapping) => mapping.aliases.includes(project))?.project
+        : projects.find((candidate) => candidate.id === project.t3ProjectId);
+      if (!found) {
+        const what = project.t3ProjectId === undefined ? `exactly one T3 project titled "${project.t3ProjectTitle}"` : `a T3 project with id ${project.t3ProjectId}`;
+        throw new GatewayError('not_found', `Project "${project.alias}": host ${host.id} has no ${what}.`);
+      }
+      if (!project.allowWorkStart) throw this.#startDisabled(caller, project);
+      policy = project;
+      alias = project.alias;
+    } else {
+      const mapping = mappings.get(input.target!.projectId);
+      if (!mapping) {
+        throw new GatewayError('not_found', `Host ${host.id} has no T3 project ${JSON.stringify(input.target!.projectId)}. fleet_projects lists them.`);
+      }
+      found = mapping.project;
+      const resolved = launchPolicy(host, mapping);
+      if (resolved.kind === 'ambiguous') {
+        throw new GatewayError(
+          'invalid_argument',
+          `T3 project ${found.id} on host ${host.id} is configured under ${resolved.aliases.length === 1 ? 'alias' : 'aliases'} ${resolved.aliases.join(', ')}` +
+            `${resolved.aliases.length === 1 ? ', whose title matches several T3 projects' : ''}. Start it with project set to the alias you mean, not with target.`,
+        );
+      }
+      if (resolved.kind === 'alias') {
+        if (!resolved.project.allowWorkStart) throw this.#startDisabled(caller, resolved.project);
+        policy = resolved.project;
+        alias = resolved.project.alias;
+      } else {
+        if (!host.discovery.allowWorkStart) {
+          const aliases = this.#config.projects.filter((candidate) => candidate.host === host.id && candidate.allowWorkStart).map((candidate) => candidate.alias);
+          throw new GatewayError(
+            'start_disabled',
+            `Host ${host.id} does not accept work_start into T3 projects without a configured alias (discovery.allowWorkStart is false). ` +
+              `Projects that accept work there: ${aliases.join(', ') || '(none)'}. Ask the operator to configure the project or enable discovery launches.`,
+          );
+        }
+        policy = host.discovery;
+        alias = null;
+      }
+    }
+    let model: LaunchSpec['model'];
+    if (input.modelSelection) {
+      const providers = (await this.#catalog.models(host.id, { refresh: true })).value;
+      model = { source: 'explicit', selection: { ...validateSelection(host.id, providers, input.modelSelection) } };
+    } else if (alias !== null) {
+      const configured = configuredModel(this.#config, policy as ProjectConfig);
+      model = configured ? { source: configured.source, selection: configured.selection } : { source: 't3_default', selection: null };
+    } else if (host.defaultModelSelection) {
+      model = { source: 'host', selection: host.defaultModelSelection };
+    } else if (found.hasDefaultModel) {
+      model = { source: 't3_default', selection: null };
+    } else {
+      throw new GatewayError(
+        'invalid_argument',
+        `T3 project ${found.id} on host ${host.id} has no default model and the host sets no defaultModelSelection: pass modelSelection ` +
+          '({ instanceId, model, options? } from fleet_models).',
+      );
+    }
+    return {
+      spec: {
+        v: 1,
+        projectId: found.id,
+        projectName: found.name,
+        source: alias === null ? 'discovered' : 'alias',
+        alias,
+        baseRef: policy.baseRef,
+        runtimeMode: policy.runtimeMode,
+        model,
+      },
+      branchPrefix: policy.branchPrefix,
+    };
+  }
+
+  list(
+    filter: {
+      project?: string | undefined;
+      target?: { host: string; projectId: string } | undefined;
+      states?: readonly JobState[] | undefined;
+      mine?: boolean | undefined;
+      limit: number;
+    },
+    caller: Caller,
+  ): Job[] {
+    // A configured alias, or the internal ref of a job targeted by T3 project id (@<host>/<projectId>): its host is
+    // authorized like any host, and the ref is only a filter on the ledger.
+    if (filter.project !== undefined) {
+      const ref = parseProjectRef(filter.project);
+      if (ref) this.#hostFor(caller, ref.hostId, 'read');
+      else this.#projectFor(caller, filter.project, 'read');
+    }
+    if (filter.target !== undefined) this.#hostFor(caller, filter.target.host, 'read');
     return this.store.list({
       limit: filter.limit,
       ...(filter.project === undefined ? {} : { projectAlias: filter.project }),
+      ...(filter.target === undefined ? {} : { target: { hostId: filter.target.host, projectId: filter.target.projectId } }),
       ...(filter.states === undefined ? {} : { states: filter.states }),
       ...this.#visible(caller, filter.mine ?? false),
     });

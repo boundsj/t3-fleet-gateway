@@ -12,6 +12,7 @@ import { isTypeOfServiceRace } from '../processErrors.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
 import { parseToolResult } from './results.ts';
 import {
+  capabilitiesSchema,
   environmentSchema,
   interruptResultSchema,
   launchResultSchema,
@@ -28,6 +29,7 @@ import {
   type LaunchThreadInput,
   type PendingRequest,
   type SendResult,
+  type T3Capabilities,
   type T3Environment,
   type T3Project,
   type ThreadList,
@@ -36,7 +38,9 @@ import {
 } from './schemas.ts';
 
 export const DEFAULT_T3_TIMEOUT_MS = 15_000;
-const MAX_PROJECT_PAGES = 20;
+/** Projects are read in pages of 100; a host with more than 20 pages is not enumerated at all (`catalog_limit`). */
+export const MAX_PROJECT_PAGES = 20;
+export const PROJECT_PAGE_SIZE = 100;
 
 export interface T3ClientOptions {
   hostId: string;
@@ -163,21 +167,43 @@ export class T3Client {
     return this.callTool('t3_environment_read', {}, environmentSchema, { ...options, readOnly: true });
   }
 
+  /**
+   * Every T3 project on the host that is not deleted. Bounded: at most MAX_PROJECT_PAGES pages of
+   * PROJECT_PAGE_SIZE, else `catalog_limit`; a cursor that repeats or does not advance is
+   * `t3_invalid_response`. Nothing partial is ever returned.
+   */
   async listProjects(): Promise<T3Project[]> {
     const projects: T3Project[] = [];
+    const seen = new Set<number>();
     let cursor: number | null | undefined = null;
-    for (let page = 0; page < MAX_PROJECT_PAGES; page++) {
+    for (let page = 0; ; page++) {
+      if (page >= MAX_PROJECT_PAGES) {
+        throw new GatewayError(
+          'catalog_limit',
+          `Host ${this.hostId} has more than ${MAX_PROJECT_PAGES * PROJECT_PAGE_SIZE} T3 projects; the gateway does not enumerate that many.`,
+        );
+      }
       const result: z.infer<typeof projectListSchema> = await this.callTool(
         't3_project_list',
-        cursor === null ? { limit: 100 } : { limit: 100, cursor },
+        cursor === null ? { limit: PROJECT_PAGE_SIZE } : { limit: PROJECT_PAGE_SIZE, cursor },
         projectListSchema,
         { readOnly: true },
       );
       projects.push(...result.projects);
-      cursor = result.nextCursor;
-      if (cursor === null || cursor === undefined) break;
+      const next = result.nextCursor;
+      if (next === null || next === undefined) break;
+      if (seen.has(next) || (cursor !== null && next <= cursor)) {
+        throw new GatewayError('t3_invalid_response', `t3_project_list on host ${this.hostId} returned a cursor that does not advance.`);
+      }
+      seen.add(next);
+      cursor = next;
     }
     return projects.filter((project) => !project.deletedAt);
+  }
+
+  /** The providers, models and model options T3 advertises on this host. Read-only; retried like any read. */
+  readCapabilities(options: { timeoutMs?: number } = {}): Promise<T3Capabilities> {
+    return this.callTool('orchestrator_capabilities', {}, capabilitiesSchema, { ...options, readOnly: true });
   }
 
   /** Create a thread. Not retried: T3 has no retry key for launches, so a lost response is ambiguous. */
