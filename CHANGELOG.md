@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- The configured non-mutating `mintPairingCodeProbe` has a ten-second deadline instead of two. The deployed macOS service runs as a launchd agent with `ProcessType` Background, which schedules its children at a lower priority: the configured T3 version probe, which answers in about half a second in the foreground, was measured at just over two seconds there, so every start and `doctor` run warned `probe_timeout` and left the version comparison unverified ([evidence](docs/evidence/startup-probe.md)). Output budgets, the exact configured argv, executable resolution, startup independence, abort on shutdown and the non-mutating-only rule are unchanged; a hung probe can now hold the first renewal pass or a `doctor` host check for up to ten seconds. No launchd template or configuration change.
+- The configured non-mutating `mintPairingCodeProbe` has a ten-second deadline instead of two. The deployed macOS service runs as a launchd agent with `ProcessType` Background, which schedules its children at a lower priority: the configured T3 version probe, which answers in about half a second in the foreground, was measured at just over two seconds there, so startup logged `probe_timeout` while foreground `doctor` passed ([evidence](docs/evidence/startup-probe.md)). Output budgets, the exact configured argv, executable resolution, startup independence, abort on shutdown and the non-mutating-only rule are unchanged; a hung probe can now hold the first renewal pass or a `doctor` host check for up to ten seconds. No launchd template or configuration change.
 
 ### Added
 
