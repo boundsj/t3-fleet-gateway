@@ -81,7 +81,7 @@ function planFromConfig(config: GatewayConfig, project: ProjectConfig, projectId
   const model = configuredModel(config, project);
   return {
     projectId,
-    workspace: { kind: 'worktree', baseRef: project.baseRef, branch },
+    workspace: { kind: 'worktree', baseRef: project.baseRef, branch, startFromOrigin: false },
     modelSelection: model?.selection,
     alias: project.alias,
     missingModelHint: model
@@ -93,7 +93,8 @@ function planFromConfig(config: GatewayConfig, project: ProjectConfig, projectId
 function planFromSpec(spec: LaunchSpec, hostId: string, branch: string): LaunchPlan {
   return {
     projectId: spec.projectId,
-    workspace: spec.v === 1 ? { kind: 'worktree', baseRef: spec.baseRef, branch } : spec.workspace.kind === 'worktree' ? { ...spec.workspace, branch } : spec.workspace,
+    workspace: spec.v === 1 ? { kind: 'worktree', baseRef: spec.baseRef, branch, startFromOrigin: false }
+      : spec.workspace.kind === 'worktree' ? { ...spec.workspace, branch, startFromOrigin: spec.v === 3 ? spec.workspace.startFromOrigin : false } : spec.workspace,
     modelSelection: spec.model.selection ?? undefined,
     alias: spec.alias,
     missingModelHint: spec.model.selection
@@ -346,9 +347,14 @@ export class JobEngine {
     if (spec.v === 3) {
       try {
         const current = await probeWorkspace(host, this.#options.registry, spec.projectId, spec.selection);
-        if (JSON.stringify(current) !== JSON.stringify(spec.inspection)) throw new Error('changed');
-      } catch {
-        this.#failQueued(job, 'launch_policy_changed', 'Workspace identity, Git classification or origin policy changed or could not be verified. Start the work again.');
+        if (current.kind !== spec.inspection.kind || current.root !== spec.inspection.root || current.identity !== spec.inspection.identity) {
+          this.#failQueued(job, 'launch_policy_changed', 'Workspace identity or Git classification changed. Start the work again.');
+          return undefined;
+        }
+      } catch (error) {
+        if (isHostFailure(error)) throw error;
+        const described = describeError(error);
+        this.#failQueued(job, described.code, described.message);
         return undefined;
       }
     }
@@ -377,7 +383,7 @@ export class JobEngine {
             title: job.title,
             workspaceStrategy: plan.workspace.kind !== 'worktree'
               ? { type: 'root' }
-              : { type: 'worktree', baseRef: plan.workspace.baseRef, branch: plan.workspace.branch, startFromOrigin: 'startFromOrigin' in plan.workspace ? plan.workspace.startFromOrigin : false },
+              : { type: 'worktree', baseRef: plan.workspace.baseRef, branch: plan.workspace.branch, startFromOrigin: plan.workspace.startFromOrigin },
             runtimeMode: job.runtimeMode as RuntimeMode,
             ...(plan.modelSelection ? { modelSelection: plan.modelSelection } : {}),
             message: launchMessage(job),

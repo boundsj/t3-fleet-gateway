@@ -95,8 +95,8 @@ const jobSchema = z.object({
   title: z
     .string()
     .describe("The T3 thread title; a launched job's ends with the marker [job:<jobId>], a standing job's is the title the operator gave it"),
-  workspaceMode: z.enum(['scratch', 'root', 'worktree']).nullable().describe('scratch for T3 internal scratch; worktree for project work; null for adopted standing threads'),
-  branch: z.string().describe("The git branch of the job worktree; empty for scratch (a standing job: its thread's branch, or empty)"),
+  workspaceMode: z.enum(['scratch', 'root', 'worktree']).nullable().describe('scratch for T3 internal scratch; root for the local checkout; worktree for a fresh wt; null for adopted standing threads'),
+  branch: z.string().describe("The git branch of the job worktree; empty for scratch or root (a standing job: its thread's branch, or empty)"),
   standing: z
     .boolean()
     .describe(

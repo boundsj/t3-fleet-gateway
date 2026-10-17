@@ -47,6 +47,7 @@ Each entry is a machine running a T3 Code server.
 | `t3Url` | required | T3 server origin. `http` only for loopback; `https` for remote hosts. |
 | `mintPairingCode` | `["t3","auth","pairing","create","--ttl","5m","--json"]` | Command (argv, no shell) that prints a T3 pairing code as JSON with a `credential` field. For a remote host use something like `["ssh","other-host","t3","auth","pairing","create","--ttl","5m","--json"]`. Adding `--label t3-fleet-gateway` makes the pairing easy to spot in T3. |
 | `mintPairingCodeProbe` | none | Optional exact argv for a non-mutating check you have verified is safe to run at `doctor` and startup. No shell; 1–32 arguments, at most 4,096 characters each. Never set this to the pairing/mint command. See "Renewal command preflight" below. |
+| `workspaceProbeCommand` | none | Fixed argv for destination workspace inspection before named launches. Paths are sent through stdin JSON only. See "Workspace inspection" below. |
 | `access` | `"auto"` | The T3 approval level the gateway requests when it enrolls: `read-only`, `approval-required`, `auto-accept-edits`, `auto` or `full-access`. T3 treats it as the ceiling for the runtime mode of threads the gateway starts, so a project's `runtimeMode` may not exceed it. Changing it takes a new `hosts enroll`. |
 | `maxConcurrentJobs` | `2` (1 to 32) | Jobs holding a slot at once on this host: `dispatching`, `running`, `needs_input`, `cancel_requested` and `unknown` count; `idle` does not. Further jobs wait as `queued`, first in, first out. |
 | `defaultModelSelection` | `null` | T3 `modelSelection` object (must contain `model`) for launches in projects on this host that set no `modelSelection` of their own, for example `{ "instanceId": "codex", "model": "<model id>" }`. T3's `orchestrator_capabilities` tool lists the provider instances and models, and so does `fleet_models` once discovery is enabled. |
@@ -56,25 +57,39 @@ Which `access` to choose: the host's `access` is only a ceiling. What a job may 
 
 #### Discovery
 
-Off by default. With `discovery` left out, nothing changes: agents see only the configured aliases, `work_start` takes only aliases, and the gateway never reads a host's project list or model catalog for an agent.
+Off by default. With `discovery` left out, agents see only configured aliases and `work_start` takes only aliases. New named launches still read the destination project root for workspace inspection; browsing and model catalog access remain disabled.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `false` | Let agents list this host's T3 projects (`fleet_projects`: ids, names and how to start work in each) and its provider instances, models and model options (`fleet_models`), read live from T3 and kept for 30 seconds. Also required for `work_start` to accept a `target` or a `modelSelection` on this host. A `read-only` host can enable this for browsing. |
 | `allowWorkStart` | `false` | Let `work_start` launch into a T3 project of this host that has no configured alias, by `target: { host, projectId }`. Needs `enabled`. Projects that do have an alias are always governed by that alias (below). |
 | `runtimeMode` | `"approval-required"` | T3 runtime mode for launches into unconfigured projects. When `allowWorkStart` is true it must not exceed the host's `access`. |
-| `baseRef` | `"main"` | Branch or ref such launches start their worktree from. |
+| `baseRef` | `"main"` | Legacy queued launches use this branch or ref. New automatic launches always use updated `origin/main`; an explicit `workspace` override selects another base. |
 | `branchPrefix` | `"fleet/"` | Branch prefix for such launches: `<branchPrefix><jobId>`. |
 
 Discovery and launching are separate gates, and the per-agent grants still apply: an agent sees a host's catalogs only if it may read that host, and starts work there only with Operate on it. A host with `enabled: true` and `allowWorkStart: false` lets agents browse and choose a model for the configured aliases, but every launch still goes through an alias.
 
 How a launch into a discovered project is governed:
 
-- **A project exactly one alias maps to** (by `t3ProjectId`, or by a `t3ProjectTitle` only that project has) is launched as that alias, with every setting of the alias: `allowWorkStart` (so `false` still refuses with `start_disabled` and names the standing jobs), `runtimeMode`, `baseRef`, `branchPrefix` and the model defaults. Targeting by id never gets around a configured project. The job shows the alias as its project.
+- **A project exactly one alias maps to** (by `t3ProjectId`, or by a `t3ProjectTitle` only that project has) is launched as that alias, with every setting of the alias: `allowWorkStart` (so `false` still refuses with `start_disabled` and names the standing jobs), `runtimeMode`, `branchPrefix` and the model defaults; legacy launches also retain `baseRef`. Targeting by id never gets around a configured project. The job shows the alias as its project.
 - **A project several aliases map to**, or one an alias's title mapping matches ambiguously, cannot be targeted by id: the agent must pass the alias it means.
 - **A project no alias maps to** follows this host's discovery policy, and needs `allowWorkStart`. Its model is the host's `defaultModelSelection`, else the T3 project's own default model, else the agent must pass `modelSelection`; a launch with no model anywhere is refused before a job exists. The job's project is shown as the internal ref `@<host>/<projectId>`.
 
 An agent's `modelSelection` (`{ instanceId, model, options? }`) is checked against the host's freshly read catalog when the job is created and again right before it is launched: provider instance and model must be advertised, every option id must be one the model advertises, a `select` option takes one of its choice ids and a `boolean` option a boolean. Anything else is refused and nothing is substituted or launched; a selection that disappears from the catalog while the job is queued fails the job with `model_selection_invalid` before any launch. Omitting it keeps the configured whole-object default (project, then host, then the T3 project default), with no merging across levels. What such a job resolved to is recorded with the job (`launch_spec`), so a later config or catalog change does not move it.
+
+#### Workspace inspection
+
+Configure `workspaceProbeCommand` on each host used for named project launches. It is an operator-owned fixed argv, run without a shell. Install `scripts/workspace-probe.js` and Node on the destination. For a local host use `["/opt/tools/node", "/opt/fleet/workspace-probe.js"]`. A remote example uses only fixed SSH arguments:
+
+```json
+"workspaceProbeCommand": ["ssh", "-T", "-o", "BatchMode=yes", "build-host", "/opt/tools/node", "/opt/fleet/workspace-probe.js"]
+```
+
+The gateway never adds paths or caller text to argv. It writes stdin JSON with `root`, `baseRef`, `startFromOrigin` and `requireGit`. The helper returns JSON with `kind` (`git` or `root`), canonical `root` and filesystem `identity`. Output is limited to 16 KiB and the command has a 15-second deadline. Only a canonical project root equal to Git's top level is treated as a Git project. An ordinary subdirectory inside another repository uses its own local directory; corrupt intervening `.git` metadata fails inspection. Inherited Git context variables are removed without changing credential configuration.
+
+Omitting `work_start.workspace` detects the project automatically. A Git project gets a fresh T3-managed wt from freshly fetched `origin/main`. Other directories use the local checkout. `{ "type": "root" }` explicitly uses the current local checkout, preserving its branch and dirty files. `{ "type": "worktree", "baseRef": "topic", "startFromOrigin": false }` explicitly uses a local base. Explicit wt selection defaults to `main` and `startFromOrigin: true`. Missing origin or remote branch fails closed for remote-based wt launches. Scratch aliases reject workspace overrides.
+
+The destination is inspected again before dispatch. Changed identity or classification fails with `launch_policy_changed`. Verification failures fail closed; transport failures keep jobs queued with host backoff. No command output or paths enter errors or logs.
 
 #### Renewal command preflight
 
@@ -96,7 +111,7 @@ What agents can target. Each entry:
 | `description` | `""` | Shown to agents in `fleet_status`. |
 | `host` | required | A host `id`. |
 | `t3ProjectId` or `t3ProjectTitle` | exactly one required | The T3 project, by id or by exact title. `doctor` checks that it resolves. |
-| `baseRef` | `"main"` | Branch or ref each job's worktree starts from. |
+| `baseRef` | `"main"` | Legacy queued launches use this branch or ref. New automatic launches always use updated `origin/main`; an explicit `workspace` override selects another base. |
 | `branchPrefix` | `"fleet/"` | Job branches are `<branchPrefix><jobId>`. |
 | `runtimeMode` | `"approval-required"` | T3 runtime mode for job threads: `approval-required`, `auto-accept-edits`, `auto` or `full-access`. Must not exceed the host's `access`; projects cannot be placed on a `read-only` host. See "Approvals and unattended projects" below. |
 | `modelSelection` | `null` | T3 `modelSelection` object (must contain `model`) for this project's launches. Without it the host's `defaultModelSelection` is used, and without that the T3 project's own default model. |

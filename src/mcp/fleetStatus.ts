@@ -47,7 +47,7 @@ const outputSchema = z.object({
       alias: z.string(),
       description: z.string(),
       host: z.string(),
-      workspaceMode: z.enum(['scratch', 'worktree']).describe('scratch uses T3 internal scratch; worktree creates a fresh git worktree and branch'),
+      workspaceMode: z.enum(['scratch', 'auto']).describe('scratch uses T3 internal scratch; auto detects a Git project root for a fresh wt from origin/main, otherwise uses root'),
       runtimeMode: z
         .enum(RUNTIME_MODES)
         .describe(
@@ -161,7 +161,7 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
         alias: project.alias,
         description: project.description,
         host: project.host,
-        workspaceMode: project.workspaceMode,
+        workspaceMode: project.workspaceMode === 'scratch' ? 'scratch' as const : 'auto' as const,
         runtimeMode: project.runtimeMode,
         modelConfigured: configuredModel(deps.config, project) !== null,
         allowWorkStart: project.allowWorkStart,

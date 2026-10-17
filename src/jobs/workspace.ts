@@ -29,16 +29,21 @@ export async function probeWorkspace(host: HostConfig, registry: HostRegistry, p
     const child = spawn(command[0]!, command.slice(1), { stdio: ['pipe', 'pipe', 'pipe'], shell: false });
     let output = '';
     let failed = false;
-    const fail = () => { failed = true; child.kill('SIGKILL'); reject(new GatewayError('invalid_argument', 'Workspace probe failed. Check the destination directory, Git, origin/main and workspaceProbeCommand.')); };
-    const timer = setTimeout(fail, 15000);
+    let stdinFailed = false;
+    const fail = (code: 'invalid_argument' | 'host_unreachable' | 't3_timeout' = 'invalid_argument') => {
+      failed = true; clearTimeout(timer); child.kill('SIGKILL');
+      reject(new GatewayError(code, 'Workspace probe failed. Check destination access, Git, origin/main and workspaceProbeCommand.'));
+    };
+    const timer = setTimeout(() => fail('t3_timeout'), 15000);
     child.stdout.on('data', (chunk: Buffer) => { output += chunk.toString(); if (output.length > 16384) fail(); });
     child.stderr.on('data', () => {});
-    child.on('error', fail);
-    child.stdin.on('error', fail);
+    child.on('error', () => fail());
+    child.stdin.on('error', () => { stdinFailed = true; });
     child.on('close', (code) => {
       clearTimeout(timer);
       if (failed) return;
-      if (code !== 0) { fail(); return; }
+      if (code !== 0) { fail(code === 255 ? 'host_unreachable' : 'invalid_argument'); return; }
+      if (stdinFailed) { fail(); return; }
       const parsed = inspectionSchema.safeParse((() => { try { return JSON.parse(output); } catch { return null; } })());
       if (!parsed.success || (request.requireGit && parsed.data.kind !== 'git')) { fail(); return; }
       resolve(parsed.data);

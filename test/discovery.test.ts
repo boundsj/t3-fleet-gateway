@@ -150,7 +150,6 @@ describe('discovery: off by default', () => {
     assert.equal(countCalls(mini, 'orchestrator_capabilities') + countCalls(macbook, 'orchestrator_capabilities'), 0, 'no capabilities read');
     assert.equal(countCalls(mini, 't3_project_list'), 0, 'work_start never read the project list before dispatch');
 
-    // New aliases resolve before queueing; their original input hash still supports old replay keys.
     const input = { project: 'alpha', task: 'Synthetic alias task', requestId: 'legacy-1' };
     const started = await agent.call<{ job: StartedJob; created: boolean }>('work_start', input);
     assert.equal(started.created, true);

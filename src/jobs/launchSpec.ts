@@ -26,7 +26,12 @@ const resolvedWorkspaceSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('root') }),
   z.strictObject({ kind: z.literal('worktree'), baseRef: z.string().min(1), startFromOrigin: z.boolean() }),
 ]);
-export type Workspace = z.infer<typeof workspaceSchema> | { kind: 'root' } | { kind: 'worktree'; baseRef: string; branch: string; startFromOrigin: boolean };
+const executableWorkspaceSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('scratch') }),
+  z.strictObject({ kind: z.literal('root') }),
+  z.strictObject({ kind: z.literal('worktree'), baseRef: z.string().min(1), branch: z.string().min(1), startFromOrigin: z.boolean() }),
+]);
+export type Workspace = z.infer<typeof executableWorkspaceSchema>;
 
 const modelSchema = z.strictObject({
   source: z.enum(['explicit', 'project', 'host', 't3_default']),
