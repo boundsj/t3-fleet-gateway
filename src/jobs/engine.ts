@@ -1,3 +1,4 @@
+import { probeWorkspace } from './workspace.ts';
 import { configuredModel, runtimeModeAllowed, type GatewayConfig, type HostConfig, type ProjectConfig, type RuntimeMode } from '../config.ts';
 import { describeError, GatewayError } from '../errors.ts';
 import type { CatalogService } from '../hosts/catalog.ts';
@@ -59,7 +60,9 @@ function isHostFailure(error: unknown): error is GatewayError {
 export function launchMessage(job: Job): string {
   const workspace = job.launchSpec?.v === 2 && job.launchSpec.workspace.kind === 'scratch'
     ? 'in T3’s internal scratch workspace'
-    : `in a fresh worktree on branch ${job.branch}`;
+    : job.launchSpec?.v === 3 && job.launchSpec.workspace.kind === 'root'
+      ? 'in the project’s local checkout'
+      : `in a fresh worktree on branch ${job.branch}`;
   return `${job.task}\n\n---\nStarted through t3-fleet-gateway as job ${job.id}, ${workspace}.`;
 }
 
@@ -90,7 +93,7 @@ function planFromConfig(config: GatewayConfig, project: ProjectConfig, projectId
 function planFromSpec(spec: LaunchSpec, hostId: string, branch: string): LaunchPlan {
   return {
     projectId: spec.projectId,
-    workspace: spec.v === 1 ? { kind: 'worktree', baseRef: spec.baseRef, branch } : spec.workspace,
+    workspace: spec.v === 1 ? { kind: 'worktree', baseRef: spec.baseRef, branch } : spec.workspace.kind === 'worktree' ? { ...spec.workspace, branch } : spec.workspace,
     modelSelection: spec.model.selection ?? undefined,
     alias: spec.alias,
     missingModelHint: spec.model.selection
@@ -282,8 +285,8 @@ export class JobEngine {
    */
   async #planFromSpec(host: HostConfig, job: Job, spec: LaunchSpec): Promise<LaunchPlan | undefined> {
     const { config, catalog } = this.#options;
-    if (spec.v === 2 && (spec.hostId !== job.hostId ||
-        (spec.defaultProject !== null && (!host.discovery.enabled || host.defaultProject !== spec.defaultProject)))) {
+    if (spec.v !== 1 && (spec.hostId !== job.hostId ||
+        (spec.v === 2 && spec.defaultProject !== null && (!host.discovery.enabled || host.defaultProject !== spec.defaultProject)))) {
       this.#failQueued(job, 'launch_policy_changed', 'The recorded host or default scratch binding changed. Start the work again under the current policy.');
       return undefined;
     }
@@ -307,8 +310,8 @@ export class JobEngine {
       if (alias) {
         // The agent named the alias: it must still resolve to the recorded project (a title may have moved) and accept work.
         if (!mapping.aliases.includes(alias)) changed = `project "${alias.alias}" no longer resolves to T3 project ${spec.projectId} on host ${job.hostId}`;
-        else if (alias.workspaceMode !== (spec.v === 1 ? 'worktree' : spec.workspace.kind)) changed = `project "${alias.alias}" changed workspace mode`;
-        else if (spec.v === 2 && alias.runtimeMode !== spec.runtimeMode) changed = `project "${alias.alias}" changed runtime mode`;
+        else if (alias.workspaceMode !== (spec.v === 1 || spec.v === 3 ? 'worktree' : spec.workspace.kind)) changed = `project "${alias.alias}" changed workspace mode`;
+        else if (spec.v !== 1 && alias.runtimeMode !== spec.runtimeMode) changed = `project "${alias.alias}" changed runtime mode`;
         else if (!alias.allowWorkStart) changed = `project "${alias.alias}" no longer accepts work_start`;
       } else {
         const policy = launchPolicy(host, mapping);
@@ -340,6 +343,15 @@ export class JobEngine {
         return undefined;
       }
     }
+    if (spec.v === 3) {
+      try {
+        const current = await probeWorkspace(host, this.#options.registry, spec.projectId, spec.selection);
+        if (JSON.stringify(current) !== JSON.stringify(spec.inspection)) throw new Error('changed');
+      } catch {
+        this.#failQueued(job, 'launch_policy_changed', 'Workspace identity, Git classification or origin policy changed or could not be verified. Start the work again.');
+        return undefined;
+      }
+    }
     return planFromSpec(spec, job.hostId, job.branch);
   }
 
@@ -363,9 +375,9 @@ export class JobEngine {
           {
             projectId: plan.projectId,
             title: job.title,
-            workspaceStrategy: plan.workspace.kind === 'scratch'
+            workspaceStrategy: plan.workspace.kind !== 'worktree'
               ? { type: 'root' }
-              : { type: 'worktree', baseRef: plan.workspace.baseRef, branch: plan.workspace.branch, startFromOrigin: false },
+              : { type: 'worktree', baseRef: plan.workspace.baseRef, branch: plan.workspace.branch, startFromOrigin: 'startFromOrigin' in plan.workspace ? plan.workspace.startFromOrigin : false },
             runtimeMode: job.runtimeMode as RuntimeMode,
             ...(plan.modelSelection ? { modelSelection: plan.modelSelection } : {}),
             message: launchMessage(job),

@@ -64,7 +64,7 @@ describe('projectless work', () => {
     assert.equal((await agent.callError('work_start', { project: 'unknown-named-project', task: 'Synthetic', requestId: 'missing-name' })).code, 'not_found');
     assert.equal((await agent.callError('work_start', { ...input('missing-id'), target: { host: 'main', projectId: 'missing' } })).code, 'not_found');
     await tick();
-    assert.deepEqual(fake.launches[0]!.workspaceStrategy, { type: 'worktree', baseRef: 'main', branch: job.branch, startFromOrigin: false });
+    assert.deepEqual(fake.launches[0]!.workspaceStrategy, { type: 'worktree', baseRef: 'main', branch: job.branch, startFromOrigin: true });
   });
 
   test('host-only replay hashes the original intention before resolving a changed default', async (t) => {
@@ -243,16 +243,19 @@ describe('projectless work', () => {
     assert.deepEqual(first.fake.launches[0]!.workspaceStrategy, { type: 'root' });
   });
 
-  test('legacy alias hashes and downstream-free queueing survive; removing aliases leaves idle threads usable', async (t) => {
+  test('legacy alias hashes and downstream-free replay survive; removing aliases leaves idle threads usable', async (t) => {
     const { fake, gw, agent, tick } = await startJobHarness(t);
     fake.calls.length = 0;
     const legacy = { project: 'pilot', task: 'Synthetic legacy task', requestId: 'legacy-golden' };
     const { job } = await agent.call<{ job: ScratchJob }>('work_start', legacy);
     assert.equal(startInputHash(legacy), '06c29f1b765f51ba0ee05f4151a4a0adf3717bc6e0ca2b0acbd039c6634e0508');
     assert.equal(gw.services.jobs.store.idempotencyKey(agent.clientId, 'work_start', legacy.requestId)?.inputHash, startInputHash(legacy));
-    assert.deepEqual(fake.calls, []);
+    assert.deepEqual(fake.calls, ['t3_project_list', 't3_project_list']);
     assert.equal(job.workspaceMode, 'worktree');
-    assert.equal(gw.services.jobs.store.require(job.jobId).launchSpec, null);
+    assert.equal(gw.services.jobs.store.require(job.jobId).launchSpec?.v, 3);
+    fake.calls.length = 0;
+    await agent.call('work_start', legacy);
+    assert.deepEqual(fake.calls, [], 'replay remains downstream-free');
     await tick();
     fake.finishTurn(fake.threadForJob(job.jobId).threadId, 'Synthetic legacy result');
     await tick();

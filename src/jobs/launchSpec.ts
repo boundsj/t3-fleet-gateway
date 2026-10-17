@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { inspectionSchema, workspaceSelectionSchema } from './workspace.ts';
 import { GatewayError } from '../errors.ts';
 import type { CatalogModel, CatalogProvider } from '../hosts/catalog.ts';
 
@@ -21,7 +22,11 @@ const workspaceSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('scratch') }),
   z.strictObject({ kind: z.literal('worktree'), baseRef: z.string().min(1), branch: z.string().min(1) }),
 ]);
-export type Workspace = z.infer<typeof workspaceSchema>;
+const resolvedWorkspaceSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('root') }),
+  z.strictObject({ kind: z.literal('worktree'), baseRef: z.string().min(1), startFromOrigin: z.boolean() }),
+]);
+export type Workspace = z.infer<typeof workspaceSchema> | { kind: 'root' } | { kind: 'worktree'; baseRef: string; branch: string; startFromOrigin: boolean };
 
 const modelSchema = z.strictObject({
   source: z.enum(['explicit', 'project', 'host', 't3_default']),
@@ -36,6 +41,16 @@ const sharedSpec = {
   model: modelSchema,
 };
 const launchSpecSchema = z.union([
+  z.strictObject({ v: z.literal(3), ...sharedSpec, hostId: z.string().min(1),
+    workspace: resolvedWorkspaceSchema, selection: workspaceSelectionSchema, inspection: inspectionSchema,
+  }).refine((spec) => {
+    const root = spec.selection.type === 'root' || spec.inspection.kind === 'root';
+    if (spec.selection.type === 'worktree' && spec.inspection.kind !== 'git') return false;
+    if (root) return spec.workspace.kind === 'root';
+    return spec.workspace.kind === 'worktree' &&
+      spec.workspace.baseRef === (spec.selection.type === 'worktree' ? spec.selection.baseRef ?? 'main' : 'main') &&
+      spec.workspace.startFromOrigin === (spec.selection.type === 'worktree' ? spec.selection.startFromOrigin ?? true : true);
+  }, { message: 'workspace must match its selection and inspection' }),
   z.strictObject({ v: z.literal(1), ...sharedSpec, baseRef: z.string().min(1) }),
   z.strictObject({
     v: z.literal(2), ...sharedSpec,

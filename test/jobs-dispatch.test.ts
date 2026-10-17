@@ -24,7 +24,7 @@ describe('work_start', () => {
     assert.deepEqual(fake.launches[0], {
       projectId: 'project-1',
       title: job.title,
-      workspaceStrategy: { type: 'worktree', baseRef: 'main', branch: job.branch, startFromOrigin: false },
+      workspaceStrategy: { type: 'worktree', baseRef: 'main', branch: job.branch, startFromOrigin: true },
       runtimeMode: 'auto',
       message: `${task}\n\n---\nStarted through t3-fleet-gateway as job ${job.jobId}, in a fresh worktree on branch ${job.branch}.`,
     });
@@ -55,7 +55,7 @@ describe('work_start', () => {
     });
     assert.equal(job.title, `Short title [job:${job.jobId}]`);
     await tick();
-    assert.deepEqual(fake.launches[0]?.workspaceStrategy, { type: 'worktree', baseRef: 'trunk', branch: `agents/${job.jobId}`, startFromOrigin: false });
+    assert.deepEqual(fake.launches[0]?.workspaceStrategy, { type: 'worktree', baseRef: 'main', branch: `agents/${job.jobId}`, startFromOrigin: true });
     assert.equal(fake.launches[0]?.projectId, 'project-2');
     assert.equal(fake.launches[0]?.runtimeMode, 'approval-required');
     assert.deepEqual(fake.launches[0]?.modelSelection, { model: 'synthetic-large' });
@@ -111,8 +111,8 @@ describe('work_start', () => {
 describe('dispatcher', () => {
   test('keeps a job queued when the host cannot be reached, then launches it when the host is back', async (t) => {
     const { fake, gw, agent, tick, tickAfter } = await startJobHarness(t);
-    await fake.stop();
     const job = await startJob(agent);
+    await fake.stop();
     await tick();
     const status = await agent.call<{ state: string; hostUnreachableSince: string | null }>('work_status', { jobId: job.jobId });
     assert.equal(status.state, 'queued');
@@ -202,7 +202,7 @@ describe('dispatcher', () => {
     assert.equal(status.state, 'failed');
     assert.equal(status.lastError.code, 'invalid_request');
     assert.match(status.lastError.message, /Pass modelSelection/);
-    assert.match(status.lastError.message, /modelSelection for project "pilot" or defaultModelSelection for host "main"/);
+    assert.match(status.lastError.message, /pass modelSelection to work_start.*defaultModelSelection for host "main"/);
     assert.equal(fake.calls.includes('t3_thread_list'), false, 'refused before anything was created');
     assert.equal(fake.threads.size, 0);
   });
@@ -234,8 +234,8 @@ describe('dispatcher', () => {
 
   test('fails a job whose project does not resolve on the host', async (t) => {
     const { fake, agent, tick } = await startJobHarness(t);
-    fake.projects.splice(1, 1);
     const { job } = await agent.call<{ job: { jobId: string } }>('work_start', { project: 'docs', task: 'Synthetic', requestId: 'r-docs' });
+    fake.projects.splice(1, 1);
     await tick();
     const status = await agent.call<{ state: string; lastError: { code: string } }>('work_status', { jobId: job.jobId });
     assert.equal(status.state, 'failed');

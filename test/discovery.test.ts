@@ -150,16 +150,16 @@ describe('discovery: off by default', () => {
     assert.equal(countCalls(mini, 'orchestrator_capabilities') + countCalls(macbook, 'orchestrator_capabilities'), 0, 'no capabilities read');
     assert.equal(countCalls(mini, 't3_project_list'), 0, 'work_start never read the project list before dispatch');
 
-    // The ordinary alias path is unchanged: downstream-free until dispatch, same launch input, same hash.
+    // New aliases resolve before queueing; their original input hash still supports old replay keys.
     const input = { project: 'alpha', task: 'Synthetic alias task', requestId: 'legacy-1' };
     const started = await agent.call<{ job: StartedJob; created: boolean }>('work_start', input);
     assert.equal(started.created, true);
-    assert.deepEqual([started.job.source, started.job.model, started.job.projectId, started.job.projectName], ['alias', null, null, null]);
+    assert.deepEqual([started.job.source, started.job.model, started.job.projectId, started.job.projectName], ['alias', { source: 't3_default', selection: null }, 'project-1', 'Synthetic project 1']);
     assert.equal(gw.services.jobs.store.idempotencyKey(agent.clientId, 'work_start', 'legacy-1')?.inputHash, startInputHash(input));
     assert.equal(startInputHash(input), startInputHash({ ...input, title: undefined }), 'the alias-only hash is the pre-discovery hash');
-    assert.equal(countCalls(mini, 't3_project_list'), 0);
+    assert.equal(countCalls(mini, 't3_project_list'), 2);
     await tick();
-    assert.deepEqual(mini.launches[0]?.workspaceStrategy, { type: 'worktree', baseRef: 'trunk', branch: `alias/${started.job.jobId}`, startFromOrigin: false });
+    assert.deepEqual(mini.launches[0]?.workspaceStrategy, { type: 'worktree', baseRef: 'main', branch: `alias/${started.job.jobId}`, startFromOrigin: true });
     assert.equal(mini.launches[0]?.modelSelection, undefined);
     assert.equal((await agent.call<{ job: StartedJob }>('work_start', input)).job.jobId, started.job.jobId, 'replays');
     assert.equal((await agent.call<{ projectId: string | null }>('work_status', { jobId: started.job.jobId })).projectId, 'project-1', 'learned at dispatch');
@@ -188,7 +188,7 @@ describe('discovery: fleet_projects and fleet_models', () => {
     assert.ok(['host_unreachable', 't3_response_lost'].includes(projects.hosts[1]!.error?.code ?? ''), projects.hosts[1]!.error?.code);
     const mini1 = projects.hosts[0]!.projects!.find((project) => project.name === 'Synthetic project 1')!;
     assert.deepEqual([mini1.host, mini1.projectId, mini1.launch.source, mini1.launch.alias, mini1.launch.allowed, mini1.launch.runtimeMode, mini1.launch.baseRef],
-      ['mini', 'project-1', 'alias', 'alpha', true, 'approval-required', 'trunk']);
+      ['mini', 'project-1', 'alias', 'alpha', true, 'approval-required', 'main']);
     assert.match(mini1.guidance, /work_start \{ project: "alpha" \}/);
     const mini2 = projects.hosts[0]!.projects!.find((project) => project.projectId === 'project-2')!;
     assert.deepEqual([mini2.launch.source, mini2.launch.alias, mini2.launch.allowed, mini2.launch.runtimeMode, mini2.launch.defaultModelSource], ['discovered', null, true, 'auto', 't3_default']);
@@ -286,7 +286,7 @@ describe('discovery: fleet_projects and fleet_models', () => {
     assert.equal(countCalls(mini, 't3_project_list'), 3, 'expired: read again');
     assert.equal(again.hosts[0]!.total, 8);
     assert.deepEqual(again.hosts[0]!.projects!.at(-1)!.launch, {
-      allowed: true, source: 'discovered', alias: null, aliases: [], runtimeMode: 'auto', workspaceMode: 'worktree', baseRef: 'main', branchPrefix: 'fleet/', defaultModelSource: null,
+      allowed: true, source: 'discovered', alias: null, aliases: [], runtimeMode: 'auto', workspaceMode: 'auto', baseRef: 'main', branchPrefix: 'fleet/', defaultModelSource: null,
     });
     assert.match(again.hosts[0]!.projects!.at(-1)!.guidance, /No default model: pass modelSelection/);
 
@@ -352,7 +352,9 @@ describe('discovery: work_start with a target or a model selection', () => {
     assert.deepEqual(job.model, { source: 'explicit', selection: { instanceId: 'synthetic-provider', model: 'synthetic-model', options: { 'synthetic-effort': 'high', 'synthetic-fast': false } } });
     const stored = gw.services.jobs.store.require(job.jobId);
     assert.deepEqual(stored.launchSpec, {
-      v: 1, projectId: 'project-2', projectName: 'Synthetic project 2', source: 'discovered', alias: null, baseRef: 'main', runtimeMode: 'auto',
+      v: 3, projectId: 'project-2', projectName: 'Synthetic project 2', source: 'discovered', alias: null, runtimeMode: 'auto',
+      hostId: 'mini', selection: { type: 'auto' }, inspection: { kind: 'git', root: '/synthetic/project-2', identity: 'synthetic:1' },
+      workspace: { kind: 'worktree', baseRef: 'main', startFromOrigin: true },
       model: { source: 'explicit', selection: { instanceId: 'synthetic-provider', model: 'synthetic-model', options: { 'synthetic-effort': 'high', 'synthetic-fast': false } } },
     });
     assert.equal(stored.t3ProjectId, 'project-2', 'the project id is recorded before dispatch');
@@ -362,7 +364,7 @@ describe('discovery: work_start with a target or a model selection', () => {
     assert.deepEqual(mini.launches[0], {
       projectId: 'project-2',
       title: job.title,
-      workspaceStrategy: { type: 'worktree', baseRef: 'main', branch: job.branch, startFromOrigin: false },
+      workspaceStrategy: { type: 'worktree', baseRef: 'main', branch: job.branch, startFromOrigin: true },
       runtimeMode: 'auto',
       modelSelection: { instanceId: 'synthetic-provider', model: 'synthetic-model', options: { 'synthetic-effort': 'high', 'synthetic-fast': false } },
       message: `Synthetic discovered task\n\n---\nStarted through t3-fleet-gateway as job ${job.jobId}, in a fresh worktree on branch ${job.branch}.`,
@@ -520,7 +522,7 @@ describe('discovery: work_start with a target or a model selection', () => {
     });
     assert.deepEqual([twin.job.project, twin.job.source, twin.job.projectId, twin.job.branch], ['twin-a', 'alias', 'project-3', `twin/${twin.job.jobId}`]);
     await tick();
-    assert.deepEqual(mini.launches.at(-1)?.workspaceStrategy, { type: 'worktree', baseRef: 'release', branch: twin.job.branch, startFromOrigin: false });
+    assert.deepEqual(mini.launches.at(-1)?.workspaceStrategy, { type: 'worktree', baseRef: 'main', branch: twin.job.branch, startFromOrigin: true });
     assert.equal(mini.launches.at(-1)?.runtimeMode, 'approval-required');
     const disabledAlias = await agent.callError('work_start', {
       project: 'alpha', task: 'Synthetic', requestId: requestId(), modelSelection: { instanceId: 'synthetic-provider', model: 'synthetic-large' },

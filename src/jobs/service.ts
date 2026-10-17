@@ -1,3 +1,4 @@
+import { probeWorkspace, type WorkspaceSelection } from './workspace.ts';
 import { configuredModel, type GatewayConfig, type HostConfig, type ProjectConfig } from '../config.ts';
 import { sha256Hex } from '../crypto.ts';
 import { describeError, GatewayError } from '../errors.ts';
@@ -50,6 +51,7 @@ export interface Caller {
 }
 
 export interface StartInput {
+  workspace?: WorkspaceSelection;
   project?: string | undefined;
   target?: { host: string; projectId?: string | undefined } | undefined;
   /** An explicit provider, model and options from fleet_models; without it the configured defaults apply. */
@@ -158,13 +160,19 @@ export function inputHash(tool: string, input: Record<string, unknown>): string 
  * changed target or selection under the same request id conflicts.
  */
 export function startInputHash(input: StartInput): string {
-  if (input.target === undefined && input.modelSelection === undefined) {
+  if (input.target === undefined && input.modelSelection === undefined && input.workspace === undefined) {
     return inputHash('work_start', { project: input.project, task: input.task, title: input.title });
   }
+  const workspace = input.workspace?.type === 'worktree' ? {
+    type: input.workspace.type,
+    ...(input.workspace.baseRef === undefined ? {} : { baseRef: input.workspace.baseRef }),
+    ...(input.workspace.startFromOrigin === undefined ? {} : { startFromOrigin: input.workspace.startFromOrigin }),
+  } : input.workspace === undefined ? undefined : { type: input.workspace.type };
   return inputHash('work_start', {
     project: input.project ?? null,
     target: input.target === undefined ? null : { host: input.target.host, ...(input.target.projectId === undefined ? {} : { projectId: input.target.projectId }) },
     modelSelection: input.modelSelection === undefined ? null : canonicalSelection(input.modelSelection),
+    ...(workspace === undefined ? {} : { workspace }),
     task: input.task,
     title: input.title,
   });
@@ -311,24 +319,7 @@ export class JobService {
     }
     let project = input.project === undefined ? undefined : this.#projectFor(caller, input.project, 'operate');
     const host = project ? this.#hostFor(caller, project.host, 'operate') : this.#hostFor(caller, input.target!.host, 'operate');
-    if (project?.workspaceMode === 'worktree' && input.target === undefined && input.modelSelection === undefined) {
-      if (!project.allowWorkStart) throw this.#startDisabled(caller, project);
-      const id = newJobId();
-      const result = this.store.create({
-        id,
-        clientId: caller.clientId,
-        requestId: input.requestId,
-        inputHash: hash,
-        projectAlias: project.alias,
-        hostId: project.host,
-        task: input.task,
-        title: threadTitle(id, input.task, input.title),
-        branch: `${project.branchPrefix}${id}`,
-        runtimeMode: project.runtimeMode,
-      }, scope);
-      if (result.created) this.wake();
-      return result;
-    }
+    if (project && !project.allowWorkStart) throw this.#startDisabled(caller, project);
     const hostOnly = input.target !== undefined && input.target.projectId === undefined;
     if (!host.discovery.enabled && (input.target !== undefined || input.modelSelection !== undefined)) {
       throw new GatewayError(
@@ -356,7 +347,7 @@ export class JobService {
       hostId: host.id,
       task: input.task,
       title: threadTitle(id, input.task, input.title),
-      branch: spec.v === 2 && spec.workspace.kind === 'scratch' ? '' : `${branchPrefix}${id}`,
+      branch: spec.v !== 1 && spec.workspace.kind !== 'worktree' ? '' : `${branchPrefix}${id}`,
       runtimeMode: spec.runtimeMode,
       t3ProjectId: spec.projectId,
       launchSpec: spec,
@@ -462,17 +453,33 @@ export class JobService {
       runtimeMode: policy.runtimeMode,
       model,
     } satisfies Pick<LaunchSpec, 'projectId' | 'projectName' | 'source' | 'alias' | 'runtimeMode' | 'model'>;
+    if (scratch && input.workspace !== undefined) throw new GatewayError('invalid_argument', 'Scratch projects do not accept a workspace override.');
+    const selection = input.workspace ?? { type: 'auto' };
+    if (scratch) {
+      return {
+        spec: {
+          v: 2,
+          ...common,
+          hostId: host.id,
+          workspace: { kind: 'scratch' },
+          defaultProject: input.target !== undefined && input.target.projectId === undefined ? scratch.alias : null,
+        },
+        branchPrefix: policy.branchPrefix,
+      };
+    }
+    const inspection = await probeWorkspace(host, this.#registry, found.id, selection);
     return {
-      spec: scratch ? {
-        v: 2,
+      spec: {
+        v: 3,
         ...common,
         hostId: host.id,
-        workspace: { kind: 'scratch' },
-        defaultProject: input.target !== undefined && input.target.projectId === undefined ? scratch.alias : null,
-      } : {
-        v: 1,
-        ...common,
-        baseRef: policy.baseRef,
+        selection,
+        inspection,
+        workspace: selection.type === 'root' || inspection.kind === 'root' ? { kind: 'root' } : {
+          kind: 'worktree',
+          baseRef: selection.type === 'worktree' ? selection.baseRef ?? 'main' : 'main',
+          startFromOrigin: selection.type === 'worktree' ? selection.startFromOrigin ?? true : true,
+        },
       },
       branchPrefix: policy.branchPrefix,
     };

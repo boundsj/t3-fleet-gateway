@@ -1,3 +1,4 @@
+import { workspaceSelectionSchema } from '../jobs/workspace.ts';
 import * as z from 'zod';
 import { MAX_DELEGATED_TASKS } from '../jobs/derive.ts';
 import { MAX_MESSAGE_TEXT_CHARS, MAX_MESSAGES } from '../jobs/messages.ts';
@@ -94,7 +95,7 @@ const jobSchema = z.object({
   title: z
     .string()
     .describe("The T3 thread title; a launched job's ends with the marker [job:<jobId>], a standing job's is the title the operator gave it"),
-  workspaceMode: z.enum(['scratch', 'worktree']).nullable().describe('scratch for T3 internal scratch; worktree for project work; null for adopted standing threads'),
+  workspaceMode: z.enum(['scratch', 'root', 'worktree']).nullable().describe('scratch for T3 internal scratch; worktree for project work; null for adopted standing threads'),
   branch: z.string().describe("The git branch of the job worktree; empty for scratch (a standing job: its thread's branch, or empty)"),
   standing: z
     .boolean()
@@ -228,7 +229,7 @@ export function jobView(job: Job, context: ToolContext): JobView {
     source: spec?.source ?? 'alias',
     model: spec ? { source: spec.model.source, selection: spec.model.selection } : null,
     title: job.title,
-    workspaceMode: job.standing ? null : spec?.v === 2 ? spec.workspace.kind : 'worktree',
+    workspaceMode: job.standing ? null : spec && spec.v !== 1 ? spec.workspace.kind : 'worktree',
     branch: job.branch,
     standing: job.standing,
     waitingOnDelegatedWork: job.delegatedWork.length > 0 || job.delegatedUntracked > 0,
@@ -268,7 +269,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     title: 'Start work',
     description:
       'Start work on a machine. When the user names no project, pass target { host } to use that machine’s configured T3 internal scratch workspace. ' +
-      'When the user names a project, use its configured alias or explicit target { host, projectId }; project work creates a fresh git worktree and branch. ' +
+      'When the user names a project, use its configured alias or explicit target { host, projectId }; project work detects Git and defaults to a fresh wt from updated origin/main, or the local folder for non-Git. Explicit workspace root uses the current checkout. ' +
       'An unknown named project must be resolved or reported, never treated as scratch. The gateway opens a T3 Code ' +
       'thread there and gives the worker your task. Returns at once with a jobId in state "queued"; the job moves to "running" ' +
       'when its host has a free slot. Follow it with work_feed (recommended: poll with the last cursor) or work_status. ' +
@@ -289,6 +290,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     inputSchema: z.object({
       project: z.string().min(1).max(64).optional().describe('Project alias from fleet_status (pass this or target)'),
       target: startTargetInput.optional().describe('Machine only for no named project, or machine and explicit project id (pass this or project)'),
+      workspace: workspaceSelectionSchema.optional().describe('Omit to detect Git and create a wt from freshly fetched origin/main; non-Git uses root. Pass {type: "root"} for the current local checkout, or {type: "worktree", baseRef?, startFromOrigin?} for an explicit wt base.'),
       modelSelection: modelSelectionInput.optional().describe('Explicit provider instance, model and options from fleet_models; omit for the configured defaults'),
       task: z.string().min(1).max(MAX_TASK_CHARS).describe('What the worker should do, as a complete instruction'),
       requestId: requestIdInput,

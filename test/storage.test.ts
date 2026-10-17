@@ -114,7 +114,7 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 9);
+    assert.equal(SCHEMA_VERSION, 10);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
       after.map(
@@ -424,7 +424,7 @@ CREATE TABLE jobs (
     const tables = ['jobs', 'job_events', 'idempotency_keys', 'host_credentials'];
     const before = tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
     migrate(db);
-    assert.equal(schemaVersion(db), 9);
+    assert.equal(schemaVersion(db), 10);
     assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
     assert.deepEqual(store.require('legacy0001').launchSpec, v1);
     assert.equal(store.require('legacy0002').launchSpec, null);
@@ -434,7 +434,7 @@ CREATE TABLE jobs (
     } satisfies LaunchSpec;
     store.create({ ...job, id: 'scratch001', requestId: 'r3', branch: '', t3ProjectId: 'scratch-id', launchSpec: v2 });
     assert.deepEqual(store.require('scratch001').launchSpec, v2);
-    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 8)), /schema version 9 is newer than this build supports \(8\)/);
+    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 8)), /schema version 10 is newer than this build supports \(8\)/);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
     assert.equal(db.prepare('PRAGMA integrity_check').get()?.integrity_check, 'ok');
   });

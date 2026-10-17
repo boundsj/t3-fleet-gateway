@@ -51,7 +51,7 @@ const launchSchema = z.object({
   alias: z.string().nullable().describe('The configured alias to pass as project; null when none (use target) or ambiguous'),
   aliases: z.array(z.string()).describe('Every configured alias that maps to this project'),
   runtimeMode: z.string().nullable(),
-  workspaceMode: z.enum(['scratch', 'worktree']).nullable(),
+  workspaceMode: z.enum(['scratch', 'auto']).nullable(),
   baseRef: z.string().nullable(),
   branchPrefix: z.string().nullable(),
   defaultModelSource: z.enum(['explicit', 'project', 'host', 't3_default']).nullable().describe(
@@ -220,13 +220,13 @@ function guidance(project: CatalogProject, host: string, policy: EffectivePolicy
     if (!policy.allowWorkStart) {
       return `Configured as project "${policy.alias}", which does not accept work_start: send work to its standing jobs with work_continue (fleet_status lists them).`;
     }
-    const workspace = policy.workspaceMode === 'scratch' ? 'T3 internal scratch' : `base ${policy.baseRef}`;
+    const workspace = policy.workspaceMode === 'scratch' ? 'T3 internal scratch' : 'automatic Git detection, wt from updated origin/main or local non-Git folder; workspace root selects the local checkout';
     return `Start work with work_start { project: ${JSON.stringify(policy.alias)} } (${policy.runtimeMode}, ${workspace}).${model}`;
   }
   if (!policy.allowWorkStart) {
     return `No configured alias, and host ${host} does not accept work_start into unconfigured projects. Ask the operator to configure it or to enable discovery launches.`;
   }
-  return `Start work with work_start { target: { host: ${JSON.stringify(host)}, projectId: ${JSON.stringify(project.id)} } } (${policy.runtimeMode}, base ${policy.baseRef}).${model}`;
+  return `Start work with work_start { target: { host: ${JSON.stringify(host)}, projectId: ${JSON.stringify(project.id)} } } (${policy.runtimeMode}, automatic Git detection, wt from updated origin/main or local non-Git folder).${model}`;
 }
 
 function projectViews(deps: CatalogToolDeps, host: HostConfig, projects: readonly CatalogProject[], all: readonly CatalogProject[]): ProjectView[] {

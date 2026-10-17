@@ -253,6 +253,7 @@ ALTER TABLE jobs ADD COLUMN delegated_ended_at INTEGER;
     // worktree. Their schema-version check must reject this ledger before reading v2 records.
     sql: 'SELECT 1;',
   },
+  { version: 10, name: 'automatic workspace launch specs', sql: 'SELECT 1;' },
 ];
 
 /**
