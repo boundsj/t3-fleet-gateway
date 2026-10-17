@@ -68,10 +68,6 @@ export interface Job {
    * starting: the `delegated_work_ended` event. Cleared when the job changes state.
    */
   delegatedEndedAt: number | null;
-  /**
-   * The resolved target and launch policy (v1 worktree, v2 workspace-aware). Scratch always records
-   * one. Null for legacy alias-only worktree jobs, which dispatch from the config as before.
-   */
   launchSpec: LaunchSpec | null;
 }
 
@@ -402,8 +398,9 @@ export class JobStore {
     this.#logger = logger;
   }
 
-  get(id: string): Job | undefined {
-    const row = this.#db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as JobRow | undefined;
+  get(id: string, scope: JobScope = {}): Job | undefined {
+    const filter = scopeClause(scope);
+    const row = this.#db.prepare(`SELECT * FROM jobs WHERE id = ? ${filter.sql}`).get(id, ...filter.params) as JobRow | undefined;
     return row && toJob(row);
   }
 

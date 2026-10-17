@@ -17,7 +17,6 @@ export interface ModelSelection {
 /** Where a job's model comes from: the agent's selection, the gateway config, or T3's own project default (nothing sent). */
 export type ModelSource = 'explicit' | 'project' | 'host' | 't3_default';
 
-/** A root launch is permitted only for an operator-pinned T3 scratch alias. */
 const workspaceSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('scratch') }),
   z.strictObject({ kind: z.literal('worktree'), baseRef: z.string().min(1), branch: z.string().min(1) }),
@@ -42,7 +41,6 @@ const launchSpecSchema = z.union([
     v: z.literal(2), ...sharedSpec,
     hostId: z.string().min(1),
     workspace: workspaceSchema,
-    /** The host-only intention binds this alias; null for explicit aliases and project ids. */
     defaultProject: z.string().min(1).nullable(),
   }).refine((spec) => spec.workspace.kind !== 'scratch' || (spec.source === 'alias' && spec.alias !== null), {
     message: 'scratch launches require a configured alias',
@@ -51,7 +49,6 @@ const launchSpecSchema = z.union([
   }),
 ]);
 
-/** Version 1 always means worktree. Version 2 records workspace and host-default identity explicitly. */
 export type LaunchSpec = z.infer<typeof launchSpecSchema>;
 
 export function parseLaunchSpec(text: string | null): LaunchSpec | null {

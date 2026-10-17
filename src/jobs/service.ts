@@ -49,7 +49,6 @@ export interface Caller {
   scopes: readonly Scope[];
 }
 
-/** Exactly one of a configured alias or a host target; omit projectId for the host's scratch default. */
 export interface StartInput {
   project?: string | undefined;
   target?: { host: string; projectId?: string | undefined } | undefined;
@@ -286,25 +285,17 @@ export class JobService {
     throw new GatewayError('not_found', `No host "${hostId}". fleet_status lists the hosts you can use.`);
   }
 
-  /**
-   * Start a job. The host is authorized first, then the request id is checked: a repeated request returns
-   * its job (if the agent may still operate on that job's host), a reused one with different input is
-   * refused, all before anything is read from T3. An alias-only worktree request without a model
-   * selection is recorded at once and resolved at dispatch, as before. Scratch, target and selection
-   * requests resolve now against fresh catalogs and record their launch spec with the job.
-   */
   async start(caller: Caller, input: StartInput): Promise<{ job: Job; created: boolean }> {
     if ((input.project === undefined) === (input.target === undefined)) {
       throw new GatewayError('invalid_argument', 'Pass exactly one of project (a configured alias) or target ({ host } for no named project, or { host, projectId } from fleet_projects).');
     }
-    let project = input.project === undefined ? undefined : this.#projectFor(caller, input.project, 'operate');
-    const host = project ? this.#hostFor(caller, project.host, 'operate') : this.#hostFor(caller, input.target!.host, 'operate');
     const hash = startInputHash(input);
     const key = this.store.idempotencyKey(caller.clientId, 'work_start', input.requestId);
     // A retry returns the job of the first request, which the project config may since have moved to another host:
     // the agent must still be allowed to operate on the job's own host.
-    const replayed = key && this.store.get(key.jobId);
-    if (key && (!replayed || !permits(caller.scopes, 'operate', replayed.hostId))) {
+    const hosts = permittedHosts(caller.scopes, 'operate');
+    const replayed = key && this.store.get(key.jobId, hosts === 'all' ? {} : { hostIds: hosts });
+    if (key && !replayed) {
       throw new GatewayError(
         'insufficient_scope',
         `requestId "${input.requestId}" belongs to a job on a host this agent may not operate on. Use a new requestId for new work.`,
@@ -317,6 +308,8 @@ export class JobService {
       // A retry of a request made before the operator turned work_start off still gets its job back.
       return { job: replayed, created: false };
     }
+    let project = input.project === undefined ? undefined : this.#projectFor(caller, input.project, 'operate');
+    const host = project ? this.#hostFor(caller, project.host, 'operate') : this.#hostFor(caller, input.target!.host, 'operate');
     if (project?.workspaceMode === 'worktree' && input.target === undefined && input.modelSelection === undefined) {
       if (!project.allowWorkStart) throw this.#startDisabled(caller, project);
       const id = newJobId();

@@ -83,6 +83,47 @@ describe('projectless work', () => {
     assert.equal(fake.launches.length, 0);
   });
 
+  for (const workspace of ['scratch', 'worktree'] as const) {
+    for (const drift of ['removed', 'renamed', 'moved'] as const) {
+      test(`${workspace} alias replay survives an alias that was ${drift}`, async (t) => {
+        const { fake, gw, agent } = await startJobHarness(t, workspace === 'scratch' ? scratch : {});
+        const start = { project: 'pilot', task: 'Synthetic alias replay', requestId: `alias-${drift}` };
+        const first = await agent.call<{ job: ScratchJob }>('work_start', start);
+        const project = gw.services.config.projects[0]!;
+        if (drift === 'removed') gw.services.config.projects.splice(0, 1);
+        if (drift === 'renamed') project.alias = 'renamed-pilot';
+        if (drift === 'moved') project.host = 'other';
+        fake.calls.length = 0;
+        const replay = await agent.call<{ job: ScratchJob; created: boolean }>('work_start', start);
+        assert.deepEqual([replay.created, replay.job.jobId, replay.job.host], [false, first.job.jobId, 'main']);
+        assert.equal((await agent.callError('work_start', { ...start, task: 'Different synthetic task' })).code, 'request_id_conflict');
+        assert.deepEqual(fake.calls, [], 'replay and conflict do not resolve the current alias');
+        assert.equal(gw.services.jobs.store.list({ limit: 10 }).length, 1);
+      });
+    }
+  }
+
+  test('alias replay authorizes the stored host before a conflict or malformed job can be revealed', async (t) => {
+    const { fake, gw, agent } = await startJobHarness(t, scratch);
+    const start = { project: 'pilot', task: 'Synthetic restricted replay', requestId: 'restricted-replay' };
+    const { job } = await agent.call<{ job: ScratchJob }>('work_start', start);
+    gw.services.config.hosts.push({ ...gw.services.config.hosts[0]!, id: 'other' });
+    gw.services.config.projects[0]!.host = 'other';
+    const narrowed = { clientId: agent.clientId, scopes: ['host:other:read', 'host:other:operate'] as const };
+    fake.calls.length = 0;
+    for (const task of [start.task, 'Different synthetic task']) {
+      await assert.rejects(gw.services.jobs.start(narrowed, { ...start, task }), (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal('code' in error && error.code, 'insufficient_scope');
+        assert.doesNotMatch(error.message, new RegExp(`${job.jobId}|main|other`));
+        return true;
+      });
+    }
+    gw.services.db.prepare('UPDATE jobs SET launch_spec = ? WHERE id = ?').run('{', job.jobId);
+    await assert.rejects(gw.services.jobs.start(narrowed, start), { code: 'insufficient_scope' });
+    assert.deepEqual(fake.calls, []);
+  });
+
   for (const drift of ['workspace', 'project', 'host', 'disabled', 'runtime', 'ceiling', 'discovery'] as const) {
     test(`queued scratch rejects ${drift} policy drift before launch`, async (t) => {
       const { fake, gw, agent, tick } = await startJobHarness(t, scratch);
