@@ -67,10 +67,14 @@ describe('database', () => {
       'host_renewals',
       'idempotency_keys',
       'job_events',
+      'job_turns',
       'jobs',
       'oauth_clients',
       'refresh_tokens',
       'token_families',
+      'webhook_attempts',
+      'webhook_deliveries',
+      'webhook_subscriptions',
     ]);
   });
 
@@ -113,7 +117,7 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 8);
+    assert.equal(SCHEMA_VERSION, 9);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
       after.map(
@@ -383,7 +387,7 @@ CREATE TABLE jobs (
 
     const db = openDatabase(path);
     t.after(() => db.close());
-    assert.equal(schemaVersion(db), 8);
+    assert.equal(schemaVersion(db), SCHEMA_VERSION);
     assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
     const jobs = (db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[]).map(({ launch_spec, ...rest }) => [launch_spec, rest]);
     assert.deepEqual(jobs, jobsBefore.map((row) => [null, row]), 'existing jobs keep every column and have no launch spec');

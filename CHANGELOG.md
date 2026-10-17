@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Opt-in outbound job webhooks with private per-subscription auth headers, project/host/event filters, metadata-only default payloads, bounded optional excerpts, durable atomic snapshots and deliveries, stable event IDs, restart recovery, bounded HTTPS attempts and retries, and safe CLI diagnostics/test ping. Existing feed cursor behavior and polling fallback remain unchanged. Migration 9 adds outbox/attempt tables and durable exact-run gateway attribution; unknown turn origins remain unknown.
+- Watcher same-state events (`turn_finished`, `delegated_work_ended`) commit atomically with their observed job changes. Whole turns between polls generate an idle webhook. Config revisions cancel queued payloads for replaced routes; read-only commands never apply stale config.
+
 ## 0.1.8 (2026-10-16)
 
 ### Added

@@ -14,6 +14,8 @@ import { NEVER_EXPIRES } from '../oauth/tokens.ts';
 import { FATAL_SHUTDOWN_MS, guardProcess } from '../processErrors.ts';
 import { DAY, HOUR, MINUTE, parseDuration, systemClock } from '../time.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
+import { pingWebhook } from '../webhooks/sender.ts';
+import { WebhookStore } from '../webhooks/store.ts';
 import { runDoctor } from './doctor.ts';
 import { relative, shortTime, table } from './format.ts';
 
@@ -30,8 +32,8 @@ export interface CliIo {
 const USAGE = `Usage: ${GATEWAY_NAME} <command> [options]
 
 Commands:
-  serve                     Run the gateway (HTTP server, job engine, credential renewal and,
-                            when dashboard.enabled, the read-only operator dashboard)
+  serve                     Run the gateway (HTTP server, job engine, credential renewal,
+                            configured webhooks and optional read-only dashboard)
   pair [--ttl 15m]          Mint a one-time approval code for connecting an agent
   clients list              List registered agent clients
   clients token --name <name> [--access operate|read] [--hosts all|<id>,<id>] [--ttl 1y|never]
@@ -48,6 +50,10 @@ Commands:
                             Register an existing T3 thread as a standing job agents can drive
   jobs list [--all]         List open jobs (--all: finished ones too)
   jobs release <jobId>      Stop following a standing job; the T3 thread is left as it is
+  webhooks list             Show configured subscriptions and safe delivery counts (offline)
+  webhooks attempts <id> [--limit 20]
+                            Show recent delivery attempts, codes only (offline)
+  webhooks ping <id>         Send a synthetic test with configured URL and authentication
   doctor                    Check config, permissions, database, hosts, public URL and dashboard
 
 Options:
@@ -370,6 +376,32 @@ async function jobs(paths: Paths, io: CliIo, action: string | undefined, args: s
   throw new UsageError('Use: jobs adopt <project> <threadId> [--title <text>] | jobs list [--all] | jobs release <jobId>');
 }
 
+async function webhooks(paths: Paths, io: CliIo, action: string | undefined, id: string | undefined, limitText?: string): Promise<number> {
+  if (!['list', 'attempts', 'ping'].includes(action ?? '') || (action !== 'list' && !id) || (action === 'list' && id)) {
+    throw new UsageError('Use: webhooks list | webhooks attempts <id> [--limit 20] | webhooks ping <id>');
+  }
+  const limit = limitText === undefined ? 20 : Number(limitText);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new UsageError('--limit must be 1 to 100');
+  const storage = openStorage(paths.dataDir);
+  try {
+    const store = new WebhookStore(storage.db, systemClock);
+    if (action === 'attempts') {
+      io.out(JSON.stringify(store.diagnostics(id, limit), null, 2));
+      return 0;
+    }
+    const config = loadConfig(paths.configPath);
+    if (action === 'list') {
+      io.out(JSON.stringify({ configured: config.webhooks.subscriptions.map(({ id, enabled }) => ({ id, enabled })), ...store.diagnostics() }, null, 2));
+      return 0;
+    }
+    const subscription = config.webhooks.subscriptions.find((s) => s.id === id);
+    if (!subscription) throw new GatewayError('not_found', 'Webhook subscription is not configured.');
+    const result = await pingWebhook(subscription, paths.dataDir, store, systemClock);
+    io.out(JSON.stringify(result));
+    return result.outcome === 'delivered' ? 0 : 1;
+  } finally { storage.db.close(); }
+}
+
 async function doctor(paths: Paths, io: CliIo): Promise<number> {
   let config: GatewayConfig;
   try {
@@ -404,6 +436,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         hosts: { type: 'string' },
         title: { type: 'string' },
         all: { type: 'boolean' },
+        limit: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -428,6 +461,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       ['hosts', values.hosts, 'clients token', command === 'clients' && action === 'token'],
       ['title', values.title, 'jobs adopt', command === 'jobs' && action === 'adopt'],
       ['all', values.all, 'jobs list', command === 'jobs' && action === 'list'],
+      ['limit', values.limit, 'webhooks attempts', command === 'webhooks' && action === 'attempts'],
     ] as const;
     for (const [option, value, owner, allowed] of optionCommands) {
       if (value !== undefined && !allowed) throw new UsageError(`--${option} is only for ${owner}`);
@@ -452,6 +486,8 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         return throttle(paths, io, action);
       case 'jobs':
         return await jobs(paths, io, action, args, { title: values.title, all: values.all });
+      case 'webhooks':
+        return await webhooks(paths, io, action, id, values.limit);
       case 'doctor':
         return await doctor(paths, io);
       default:

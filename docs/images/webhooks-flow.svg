@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="790" viewBox="0 0 1200 790" role="img" aria-labelledby="title desc">
+  <title id="title">T3 Fleet Gateway: from a job event to an agent wake-up</title>
+  <desc id="desc">The gateway observes T3, saves a job event and notification atomically in SQLite, then sends an authenticated HTTPS webhook. A receiver deduplicates the event ID and reads details through MCP. Failed deliveries retry with the same ID for a bounded window, survive restarts, and retain safe diagnostics. The existing work_feed cursor remains the catch-up path.</desc>
+  <defs>
+    <linearGradient id="paper" x2="1" y2="1"><stop stop-color="#fbf7ef"/><stop offset="1" stop-color="#f3ece0"/></linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 9 5 1 9" fill="none" stroke="#bd512b" stroke-width="1.8" stroke-linejoin="round"/></marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #27251f; }
+      .eyebrow { font-size: 17px; font-weight: 700; letter-spacing: 2px; fill: #8a5b42; }
+      .heading { font-size: 42px; font-weight: 700; letter-spacing: -1.5px; }
+      .sub { font-size: 22px; fill: #6a6258; }
+      .card { fill: #fffdf8; stroke: #ddd3c3; stroke-width: 1.5; }
+      .step { font-size: 17px; font-weight: 700; fill: #bd512b; }
+      .name { font-size: 27px; font-weight: 650; letter-spacing: -.6px; }
+      .body { font-size: 20px; fill: #5f594f; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 18px; }
+      .small { font-size: 18px; fill: #6a6258; }
+      .line { stroke: #bd512b; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1200" height="790" rx="24" fill="url(#paper)"/>
+  <text class="eyebrow" x="60" y="54">T3 FLEET GATEWAY / OUTBOUND WEBHOOKS</text>
+  <text class="heading" x="60" y="110">Work moves. Your bot hears.</text>
+  <text class="sub" x="60" y="149">A small, durable wake-up. The full conversation stays in T3.</text>
+
+  <rect class="card" x="60" y="190" width="240" height="260" rx="18"/>
+  <text class="step" x="82" y="225">01 / OBSERVE</text>
+  <text class="name" x="82" y="265">T3 changes state</text>
+  <text class="body" x="82" y="302">The existing watcher</text>
+  <text class="body" x="82" y="330">sees a job finish, fail,</text>
+  <text class="body" x="82" y="358">or ask for input.</text>
+  <rect x="82" y="387" width="196" height="39" rx="9" fill="#e5eee4"/>
+  <text class="mono" x="100" y="413" style="fill:#3e6145">running → idle</text>
+
+  <path class="line" d="M305 315 H334"/>
+  <rect class="card" x="340" y="190" width="240" height="260" rx="18"/>
+  <text class="step" x="362" y="225">02 / SAVE TOGETHER</text>
+  <text class="name" x="362" y="265">One transaction</text>
+  <rect x="362" y="288" width="196" height="48" rx="8" fill="#f0e9dd"/>
+  <text class="mono" x="377" y="319">job event #417</text>
+  <rect x="362" y="345" width="196" height="48" rx="8" fill="#f0e9dd"/>
+  <text class="mono" x="377" y="376">webhook outbox</text>
+  <text class="small" x="362" y="426">Stable ID + snapshot</text>
+
+  <path class="line" d="M585 315 H614"/>
+  <rect class="card" x="620" y="190" width="240" height="260" rx="18"/>
+  <text class="step" x="642" y="225">03 / SEND ASYNC</text>
+  <text class="name" x="642" y="265">HTTPS POST</text>
+  <text class="body" x="642" y="302">Selected events only.</text>
+  <text class="body" x="642" y="330">Your auth header.</text>
+  <text class="body" x="642" y="358">10-second deadline.</text>
+  <rect x="642" y="387" width="196" height="39" rx="9" fill="#f6e4d8"/>
+  <text class="small" x="658" y="413" style="fill:#924523">Jobs keep moving</text>
+
+  <path class="line" d="M865 315 H894"/>
+  <rect x="900" y="190" width="240" height="260" rx="18" fill="#29382e"/>
+  <text class="step" x="922" y="225" style="fill:#f0b58e">04 / WAKE + READ</text>
+  <text class="name" x="922" y="265" style="fill:#fff9ec">Grok routine</text>
+  <text class="body" x="922" y="302" style="fill:#d5dfd4">Deduplicate eventId.</text>
+  <text class="body" x="922" y="330" style="fill:#d5dfd4">Read detail via MCP:</text>
+  <text class="mono" x="922" y="373" style="fill:#fff9ec">work_status</text>
+  <text class="mono" x="922" y="404" style="fill:#fff9ec">work_messages</text>
+  <text class="small" x="900" y="479">Or any webhook-capable receiver</text>
+
+  <rect class="card" x="60" y="515" width="520" height="130" rx="16"/>
+  <text class="name" x="84" y="552" style="font-size:25px">Catch up through the existing feed</text>
+  <text class="body" x="84" y="588">work_feed uses the same event sequence.</text>
+  <text class="body" x="84" y="618">Resume from your last processed feed cursor.</text>
+
+  <rect class="card" x="620" y="515" width="520" height="130" rx="16"/>
+  <text class="name" x="644" y="552" style="font-size:25px">No acknowledgement? Retry.</text>
+  <text class="body" x="644" y="588">Same ID. Same payload. Backoff for up to 1h.</text>
+  <text class="body" x="644" y="618">Survives restarts; delivery attempts are recorded.</text>
+  <path d="M740 450 V495" stroke="#bd512b" stroke-width="2" fill="none" stroke-dasharray="4 5"/>
+  <path d="M460 450 V495" stroke="#ada08d" stroke-width="2" fill="none" stroke-dasharray="4 5"/>
+
+  <text class="mono" x="60" y="685" style="font-size:18px">needs_input · idle · failed · cancelled · delegated_work_ended</text>
+  <line x1="60" x2="1140" y1="707" y2="707" stroke="#d9cdbd"/>
+  <text class="small" x="60" y="739">Opt-in subscriptions · Host/project filters · Excerpts off by default · At-least-once delivery</text>
+  <text x="60" y="765" style="font-size:16px;fill:#817667">Delivery follows gateway observation; the T3 watcher interval still applies. Sequence #417 is illustrative.</text>
+</svg>

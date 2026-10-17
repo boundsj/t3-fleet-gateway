@@ -132,6 +132,47 @@ npm run dashboard:demo -- --scenario host-down    # or healthy, auth-issue, empt
 
 **Turn it on for real** with a `dashboard` block in your config (`"enabled": true`, its own loopback port, `3791` by default) and restart the gateway. It runs inside `serve` on that listener, never on the public MCP URL: publish it to your tailnet only, for example with `tailscale serve` on a path (never Funnel), and list the host name your browser uses in `allowedHosts`. `doctor` then checks that it answers and that the public URL does not serve it. Steps: [docs/operations.md](docs/operations.md#operator-dashboard); fields: [docs/configuration.md](docs/configuration.md#dashboard).
 
+## Wake a routine with job webhooks
+
+![A job event is saved with its feed entry, delivered over HTTPS, and wakes a routine; retries and feed catch-up cover interruptions.](docs/images/webhooks-flow.svg)
+
+Outbound webhooks are opt-in. They POST a small event when a job becomes `needs_input`, `idle`, `failed` or `cancelled`, or when its delegated work ends without a new turn. `running` is an optional event. The gateway needs outbound HTTPS access to the routine; this adds no inbound endpoint or dashboard control.
+
+For a Grok Bot routine with a webhook trigger, copy **that routine's URL, sender-key header name and sender key** from Grok. The names below are placeholders: use the exact header name Grok supplies. Store the key as the contents of `grok-routine.key` in the gateway's private data directory (owner-only `0600`, directory `0700`), using a private editor or stdin, never a command-line argument. A final newline is accepted. Add this block to your private config:
+
+```json
+"webhooks": {
+  "subscriptions": [{
+    "id": "grok-routine",
+    "enabled": true,
+    "url": "https://receiver.example/routines/REPLACE_WITH_ROUTINE_URL",
+    "auth": { "header": "X-Sender-Key", "secretFile": "grok-routine.key" },
+    "projects": ["pilot"],
+    "hosts": ["main"],
+    "events": ["needs_input", "idle", "failed", "cancelled", "delegated_work_ended"],
+    "excerptChars": 0
+  }]
+}
+```
+
+Treat the URL as a secret too: keep the config private and out of version control. Test the routine without a job or worker content, then restart `serve` to apply the configuration:
+
+```sh
+node bin/t3-fleet-gateway.js webhooks ping grok-routine
+node bin/t3-fleet-gateway.js webhooks list
+node bin/t3-fleet-gateway.js webhooks attempts grok-routine --limit 20
+```
+
+Each event carries a stable `eventId`, UTC `timestamp`, numeric `feedSequence` and equivalent string `feedCursor`, job/project/host IDs, title, state and previous state, T3 thread link, standing/delegation flags, and `turnInitiator`. Only confirmed gateway-started run IDs carry the actual caller's client ID. Other turns report `unknown`: T3 does not provide an authoritative operator-origin signal. `idle` says a turn ended; check `waitingOnDelegatedWork` before sending more work.
+
+**Routine instructions:** save/deduplicate `eventId`, call `work_status` for the current state and questions, and `work_messages` for the full reply when needed. Keep the existing scheduled `work_feed` poll as fallback. Catch up from the **last contiguous saved `work_feed.nextCursor`**, process every page, then persist its next cursor. Do not replace that cursor with the largest webhook sequence: deliveries can arrive late, duplicated or out of order, and subscriptions filter out some feed events. Never skip an unseen event merely because a larger sequence already arrived. Use the feed sequence to correlate a webhook with a feed event; deduplicate separately from advancing the feed cursor. Reading details still requires the routine's normal MCP grant.
+
+Payloads omit worker excerpts by default. An explicit `excerptChars` from 1 to 500 includes only that bounded worker excerpt and `excerptTruncated`; no task body, questions or transcript are added. Worker output can contain arbitrary secrets that cannot be reliably redacted, so enable excerpts only for a receiver trusted to read them. Job titles are always included and may be derived from the task's first line; use a non-sensitive title.
+
+Pending events survive restarts. Attempts have a 10-second total deadline and retry with exponential backoff for up to one hour. Delivery is at least once; a receiver may accept an attempt whose acknowledgement never reaches the gateway. Redirects are refused, including redirects to the same host. Config changes take effect on restart: new subscriptions do not replay history; disabling, removing or changing a subscription cancels its old queued deliveries. A request already sent may still arrive. Use feed catch-up for any gap. Diagnostic commands expose only IDs, counts, timestamps, HTTP status and fixed outcome codes; they never show URLs, auth headers or payloads. See [configuration](docs/configuration.md#webhooks) and [design](docs/design.md#outbound-job-webhooks) for limits and recovery details.
+
+**Try it as a developer:** `npm run webhooks:smoke` exercises real HTTPS delivery, a failed receiver and process crashes using temporary data and a fake T3 host. It needs Node 24+ and OpenSSL, takes about 90 seconds, and does not use your installed gateway. [Reproduce the checks and read the evidence](docs/evidence/webhooks.md).
+
 ## Setup
 
 Requirements: Node.js 24 or newer (the latest Node 24 or 26 release is recommended), a T3 Code server, and the `t3` CLI on the machine that can mint pairing codes for it.

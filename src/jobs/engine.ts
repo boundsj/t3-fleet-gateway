@@ -583,12 +583,17 @@ export class JobEngine {
           ? { lastErrorCode: null, lastErrorMessage: null }
           : {}),
     };
-    // Both writes are guarded by the state the observation started from: an agent action that
-    // landed while T3 was being read (a follow-up, an answer, a cancel) wins over this observation.
+    // The original snapshot guards both paths: an agent action or another watcher that landed
+    // while T3 was being read wins, even when it kept the same state. Row and event commit together.
     if (seen.state === job.state) {
-      if (!store.transition(job.id, { from: [job.state], to: job.state, changes })) return;
-      if (seen.anotherTurnFinished) store.appendEvent(job.id, 'turn_finished', 'idle', { reason: seen.reason });
-      if (delegatedEnded) store.appendEvent(job.id, 'delegated_work_ended', 'idle', { reason: 'no_turn_started' });
+      if (!store.transition(job.id, {
+        from: [job.state], to: job.state, expected: job, changes,
+        turnRunId: read.thread.activeRunId ?? read.thread.latestRunId,
+        events: [
+          ...(seen.anotherTurnFinished ? [{ type: 'turn_finished', detail: { reason: seen.reason } }] : []),
+          ...(delegatedEnded ? [{ type: 'delegated_work_ended', detail: { reason: 'no_turn_started' } }] : []),
+        ],
+      })) return;
       // Still running after a cancel: the interrupt may never have arrived, or a new run started
       // since (a queued follow-up, or someone in T3). Interrupt the run that is active now.
       if (job.state === 'cancel_requested') {
@@ -599,6 +604,8 @@ export class JobEngine {
     store.transition(job.id, {
       from: [job.state],
       to: seen.state,
+      expected: job,
+      turnRunId: read.thread.activeRunId ?? read.thread.latestRunId,
       changes,
       detail: { reason: seen.reason, ...(seen.errorCode ? { code: seen.errorCode } : {}) },
     });
@@ -666,10 +673,12 @@ export class JobEngine {
       return;
     }
     const changes = { ...rest, ...(threadLink ? { threadLink } : {}), lastErrorCode: null, lastErrorMessage: null };
-    if (store.transition(jobId, { from: ['dispatching', 'unknown'], to: 'running', changes, detail: { reason: via } })) return;
+    const gatewayTurn = via === 'launched' && thread.lastRunId !== null
+      ? { runId: thread.lastRunId, clientId: store.require(jobId).clientId } : undefined;
+    if (store.transition(jobId, { from: ['dispatching', 'unknown'], to: 'running', changes, gatewayTurn, detail: { reason: via } })) return;
     const job = store.get(jobId);
     if (job?.state !== 'cancel_requested') return;
-    store.update(jobId, changes);
+    store.transition(jobId, { from: ['cancel_requested'], to: 'cancel_requested', changes, gatewayTurn });
     await this.#interrupt(jobId, job.hostId, { threadId: thread.threadId, runId: thread.lastRunId }, registry);
   }
 
