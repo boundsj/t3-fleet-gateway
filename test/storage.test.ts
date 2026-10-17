@@ -6,6 +6,7 @@ import { checkDataDirPermissions, openDataDir } from '../src/dataDir.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { migrate, openDatabase, SCHEMA_VERSION, schemaVersion } from '../src/db/database.ts';
 import { MIGRATIONS } from '../src/db/migrations.ts';
+import type { LaunchSpec } from '../src/jobs/launchSpec.ts';
 import { JobStore } from '../src/jobs/store.ts';
 import { silentLogger } from '../src/log.ts';
 import { tempDir } from './helpers/tmp.ts';
@@ -113,7 +114,7 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 8);
+    assert.equal(SCHEMA_VERSION, 10);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
       after.map(
@@ -383,7 +384,7 @@ CREATE TABLE jobs (
 
     const db = openDatabase(path);
     t.after(() => db.close());
-    assert.equal(schemaVersion(db), 8);
+    assert.equal(schemaVersion(db), SCHEMA_VERSION);
     assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
     const jobs = (db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[]).map(({ launch_spec, ...rest }) => [launch_spec, rest]);
     assert.deepEqual(jobs, jobsBefore.map((row) => [null, row]), 'existing jobs keep every column and have no launch spec');
@@ -391,7 +392,7 @@ CREATE TABLE jobs (
     assert.deepEqual([store.require('jobqueue001').launchSpec, store.require('jobstand001').launchSpec, store.require('jobstand001').standing], [null, null, true]);
     const spec = {
       v: 1 as const, projectId: 'project-9', projectName: 'Synthetic discovered', source: 'discovered' as const, alias: null,
-      baseRef: 'main', runtimeMode: 'approval-required', model: { source: 'explicit' as const, selection: { instanceId: 'synthetic-provider', model: 'synthetic-model' } },
+      baseRef: 'main', runtimeMode: 'approval-required' as const, model: { source: 'explicit' as const, selection: { instanceId: 'synthetic-provider', model: 'synthetic-model' } },
     };
     store.create({
       id: 'jobspec0001', clientId: 'client-1', requestId: 'request-2', inputHash: 'h2', projectAlias: '@main/project-9', hostId: 'main',
@@ -405,6 +406,37 @@ CREATE TABLE jobs (
     t.after(() => fresh.close());
     const schema = (target: typeof db) => target.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name").all();
     assert.deepEqual(schema(db), schema(fresh));
+  });
+
+  test('migration 9 preserves a populated v8 ledger and older builds reject v2 scratch plans', (t) => {
+    const db = new DatabaseSync(join(tempDir(t), 'test.db'));
+    t.after(() => db.close());
+    migrate(db, MIGRATIONS.slice(0, 8));
+    const store = new JobStore(db, () => 1_000, silentLogger);
+    const v1 = {
+      v: 1, projectId: 'project-1', projectName: 'Synthetic worktree', source: 'alias', alias: 'pilot', baseRef: 'main',
+      runtimeMode: 'auto', model: { source: 't3_default', selection: null },
+    } satisfies LaunchSpec;
+    const job = { clientId: 'c', requestId: 'r', inputHash: 'h', projectAlias: 'pilot', hostId: 'main', task: 'Synthetic', title: 'Synthetic', branch: 'fleet/wt', runtimeMode: 'auto' };
+    store.create({ ...job, id: 'legacy0001', launchSpec: v1 });
+    store.create({ ...job, id: 'legacy0002', requestId: 'r2' });
+    db.prepare("INSERT INTO host_credentials VALUES ('main', 'synthetic-client', 'synthetic-token', 'orchestration', 'full-access', 1, 10000, 1)").run();
+    const tables = ['jobs', 'job_events', 'idempotency_keys', 'host_credentials'];
+    const before = tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    migrate(db);
+    assert.equal(schemaVersion(db), 10);
+    assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
+    assert.deepEqual(store.require('legacy0001').launchSpec, v1);
+    assert.equal(store.require('legacy0002').launchSpec, null);
+    const v2 = {
+      v: 2, projectId: 'scratch-id', projectName: 'Synthetic scratch', source: 'alias', alias: 'scratch', hostId: 'main',
+      workspace: { kind: 'scratch' }, defaultProject: 'scratch', runtimeMode: 'auto', model: { source: 'host', selection: { model: 'synthetic-model' } },
+    } satisfies LaunchSpec;
+    store.create({ ...job, id: 'scratch001', requestId: 'r3', branch: '', t3ProjectId: 'scratch-id', launchSpec: v2 });
+    assert.deepEqual(store.require('scratch001').launchSpec, v2);
+    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 8)), /schema version 10 is newer than this build supports \(8\)/);
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+    assert.equal(db.prepare('PRAGMA integrity_check').get()?.integrity_check, 'ok');
   });
 
   test('migration 2 names a missing column it cannot fill and leaves the database at version 1', (t) => {

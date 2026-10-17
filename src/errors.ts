@@ -9,6 +9,7 @@ export type ErrorCode =
   | 'host_not_found'
   | 'host_not_enrolled'
   | 'host_unreachable'
+  | 'workspace_probe_unavailable'
   | 't3_unauthorized'
   | 't3_timeout'
   | 't3_response_lost'

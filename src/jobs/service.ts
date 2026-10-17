@@ -1,3 +1,4 @@
+import { probeWorkspace, type WorkspaceSelection } from './workspace.ts';
 import { configuredModel, type GatewayConfig, type HostConfig, type ProjectConfig } from '../config.ts';
 import { sha256Hex } from '../crypto.ts';
 import { describeError, GatewayError } from '../errors.ts';
@@ -49,10 +50,10 @@ export interface Caller {
   scopes: readonly Scope[];
 }
 
-/** Exactly one of `project` (a configured alias) or `target` (a T3 project by id on a host with discovery enabled). */
 export interface StartInput {
+  workspace?: WorkspaceSelection;
   project?: string | undefined;
-  target?: { host: string; projectId: string } | undefined;
+  target?: { host: string; projectId?: string | undefined } | undefined;
   /** An explicit provider, model and options from fleet_models; without it the configured defaults apply. */
   modelSelection?: ModelSelection | undefined;
   task: string;
@@ -159,13 +160,19 @@ export function inputHash(tool: string, input: Record<string, unknown>): string 
  * changed target or selection under the same request id conflicts.
  */
 export function startInputHash(input: StartInput): string {
-  if (input.target === undefined && input.modelSelection === undefined) {
+  if (input.target === undefined && input.modelSelection === undefined && input.workspace === undefined) {
     return inputHash('work_start', { project: input.project, task: input.task, title: input.title });
   }
+  const workspace = input.workspace?.type === 'worktree' ? {
+    type: input.workspace.type,
+    ...(input.workspace.baseRef === undefined ? {} : { baseRef: input.workspace.baseRef }),
+    ...(input.workspace.startFromOrigin === undefined ? {} : { startFromOrigin: input.workspace.startFromOrigin }),
+  } : input.workspace === undefined ? undefined : { type: input.workspace.type };
   return inputHash('work_start', {
     project: input.project ?? null,
-    target: input.target === undefined ? null : { host: input.target.host, projectId: input.target.projectId },
+    target: input.target === undefined ? null : { host: input.target.host, ...(input.target.projectId === undefined ? {} : { projectId: input.target.projectId }) },
     modelSelection: input.modelSelection === undefined ? null : canonicalSelection(input.modelSelection),
+    ...(workspace === undefined ? {} : { workspace }),
     task: input.task,
     title: input.title,
   });
@@ -286,25 +293,18 @@ export class JobService {
     throw new GatewayError('not_found', `No host "${hostId}". fleet_status lists the hosts you can use.`);
   }
 
-  /**
-   * Start a job. The host is authorized first, then the request id is checked: a repeated request returns
-   * its job (if the agent may still operate on that job's host), a reused one with different input is
-   * refused, all before anything is read from T3. An alias-only request without a model selection is
-   * recorded at once and resolved at dispatch, as before. A request with a target or a model selection is
-   * resolved now against the host's catalogs (read-only), and its launch spec is recorded with the job.
-   */
   async start(caller: Caller, input: StartInput): Promise<{ job: Job; created: boolean }> {
     if ((input.project === undefined) === (input.target === undefined)) {
-      throw new GatewayError('invalid_argument', 'Pass exactly one of project (a configured alias) or target ({ host, projectId } from fleet_projects).');
+      throw new GatewayError('invalid_argument', 'Pass exactly one of project (a configured alias) or target ({ host } for no named project, or { host, projectId } from fleet_projects).');
     }
-    const project = input.project === undefined ? undefined : this.#projectFor(caller, input.project, 'operate');
-    const host = project ? this.#hostFor(caller, project.host, 'operate') : this.#hostFor(caller, input.target!.host, 'operate');
     const hash = startInputHash(input);
     const key = this.store.idempotencyKey(caller.clientId, 'work_start', input.requestId);
     // A retry returns the job of the first request, which the project config may since have moved to another host:
     // the agent must still be allowed to operate on the job's own host.
-    const replayed = key && this.store.get(key.jobId);
-    if (key && (!replayed || !permits(caller.scopes, 'operate', replayed.hostId))) {
+    const hosts = permittedHosts(caller.scopes, 'operate');
+    const scope: JobScope = hosts === 'all' ? {} : { hostIds: hosts };
+    const replayed = key && this.store.get(key.jobId, scope);
+    if (key && !replayed) {
       throw new GatewayError(
         'insufficient_scope',
         `requestId "${input.requestId}" belongs to a job on a host this agent may not operate on. Use a new requestId for new work.`,
@@ -317,29 +317,24 @@ export class JobService {
       // A retry of a request made before the operator turned work_start off still gets its job back.
       return { job: replayed, created: false };
     }
-    if (project && input.target === undefined && input.modelSelection === undefined) {
-      if (!project.allowWorkStart) throw this.#startDisabled(caller, project);
-      const id = newJobId();
-      const result = this.store.create({
-        id,
-        clientId: caller.clientId,
-        requestId: input.requestId,
-        inputHash: hash,
-        projectAlias: project.alias,
-        hostId: project.host,
-        task: input.task,
-        title: threadTitle(id, input.task, input.title),
-        branch: `${project.branchPrefix}${id}`,
-        runtimeMode: project.runtimeMode,
-      });
-      if (result.created) this.wake();
-      return result;
-    }
-    if (!host.discovery.enabled) {
+    let project = input.project === undefined ? undefined : this.#projectFor(caller, input.project, 'operate');
+    const host = project ? this.#hostFor(caller, project.host, 'operate') : this.#hostFor(caller, input.target!.host, 'operate');
+    if (project && !project.allowWorkStart) throw this.#startDisabled(caller, project);
+    const hostOnly = input.target !== undefined && input.target.projectId === undefined;
+    if (!host.discovery.enabled && (input.target !== undefined || input.modelSelection !== undefined)) {
       throw new GatewayError(
         'discovery_disabled',
         `Host ${host.id} has discovery disabled: work_start there takes a configured project alias (fleet_status lists them) and no target or modelSelection.`,
       );
+    }
+    if (hostOnly) {
+      if (host.defaultProject === undefined) {
+        throw new GatewayError('not_found', `Host ${host.id} has no default scratch project. Ask the operator to configure defaultProject.`);
+      }
+      project = this.#projectFor(caller, host.defaultProject, 'operate');
+      if (project.host !== host.id || project.workspaceMode !== 'scratch') {
+        throw new GatewayError('invalid_argument', `Host ${host.id} defaultProject must be a scratch alias on that host.`);
+      }
     }
     const { spec, branchPrefix } = await this.#resolveLaunch(caller, host, project, input);
     const id = newJobId();
@@ -352,11 +347,11 @@ export class JobService {
       hostId: host.id,
       task: input.task,
       title: threadTitle(id, input.task, input.title),
-      branch: `${branchPrefix}${id}`,
+      branch: spec.v !== 1 && spec.workspace.kind !== 'worktree' ? '' : `${branchPrefix}${id}`,
       runtimeMode: spec.runtimeMode,
       t3ProjectId: spec.projectId,
       launchSpec: spec,
-    });
+    }, scope);
     if (result.created) this.wake();
     return result;
   }
@@ -401,7 +396,7 @@ export class JobService {
       policy = project;
       alias = project.alias;
     } else {
-      const mapping = mappings.get(input.target!.projectId);
+      const mapping = input.target?.projectId === undefined ? undefined : mappings.get(input.target.projectId);
       if (!mapping) {
         throw new GatewayError('not_found', `Host ${host.id} has no T3 project ${JSON.stringify(input.target!.projectId)}. fleet_projects lists them.`);
       }
@@ -449,16 +444,42 @@ export class JobService {
           '({ instanceId, model, options? } from fleet_models).',
       );
     }
+    const scratch = alias === null ? undefined : this.#config.projects.find((candidate) => candidate.alias === alias && candidate.workspaceMode === 'scratch');
+    const common = {
+      projectId: found.id,
+      projectName: found.name,
+      source: alias === null ? 'discovered' : 'alias',
+      alias,
+      runtimeMode: policy.runtimeMode,
+      model,
+    } satisfies Pick<LaunchSpec, 'projectId' | 'projectName' | 'source' | 'alias' | 'runtimeMode' | 'model'>;
+    if (scratch && input.workspace !== undefined) throw new GatewayError('invalid_argument', 'Scratch projects do not accept a workspace override.');
+    const selection = input.workspace ?? { type: 'auto' };
+    if (scratch) {
+      return {
+        spec: {
+          v: 2,
+          ...common,
+          hostId: host.id,
+          workspace: { kind: 'scratch' },
+          defaultProject: input.target !== undefined && input.target.projectId === undefined ? scratch.alias : null,
+        },
+        branchPrefix: policy.branchPrefix,
+      };
+    }
+    const inspection = await probeWorkspace(host, this.#registry, found.id, selection);
     return {
       spec: {
-        v: 1,
-        projectId: found.id,
-        projectName: found.name,
-        source: alias === null ? 'discovered' : 'alias',
-        alias,
-        baseRef: policy.baseRef,
-        runtimeMode: policy.runtimeMode,
-        model,
+        v: 3,
+        ...common,
+        hostId: host.id,
+        selection,
+        inspection,
+        workspace: selection.type === 'root' || inspection.kind === 'root' ? { kind: 'root' } : {
+          kind: 'worktree',
+          baseRef: selection.type === 'worktree' ? selection.baseRef ?? 'main' : 'main',
+          startFromOrigin: selection.type === 'worktree' ? selection.startFromOrigin ?? true : true,
+        },
       },
       branchPrefix: policy.branchPrefix,
     };

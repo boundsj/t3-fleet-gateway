@@ -68,10 +68,6 @@ export interface Job {
    * starting: the `delegated_work_ended` event. Cleared when the job changes state.
    */
   delegatedEndedAt: number | null;
-  /**
-   * What a job started through a direct target or an explicit model selection resolved to (migration 8):
-   * the dispatcher launches from it. Null for alias-only jobs, which dispatch from the config as before.
-   */
   launchSpec: LaunchSpec | null;
 }
 
@@ -402,8 +398,9 @@ export class JobStore {
     this.#logger = logger;
   }
 
-  get(id: string): Job | undefined {
-    const row = this.#db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as JobRow | undefined;
+  get(id: string, scope: JobScope = {}): Job | undefined {
+    const filter = scopeClause(scope);
+    const row = this.#db.prepare(`SELECT * FROM jobs WHERE id = ? ${filter.sql}`).get(id, ...filter.params) as JobRow | undefined;
     return row && toJob(row);
   }
 
@@ -488,17 +485,24 @@ export class JobStore {
    * Insert a queued job with its first event, or return the existing job for a repeated request.
    * The same (client, requestId) for work_start with a different input is rejected.
    */
-  create(job: NewJob): { job: Job; created: boolean } {
+  create(job: NewJob, scope: JobScope = {}): { job: Job; created: boolean } {
     return transaction(this.#db, () => {
       const existing = this.idempotencyKey(job.clientId, 'work_start', job.requestId);
       if (existing) {
+        const replayed = this.get(existing.jobId, scope);
+        if (!replayed) {
+          throw new GatewayError(
+            'insufficient_scope',
+            `requestId "${job.requestId}" belongs to a job on a host this agent may not operate on. Use a new requestId for new work.`,
+          );
+        }
         if (existing.inputHash !== job.inputHash) {
           throw new GatewayError(
             'request_id_conflict',
             `requestId "${job.requestId}" was already used for a different request. Use a new requestId for new work.`,
           );
         }
-        return { job: this.require(existing.jobId), created: false };
+        return { job: replayed, created: false };
       }
       const now = this.#clock();
       this.#db

@@ -218,7 +218,7 @@ interface Session {
 export class FakeT3 {
   readonly serverVersion: string;
   tokenLifetimeSeconds: number;
-  readonly projects: { id: string; title: string; deletedAt: string | null; defaultModelSelection: Record<string, unknown> | null }[];
+  readonly projects: { workspaceRoot?: string; id: string; title: string; deletedAt: string | null; defaultModelSelection: Record<string, unknown> | null }[];
   /** The providers, models and options this host advertises in orchestrator_capabilities; tests change it between calls. */
   providers: FakeProvider[] = syntheticProviders();
   /** When set, t3_project_list answers every page with this same nextCursor (a catalog that never converges). */
@@ -663,7 +663,7 @@ export class FakeT3 {
     tool('t3_project_list', projectListInput, ({ cursor, limit }) => {
       const start = cursor ?? 0;
       const size = limit ?? 50;
-      const page = this.projects.slice(start, start + size);
+      const page = this.projects.slice(start, start + size).map((project) => ({ workspaceRoot: `/synthetic/${project.id}`, ...project }));
       if (this.projectListStuckCursor !== null) return { projects: page, nextCursor: this.projectListStuckCursor };
       return { projects: page, nextCursor: start + size < this.projects.length ? start + size : null };
     });
