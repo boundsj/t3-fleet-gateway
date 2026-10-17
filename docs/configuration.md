@@ -186,7 +186,7 @@ Unreleased: `webhooks: { "subscriptions": [] }` is the default. Configure at mos
 | `enabled` | Default `false`. Disabled entries enqueue/send nothing; an explicit test ping is still allowed. |
 | `url` | Absolute HTTPS destination, up to 4,096 characters, no embedded credentials or fragment. Treat it as secret. No redirects are followed. |
 | `auth.header` | Exact HTTP authentication header name supplied by the receiver, such as `X-Sender-Key` or `Authorization`. Transport/control headers (`Host`, framing, connection, proxy headers, etc.) are refused. |
-| `auth.secretFile` | A single filename in the gateway data directory, owned by the current user and readable only by that user (`0600`), never a symlink. Contents are the header value, up to 8 KiB; one final newline is removed. Empty/missing/invalid secrets fail closed. |
+| `auth.secretFile` | A regular file in the gateway data directory, named by a single filename, owned by the current user and readable only by that user (`0600`), never a symlink or FIFO. Contents are the header value, up to 8 KiB; one final newline is removed. Empty/missing/invalid secrets fail closed. |
 | `projects`, `hosts` | Optional nonempty lists; OR within each, AND between them. Omitted means all. Project matching uses the stored alias (or discovery's `@host/projectId` ref). |
 | `events` | Nonempty selection of `needs_input`, `idle`, `failed`, `cancelled`, `delegated_work_ended`, `running`. Defaults to the first five. |
 | `excerptChars` | Default `0` omits both excerpt fields. Opt in with 1–500 for a bounded worker excerpt and truncation flag. Worker secrets cannot be reliably redacted. |

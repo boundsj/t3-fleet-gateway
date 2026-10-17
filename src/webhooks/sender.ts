@@ -62,7 +62,8 @@ export class WebhookSender {
   readonly #timeout: number;
   readonly #abort = new AbortController();
   #timer: NodeJS.Timeout | undefined;
-  #current: Promise<void> | undefined;
+  #refill: NodeJS.Immediate | undefined;
+  readonly #inFlight = new Set<Promise<void>>();
   constructor(store: WebhookStore, logger: Logger, options: SenderOptions = {}) {
     this.#store = store;
     this.#logger = logger;
@@ -70,32 +71,58 @@ export class WebhookSender {
   }
   start(): void {
     if (this.#timer || this.#abort.signal.aborted) return;
-    this.#timer = setInterval(() => void this.tick(), 1000);
-    void this.tick();
+    this.#timer = setInterval(() => this.#fill(), 1000);
+    this.#fill();
   }
+
+  /** Fill available slots and wait for just those attempts, or join current attempts if no slot was filled. */
   tick(): Promise<void> {
     if (this.#abort.signal.aborted) return Promise.resolve();
-    if (this.#current) return this.#current;
-    const current = Promise.resolve().then(async () => {
-      const claims = this.#store.claim(CONCURRENCY, Math.max(30_000, 2 * this.#timeout + 5000));
-      await Promise.all(claims.map(async (claim) => {
-        if (!this.#store.active(claim)) return;
-        const result = await postWebhook(claim.route, claim.payload, this.#timeout, this.#abort.signal);
-        this.#store.finish(claim, result);
-      }));
-    }).catch(() => {
-      // Never log raw network/SQLite errors: they can carry a URL or payload. Leases recover failed bookkeeping.
-      this.#logger.error('webhooks.tick_failed');
-    }).finally(() => { this.#current = undefined; });
-    this.#current = current;
-    return current;
+    const started = this.#fill();
+    return Promise.all(started.length ? started : this.#inFlight).then(() => {});
   }
+
+  #fill(): Promise<void>[] {
+    if (this.#abort.signal.aborted || this.#inFlight.size >= CONCURRENCY) return [];
+    try {
+      const claims = this.#store.claim(CONCURRENCY - this.#inFlight.size, Math.max(30_000, 2 * this.#timeout + 5000));
+      return claims.map((claim) => {
+        // Admit each attempt synchronously, before another tick can calculate its free slots.
+        const attempt = Promise.resolve().then(async () => {
+          if (!this.#store.active(claim)) return;
+          const result = await postWebhook(claim.route, claim.payload, this.#timeout, this.#abort.signal);
+          this.#store.finish(claim, result);
+        }).catch(() => this.#failed()).finally(() => {
+          this.#inFlight.delete(attempt);
+          // A completed fast receiver frees its own slot immediately. Yield to the event loop on
+          // each refill so a large due queue cannot turn into an unbounded microtask drain.
+          if (this.#timer && !this.#abort.signal.aborted && !this.#refill) {
+            this.#refill = setImmediate(() => { this.#refill = undefined; this.#fill(); });
+          }
+        });
+        this.#inFlight.add(attempt);
+        return attempt;
+      });
+    } catch {
+      this.#failed();
+      return [];
+    }
+  }
+
+  #failed(): void {
+    // Never log raw network/SQLite errors: they can carry a URL or payload. Leases recover failed bookkeeping.
+    this.#logger.error('webhooks.tick_failed');
+  }
+
   async stop(): Promise<void> {
     clearInterval(this.#timer);
     this.#timer = undefined;
+    clearImmediate(this.#refill);
+    this.#refill = undefined;
     this.#abort.abort();
-    await this.#current;
+    await Promise.all(this.#inFlight);
   }
+
 }
 
 /** Ping never creates a job, reconciles routes, or includes worker content; it uses the exact production transport. */

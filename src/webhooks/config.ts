@@ -54,7 +54,8 @@ export function loadRoute(subscription: SubscriptionConfig, dataDir: string): We
   let fd: number | undefined;
   try {
     if (!destinationAllowed(subscription.url, subscription.allowLoopbackHttp) || !authHeader(subscription.auth.header)) throw new Error();
-    fd = openSync(join(dataDir, subscription.auth.secretFile), constants.O_RDONLY | constants.O_NOFOLLOW);
+    // Opening a FIFO without a writer would block before fstat can reject it. Regular files ignore O_NONBLOCK.
+    fd = openSync(join(dataDir, subscription.auth.secretFile), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const stat = fstatSync(fd);
     if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.size > 8192 ||
         (typeof process.getuid === 'function' && stat.uid !== process.getuid())) throw new Error();

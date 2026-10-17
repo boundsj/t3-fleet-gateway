@@ -142,19 +142,25 @@ export class WebhookStore {
         "(SELECT id FROM webhook_deliveries WHERE state = 'sending' AND lease_until <= ?)").run(now);
       this.#db.prepare("UPDATE webhook_deliveries SET state = 'pending', lease = NULL, lease_until = NULL WHERE state = 'sending' AND lease_until <= ?").run(now);
       this.#db.prepare("UPDATE webhook_deliveries SET state = 'expired', payload = NULL WHERE state = 'pending' AND expires_at <= ?").run(now);
-      const rows = this.#db.prepare(`SELECT d.*, s.route FROM webhook_deliveries d JOIN webhook_subscriptions s
+      // One in-flight request per subscription, enforced across DB connections. A failed receiver
+      // cannot occupy all sender slots while other subscriptions have work ready.
+      const next = this.#db.prepare(`SELECT d.*, s.route FROM webhook_deliveries d JOIN webhook_subscriptions s
         ON s.id = d.subscription_id AND s.revision = d.revision
-        WHERE d.state = 'pending' AND d.next_attempt_at <= ? ORDER BY d.next_attempt_at, d.id LIMIT ?`)
-        .all(now, limit) as unknown as (DeliveryRow & { route: string })[];
-      const claims = rows.map((row): ClaimedDelivery => {
+        WHERE d.state = 'pending' AND d.next_attempt_at <= ? AND NOT EXISTS
+          (SELECT 1 FROM webhook_deliveries busy WHERE busy.subscription_id = d.subscription_id AND busy.state = 'sending')
+        ORDER BY d.next_attempt_at, d.id LIMIT 1`);
+      const claims: ClaimedDelivery[] = [];
+      for (let n = 0; n < limit; n++) {
+        const row = next.get(now) as (DeliveryRow & { route: string }) | undefined;
+        if (!row) break;
         const lease = randomUUID();
         this.#db.prepare("UPDATE webhook_deliveries SET state = 'sending', lease = ?, lease_until = ?, attempt_count = attempt_count + 1 WHERE id = ?")
           .run(lease, now + leaseMs, row.id);
         this.#db.prepare(`INSERT INTO webhook_attempts (subscription_id, delivery_id, event_id, attempted_at, outcome, lease)
           VALUES (?, ?, ?, ?, 'in_progress', ?)`).run(row.subscription_id, row.id, row.event_id, now, lease);
-        return { id: row.id, subscriptionId: row.subscription_id, revision: row.revision, eventId: row.event_id, payload: row.payload,
-          lease, attempt: row.attempt_count + 1, expiresAt: row.expires_at, route: JSON.parse(row.route) as WebhookRoute };
-      });
+        claims.push({ id: row.id, subscriptionId: row.subscription_id, revision: row.revision, eventId: row.event_id, payload: row.payload,
+          lease, attempt: row.attempt_count + 1, expiresAt: row.expires_at, route: JSON.parse(row.route) as WebhookRoute });
+      }
       this.#prune();
       return claims;
     });

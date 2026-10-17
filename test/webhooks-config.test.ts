@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
-import { chmodSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { chmodSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
+import { promisify } from 'node:util';
 import { parseConfig } from '../src/config.ts';
+import { openDataDir } from '../src/dataDir.ts';
 import { loadRoute } from '../src/webhooks/config.ts';
 import { tempDir } from './helpers/tmp.ts';
 
@@ -82,5 +85,62 @@ describe('webhook configuration and private header files', () => {
     const link = join(dir, 'linked.key');
     symlinkSync(file, link);
     assert.throws(() => loadRoute({ ...entry, auth: { ...entry.auth, secretFile: 'linked.key' } }, dir), { code: 'config_invalid' });
+  });
+
+  test('an owned 0600 FIFO fails promptly and privately for ping and startup instead of blocking at open', async (t) => {
+    const dir = tempDir(t);
+    const dataDir = join(dir, 'data');
+    openDataDir(dataDir);
+    const fifo = join(dataDir, 'synthetic.key');
+    await promisify(execFile)('mkfifo', ['-m', '600', fifo]);
+    assert.equal(statSync(fifo).isFIFO(), true);
+    assert.equal(statSync(fifo).mode & 0o777, 0o600);
+    if (process.getuid) assert.equal(statSync(fifo).uid, process.getuid());
+    const configFile = join(dir, 'config.json');
+    const configured = config({
+      dashboard: { enabled: true }, webhooks: { subscriptions: [subscription({ enabled: true })] },
+    });
+    writeFileSync(configFile, JSON.stringify(configured), { mode: 0o600 });
+    // Keep the blocking-open regression in a killable child; a timer cannot interrupt openSync in this test process.
+    const script = `
+      import { runCli } from ${JSON.stringify(new URL('../src/cli/main.ts', import.meta.url).href)};
+      import { loadConfig } from ${JSON.stringify(new URL('../src/config.ts', import.meta.url).href)};
+      import { startGateway } from ${JSON.stringify(new URL('../src/gateway.ts', import.meta.url).href)};
+      import { silentLogger } from ${JSON.stringify(new URL('../src/log.ts', import.meta.url).href)};
+      const [configPath, dataDir, mode] = process.argv.slice(1);
+      if (mode === 'ping') {
+        process.exitCode = await runCli(['webhooks', 'ping', 'synthetic'], {
+          env: { ...process.env, T3FG_CONFIG: configPath, T3FG_DATA_DIR: dataDir },
+          out: (line) => process.stdout.write(line + '\\n'), err: (line) => process.stderr.write(line + '\\n'),
+        });
+      } else {
+        try {
+          const gateway = await startGateway({ config: loadConfig(configPath), dataDir, logger: silentLogger,
+            port: 0, dashboardPort: 0, jobEngine: { autoStart: false }, webhookSender: { autoStart: false } });
+          await gateway.close();
+          process.exitCode = 2;
+        } catch (error) {
+          process.stderr.write(error.code + ': ' + error.message + '\\n');
+          process.exitCode = 1;
+        }
+      }
+    `;
+    for (const mode of ['ping', 'startup']) {
+      let failure: { code?: unknown; killed?: boolean; stdout?: string; stderr?: string } | undefined;
+      try {
+        await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, configFile, dataDir, mode],
+          { timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 20_000 });
+      } catch (error) {
+        failure = error as typeof failure;
+      }
+      assert.ok(failure, `${mode} must reject a FIFO`);
+      assert.equal(failure.killed, false, `${mode} must return before the bounded child timeout`);
+      assert.equal(failure.code, 1);
+      const output = (failure.stdout ?? '') + (failure.stderr ?? '');
+      assert.match(output, /config_invalid\)?: Webhook authentication or destination is invalid/);
+      for (const sensitive of [dir, fifo, configured.webhooks.subscriptions[0]!.url, 'X-Routine-Sender-Key', 'synthetic.key']) {
+        assert.equal(output.includes(sensitive), false);
+      }
+    }
   });
 });

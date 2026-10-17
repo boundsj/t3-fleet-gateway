@@ -109,6 +109,33 @@ describe('webhook migration and durable store boundaries', () => {
     assert.equal(f.db.prepare('SELECT payload FROM webhook_deliveries').get()!.payload, null, 'settled history retains no payload');
   });
 
+  test('separate connections allow only one in-flight delivery per subscription and release its successor on completion', (t) => {
+    const f = fixture(t);
+    const jobs = ['synthetic01', 'synthetic02', 'synthetic03'].map((id) => createJob(f.jobs, id));
+    for (const job of jobs) f.jobs.transition(job.id, { from: ['queued'], to: 'cancelled' });
+    const otherDb = openDatabase(join(f.dir, 'gateway.db'));
+    t.after(() => otherDb.close());
+    const other = new WebhookStore(otherDb, f.clock);
+    const first = f.webhooks.claim(4, 1000);
+    assert.equal(first.length, 1, 'one batch cannot occupy several slots with one subscription');
+    assert.equal(JSON.parse(first[0]!.payload).jobId, jobs[0]!.id);
+    assert.deepEqual(other.claim(4, 1000), [], 'another connection cannot claim either pending successor while the first is sending');
+
+    f.webhooks.finish(first[0]!, { outcome: 'delivered', statusCode: 204 });
+    const second = other.claim(4, 1000);
+    assert.equal(second.length, 1, 'completion makes the next event immediately claimable without advancing time');
+    assert.equal(JSON.parse(second[0]!.payload).jobId, jobs[1]!.id);
+    assert.deepEqual(f.webhooks.claim(4, 1000), [], 'the second owner excludes the first connection from the remaining successor');
+
+    other.finish(second[0]!, { outcome: 'delivered', statusCode: 204 });
+    const third = f.webhooks.claim(4, 1000);
+    assert.equal(third.length, 1);
+    assert.equal(JSON.parse(third[0]!.payload).jobId, jobs[2]!.id);
+    assert.equal(new Set([...first, ...second, ...third].map((claim) => claim.eventId)).size, 3);
+    f.webhooks.finish(third[0]!, { outcome: 'delivered', statusCode: 204 });
+    assert.deepEqual(other.claim(4, 1000), []);
+  });
+
   test('auth rotation invalidates pending old deliveries and missing replacement credentials fail atomically', (t) => {
     const f = fixture(t);
     const job = createJob(f.jobs);

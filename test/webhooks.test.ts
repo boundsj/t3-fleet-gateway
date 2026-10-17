@@ -82,6 +82,16 @@ async function receiver(t: TestContext) {
   };
 }
 
+/** A failure deadline, not a clock/sleep driving gateway state. Always release held responses in finally. */
+async function within<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([work, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('Expected progress before an unrelated held response completed')), ms);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
 const HEADER_VALUE = 'synthetic-private-sender-key';
 
 function subscription(url: string, extra: Record<string, unknown> = {}) {
@@ -137,7 +147,7 @@ async function harness(t: TestContext, subscriptions: Record<string, unknown>[],
   };
   return {
     fake, gw, agent, token: issued.token, tick: () => gw.gateway.engine.tick(),
-    // Each sender tick starts at most four requests; drain these small fixtures without any timer.
+    // Each tick starts at most four requests, one per subscription; drain small fixtures without a timer.
     async deliver() { for (let batch = 0; batch < 4; batch++) await gw.gateway.webhooks.tick(); },
   };
 }
@@ -349,6 +359,40 @@ describe('outbound job webhooks through MCP, watcher and HTTP', () => {
 });
 
 describe('durable webhook delivery and polling fallback', () => {
+  test('failed completion bookkeeping releases sender slots and recovers immutable attempts after their leases', async (t) => {
+    const uncertain = await receiver(t);
+    const healthy = await receiver(t);
+    const h = await harness(t, [
+      ...Array.from({ length: 4 }, (_, n) => subscription(uncertain.url, { id: `uncertain-${n}`, projects: ['pilot'] })),
+      subscription(healthy.url, { id: 'healthy', projects: ['docs'] }),
+    ]);
+    // Fault the actual completion transaction after the receiver acknowledges, preserving the
+    // ambiguous attempt. A raw SQLite error can carry private data and must never reach logs.
+    h.gw.services.db.exec(`CREATE TRIGGER synthetic_finish_failure BEFORE UPDATE OF state ON webhook_deliveries
+      WHEN OLD.subscription_id LIKE 'uncertain-%' AND NEW.state = 'delivered'
+      BEGIN SELECT RAISE(ABORT, 'Synthetic private database-error content'); END;`);
+    const first = await startJob(h.agent);
+    await h.agent.call('work_cancel', { jobId: first.jobId });
+    await h.gw.gateway.webhooks.tick();
+    assert.equal(uncertain.received.length, 4);
+    assert.equal(h.gw.services.webhooks.diagnostics().attempts.filter((a) => a.outcome === 'in_progress').length, 4);
+    assert.equal(h.gw.logs.filter((line) => JSON.parse(line).event === 'webhooks.tick_failed').length, 4);
+    const original = uncertain.received.map((entry) => entry.body);
+    const later = await startJob(h.agent, 'Synthetic healthy task', { project: 'docs' });
+    await h.agent.call('work_cancel', { jobId: later.jobId });
+    await h.gw.gateway.webhooks.tick();
+    assert.equal(healthy.received.length, 1, 'all four failed local attempts release their slots');
+    assert.equal(uncertain.received.length, 4, 'unexpired leases still prevent another send');
+    h.gw.services.db.exec('DROP TRIGGER synthetic_finish_failure');
+    h.gw.clock.advance(30_000);
+    await h.deliver();
+    assert.deepEqual(uncertain.received.slice(4).map((entry) => entry.body), original);
+    const attempts = h.gw.services.webhooks.diagnostics().attempts;
+    assert.equal(attempts.filter((a) => a.outcome === 'abandoned').length, 4);
+    assert.equal(attempts.filter((a) => a.outcome === 'delivered').length, 5);
+    assertNotLogged(h.gw, ['Synthetic private database-error content', HEADER_VALUE, uncertain.url, healthy.url]);
+  });
+
   test('retry backoff retains the exact snapshot, while later events can arrive first and feed catch-up stays exclusive', async (t) => {
     const sink = await receiver(t);
     let failure = true;
@@ -589,6 +633,68 @@ describe('durable webhook delivery and polling fallback', () => {
 });
 
 describe('webhook transport safety and operator checks', () => {
+  test('the automatic sender delivers new healthy events while an earlier response remains held', async (t) => {
+    const slow = await receiver(t);
+    const healthy = await receiver(t);
+    slow.respond(() => {});
+    const h = await harness(t, [subscription(slow.url, { id: 'slow' }), ...['one', 'two', 'three'].map((id) =>
+      subscription(healthy.url, { id }))], { attemptTimeoutMs: 10_000 });
+    const first = await startJob(h.agent);
+    await h.agent.call('work_cancel', { jobId: first.jobId });
+    h.gw.gateway.webhooks.start();
+    try {
+      await Promise.all([slow.whenReceived(1), healthy.whenReceived(3)]);
+      const next = await startJob(h.agent);
+      await h.agent.call('work_cancel', { jobId: next.jobId });
+      await within(healthy.whenReceived(6), 4000);
+      assert.equal(slow.received.length, 1, 'one stalled subscription must not occupy another sender slot');
+      assert.equal(h.gw.services.webhooks.diagnostics('slow').attempts[0]!.outcome, 'in_progress');
+      assert.equal(healthy.received.filter((entry) => entry.payload.jobId === next.jobId).length, 3);
+    } finally { await h.gw.gateway.webhooks.stop(); }
+  });
+
+  test('a stalled subscription backlog cannot consume the slots of a healthy subscription', async (t) => {
+    const slow = await receiver(t);
+    const healthy = await receiver(t);
+    slow.respond(() => {});
+    const h = await harness(t, [subscription(slow.url, { id: 'slow', projects: ['pilot'] }),
+      subscription(healthy.url, { id: 'healthy', projects: ['docs'] })], { attemptTimeoutMs: 10_000 });
+    for (let n = 0; n < 6; n++) {
+      const job = await startJob(h.agent);
+      await h.agent.call('work_cancel', { jobId: job.jobId });
+    }
+    const job = await startJob(h.agent, 'Synthetic healthy work', { project: 'docs' });
+    await h.agent.call('work_cancel', { jobId: job.jobId });
+    const sending = h.gw.gateway.webhooks.tick();
+    try {
+      await within(healthy.whenReceived(1), 4000);
+      assert.equal(slow.received.length, 1);
+      assert.equal(healthy.received[0]!.payload.jobId, job.jobId);
+      assert.equal(h.gw.services.webhooks.diagnostics('slow').attempts[0]!.outcome, 'in_progress');
+    } finally { await h.gw.gateway.webhooks.stop(); await sending; }
+  });
+
+  test('overlapping ticks never exceed four active deliveries and stop aborts every occupied slot', async (t) => {
+    const sink = await receiver(t);
+    sink.respond(() => {});
+    const h = await harness(t, Array.from({ length: 6 }, (_, n) => subscription(sink.url, { id: `routine-${n}` })),
+      { attemptTimeoutMs: 10_000 });
+    const job = await startJob(h.agent);
+    await h.agent.call('work_cancel', { jobId: job.jobId });
+    const ticks = [h.gw.gateway.webhooks.tick(), h.gw.gateway.webhooks.tick(), h.gw.gateway.webhooks.tick()];
+    try {
+      await within(sink.whenReceived(4), 4000);
+      await h.agent.call('work_status', { jobId: job.jobId });
+      assert.equal(sink.received.length, 4);
+      assert.equal(h.gw.services.db.prepare("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE state = 'sending'").get()!.n, 4);
+    } finally { await within(h.gw.gateway.webhooks.stop(), 2000); await Promise.all(ticks); }
+    assert.equal(h.gw.services.db.prepare("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE state = 'sending'").get()!.n, 0);
+    assert.equal(h.gw.services.db.prepare("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE state = 'pending'").get()!.n, 6);
+    assert.equal(h.gw.services.webhooks.diagnostics().attempts.filter((attempt) => attempt.outcome === 'stopped').length, 4);
+    await h.gw.gateway.webhooks.tick();
+    assert.equal(sink.received.length, 4, 'a stopped sender cannot claim more work');
+  });
+
   test('a network reset after request arrival retries the same event with no raw socket diagnostics', async (t) => {
     const sink = await receiver(t);
     // Reset after the request arrives, as required by AGENTS.md for the Node 26/macOS socket race.
