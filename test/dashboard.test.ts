@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { request } from 'node:http';
 import { describe, test, type TestContext } from 'node:test';
+import { parseArgs } from 'node:util';
 import { parseConfig } from '../src/config.ts';
 import { DashboardChecks } from '../src/dashboard/checks.ts';
 import { buildSnapshot, LIMITS, threadLink, type DashboardSnapshot } from '../src/dashboard/snapshot.ts';
@@ -429,6 +430,7 @@ describe('dashboard: clients', () => {
     const name = `Reader $(printf EXPANDED) \`printf TICKED\` "quoted" it's \${HOME} \\ end`;
     const restricted = h.gw.services.tokens.issueOperatorToken({ name, scopes: scopesForGrant('read', ['main']), expiresAt: h.gw.clock() + 2 * HOUR });
     const fleet = h.gw.services.tokens.issueOperatorToken({ name: 'Fleet', scopes: scopesForGrant('operate', 'all'), expiresAt: h.gw.clock() + 2 * HOUR });
+    const prefixed = h.gw.services.tokens.issueOperatorToken({ name: '--reader', scopes: scopesForGrant('read', ['main']), expiresAt: h.gw.clock() + 2 * HOUR });
     const snap = await snapshot(h.port);
     const command = (clientId: string) => {
       const action = snap.attention.find((item) => item.ref === clientId && /expires soon/.test(item.title))?.action;
@@ -437,8 +439,12 @@ describe('dashboard: clients', () => {
     };
     // The shell's own parse of the command, with a harmless printf in place of the CLI: one argument per line.
     const argv = (line: string) => execFileSync('/bin/sh', ['-c', line.replace(/^t3-fleet-gateway /, "printf '%s\\n' ")], { encoding: 'utf8' }).split('\n').slice(0, -1);
-    assert.deepEqual(argv(command(restricted.clientId)), ['clients', 'token', '--name', name, '--access', 'read', '--hosts', 'main']);
-    assert.deepEqual(argv(command(fleet.clientId)), ['clients', 'token', '--name', 'Fleet', '--access', 'operate', '--hosts', 'all']);
+    assert.deepEqual(argv(command(restricted.clientId)), ['clients', 'token', `--name=${name}`, '--access', 'read', '--hosts', 'main']);
+    assert.deepEqual(argv(command(fleet.clientId)), ['clients', 'token', '--name=Fleet', '--access', 'operate', '--hosts', 'all']);
+    const parsed = parseArgs({ args: argv(command(prefixed.clientId)).slice(2), options: {
+      name: { type: 'string' }, access: { type: 'string' }, hosts: { type: 'string' },
+    } });
+    assert.deepEqual({ ...parsed.values }, { name: '--reader', access: 'read', hosts: 'main' });
   });
 
   test('access is what usable tokens carry now: a narrowed refresh or an expired privileged grant never counts', async (t) => {

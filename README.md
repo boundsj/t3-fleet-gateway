@@ -108,11 +108,29 @@ For example, asking the bot for a project (here a fictional toy app) for a new f
 
 ## See the fleet: the operator dashboard
 
-<!-- Dashboard image: docs/images/dashboard.png, made from `npm run dashboard:demo -- --no-badge` (synthetic data only). -->
+![The operator dashboard on sample data. A desktop browser in light mode shows "5 things need your attention", status cards for the gateway, hosts, clients and jobs, and a map from the agent clients Notion (never observed), Grok Bot and Muse (seen recently) through the gateway to three fictional hosts: Studio Mac mini answering, Forge workstation unreachable, and Lab VM answering with a renewal due. A phone in dark mode shows the same overview.](docs/images/dashboard.png)
 
-An optional, read-only web page for you, the operator ([docs/operations.md](docs/operations.md#operator-dashboard)): whether the gateway is running, which machines answer, which agents can connect *and which actually did*, what work is waiting on you, and what happened recently, on desktop or phone. Each item says where to act: a link that opens the T3 thread, or a command to run on the gateway machine. It controls nothing; approvals stay in T3.
+*Sample data: real screenshots of the dashboard running on the demo fleet from `npm run dashboard:demo` (desktop in light mode, phone in dark mode). Grok Bot, Muse and Notion are demo clients; the hosts, projects and activity are made up.*
 
-It runs inside `serve` on a loopback listener of its own, never on the public MCP URL, and you publish it to your tailnet only (for example with `tailscale serve` on a path). It shows no tokens, task text, replies or questions, never contacts T3 when you open it, and asks the hosts only when you press **Run checks**. Try it on synthetic data with `npm run dashboard:demo`.
+Agents hand off the work, T3 does it, and the gateway keeps track. The operator dashboard is the page you glance at to see how it is all going: optional, read-only, on desktop or phone. It answers five questions:
+
+- **Is the gateway running?** Its job engine, its database, and whether the public URL reaches it.
+- **Which machines answer?** Each host's last health check and when it ran, plus credentials due for renewal.
+- **Which agents can connect, and which actually did?** What each client may do now, kept apart from its last successful request, so a usable token that has never been used stands out.
+- **What is waiting on you?** Approvals, questions, failed runs and unreachable hosts, most serious first. Each says where to act: **Open in T3** for a thread, or a command to copy and run on the gateway machine.
+- **What happened recently?** Job events, shown as codes.
+
+It controls nothing: approvals, answers and stopping work happen in T3, and enrolling hosts or approving agents happens in the CLI. It shows no tokens, task text, replies or questions, never contacts T3 when you open it, and asks the hosts only when you press **Run checks**.
+
+**Try it on a made-up fleet** from a checkout. It uses temporary data on loopback, never reads your config and never touches a real T3:
+
+```sh
+npm install
+npm run dashboard:demo                            # open the URL it prints; Ctrl-C stops it and deletes its data
+npm run dashboard:demo -- --scenario host-down    # or healthy, auth-issue, empty; --list describes them
+```
+
+**Turn it on for real** with a `dashboard` block in your config (`"enabled": true`, its own loopback port, `3791` by default) and restart the gateway. It runs inside `serve` on that listener, never on the public MCP URL: publish it to your tailnet only, for example with `tailscale serve` on a path (never Funnel), and list the host name your browser uses in `allowedHosts`. `doctor` then checks that it answers and that the public URL does not serve it. Steps: [docs/operations.md](docs/operations.md#operator-dashboard); fields: [docs/configuration.md](docs/configuration.md#dashboard).
 
 ## Setup
 

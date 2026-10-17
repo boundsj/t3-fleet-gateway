@@ -339,7 +339,7 @@ function replacementCommand(client: ClientView): string | null {
   if (level === 'operate' && !same(operate, read)) return null;
   const hosts = selected === 'all' ? 'all' : selected.filter((id) => !unconfiguredHosts.includes(id)).sort().join(',');
   if (hosts === '') return null;
-  return `t3-fleet-gateway clients token --name ${shellWord(client.registeredName)} --access ${level} --hosts ${shellWord(hosts)}`;
+  return `t3-fleet-gateway clients token --name=${shellWord(client.registeredName)} --access ${level} --hosts ${shellWord(hosts)}`;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
