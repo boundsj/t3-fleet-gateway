@@ -89,7 +89,7 @@ The gateway never adds paths or caller text to argv. It writes stdin JSON with `
 
 Omitting `work_start.workspace` detects the project automatically. A Git project gets a fresh T3-managed wt from freshly fetched `origin/main`. Other directories use the local checkout. `{ "type": "root" }` explicitly uses the current local checkout, preserving its branch and dirty files. `{ "type": "worktree", "baseRef": "topic", "startFromOrigin": false }` explicitly uses a local base. Explicit wt selection defaults to `main` and `startFromOrigin: true`. Missing origin or remote branch fails closed for remote-based wt launches. Scratch aliases reject workspace overrides.
 
-The destination is inspected again before dispatch. Changed identity or classification fails with `launch_policy_changed`. Verification failures fail closed; transport failures keep jobs queued with host backoff. No command output or paths enter errors or logs.
+The destination is inspected again before dispatch. Changed identity or classification fails with `launch_policy_changed`. Verification failures fail closed. SSH exit 255 and probe deadlines report `workspace_probe_unavailable` only on the affected job. Queued jobs retry the probe at the watcher interval for at most three attempts per daemon lifetime, then fail. Retry counters reset after a daemon restart; the last error remains persisted. Probe backoff does not block other queued jobs or mark the T3 host unreachable. Actual T3 transport failures retain host backoff. No command output or paths enter errors or logs.
 
 #### Renewal command preflight
 

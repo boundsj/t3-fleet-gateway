@@ -27,6 +27,9 @@ export async function inspectWorkspace(input) {
     if (markerRoot && gitRoot !== markerRoot) throw Error();
     if (gitRoot === root) kind = 'git';
   } catch (error) { if (markerRoot || !String(error.stderr).includes('not a git repository')) throw error; }
+  const inspection = { kind, root, identity: `${info.dev}:${info.ino}` };
+  const expected = input.expectedInspection;
+  if (expected && (expected.kind !== kind || expected.root !== root || expected.identity !== inspection.identity)) return inspection;
   if (input.requireGit && kind !== 'git') throw Error();
   if (kind === 'git' && input.startFromOrigin) {
     await git(root, ['check-ref-format', `refs/heads/${input.baseRef}`]);
@@ -35,7 +38,7 @@ export async function inspectWorkspace(input) {
     const advertised = await git(root, ['ls-remote', '--exit-code', 'origin', `refs/heads/${input.baseRef}`]);
     if (!new RegExp(`^[a-f0-9]{40,64}\\s+refs/heads/`).test(advertised)) throw Error();
   }
-  return { kind, root, identity: `${info.dev}:${info.ino}` };
+  return inspection;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {

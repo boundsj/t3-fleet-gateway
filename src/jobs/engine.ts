@@ -139,6 +139,7 @@ export class JobEngine {
   readonly #inFlight = new Set<string>();
   /** When reconciliation first failed to find a job's thread while its host was reachable. */
   readonly #unconfirmedSince = new Map<string, { hostId: string; since: number }>();
+  readonly #probeRetries = new Map<string, { attempts: number; nextAttemptAt: number }>();
   readonly #lastPolled = new Map<string, number>();
   #timer: NodeJS.Timeout | undefined;
   #current: Promise<void> = Promise.resolve();
@@ -187,6 +188,9 @@ export class JobEngine {
 
   /** Drop the in-memory poll times and reconciliation windows of jobs that have finished. */
   #forgetFinished(): void {
+    for (const id of this.#probeRetries.keys()) {
+      if (this.#options.store.get(id)?.state !== 'queued') this.#probeRetries.delete(id);
+    }
     if (this.#lastPolled.size === 0 && this.#unconfirmedSince.size === 0) return;
     const open = this.#options.store.openJobIds();
     for (const jobId of this.#lastPolled.keys()) if (!open.has(jobId)) this.#lastPolled.delete(jobId);
@@ -239,20 +243,27 @@ export class JobEngine {
     const { store, clock } = this.#options;
     const free = host.maxConcurrentJobs - store.slotHolders(host.id);
     if (free <= 0) return;
-    const queued = store.queued(host.id, free);
+    const queued = store.queued(host.id, free + this.#probeRetries.size)
+      .filter((job) => (this.#probeRetries.get(job.id)?.nextAttemptAt ?? 0) <= clock());
     if (queued.length === 0) return;
     // A cheap read first: a dead connection (for example after T3 restarted) fails here, where a
     // retry is safe, instead of making the launch itself ambiguous.
     await this.#options.registry.client(host.id).environmentRead();
+    let launched = 0;
     for (const job of queued) {
+      if (launched >= free) break;
       const plan = job.launchSpec ? await this.#planFromSpec(host, job, job.launchSpec) : await this.#planFromConfig(job);
       if (!plan) continue;
+      this.#probeRetries.delete(job.id);
       const dispatching = store.transition(job.id, {
         from: ['queued'],
         to: 'dispatching',
         changes: { t3ProjectId: plan.projectId, dispatchStartedAt: clock() },
       });
-      if (dispatching && !(await this.#launch(dispatching, plan))) return;
+      if (dispatching) {
+        launched++;
+        if (!(await this.#launch(dispatching, plan))) return;
+      }
     }
   }
 
@@ -346,7 +357,7 @@ export class JobEngine {
     }
     if (spec.v === 3) {
       try {
-        const current = await probeWorkspace(host, this.#options.registry, spec.projectId, spec.selection);
+        const current = await probeWorkspace(host, this.#options.registry, spec.projectId, spec.selection, { expectedInspection: spec.inspection });
         if (current.kind !== spec.inspection.kind || current.root !== spec.inspection.root || current.identity !== spec.inspection.identity) {
           this.#failQueued(job, 'launch_policy_changed', 'Workspace identity or Git classification changed. Start the work again.');
           return undefined;
@@ -354,6 +365,14 @@ export class JobEngine {
       } catch (error) {
         if (isHostFailure(error)) throw error;
         const described = describeError(error);
+        if (described.code === 'workspace_probe_unavailable') {
+          const attempts = (this.#probeRetries.get(job.id)?.attempts ?? 0) + 1;
+          if (attempts < 3) {
+            this.#probeRetries.set(job.id, { attempts, nextAttemptAt: this.#options.clock() + this.#intervalMs });
+            this.#options.store.update(job.id, { lastErrorCode: described.code, lastErrorMessage: described.message });
+            return undefined;
+          }
+        }
         this.#failQueued(job, described.code, described.message);
         return undefined;
       }
@@ -362,6 +381,7 @@ export class JobEngine {
   }
 
   #failQueued(job: Job, code: string, message: string): void {
+    this.#probeRetries.delete(job.id);
     this.#options.store.transition(job.id, {
       from: ['queued'],
       to: 'failed',

@@ -127,7 +127,7 @@ test('missing command and changed Git classification fail without launching', as
   const dir = mkdtempSync(join(tmpdir(), 'fleet-workspace-change-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const h = await startJobHarness(t, { host: { workspaceProbeCommand: command } });
   h.fake.projects[0]!.workspaceRoot = dir;
-  const job = await startJob(h.agent, 'classification change', { workspace: { type: 'root' } });
+  const job = await startJob(h.agent, 'classification change');
   git(dir, 'init', '-b', 'main');
   await h.tick();
   assert.equal(h.gw.services.jobs.store.require(job.jobId).lastErrorCode, 'launch_policy_changed');
@@ -156,7 +156,7 @@ test('probe transport failure on the second project read preserves queued state 
   assert.equal(h.fake.launches.length, 1);
 });
 
-test('workspace probe redacts invalid output and treats SSH exit 255 as a retryable host failure', async (t) => {
+test('workspace probe redacts invalid output and isolates SSH exit 255 to a retryable job probe failure', async (t) => {
   for (const output of ["'secret-private-path-not-json'", "'x'.repeat(16385)"]) {
     const h = await startJobHarness(t, { host: { workspaceProbeCommand: [process.execPath, '-e', `process.stderr.write('secret-stderr'); process.stdout.write(${output});`] } });
     const result = await h.agent.callError('work_start', { project: 'pilot', task: 'synthetic', requestId: 'redaction' });
@@ -174,6 +174,8 @@ test('workspace probe redacts invalid output and treats SSH exit 255 as a retrya
   await h.tick();
   assert.equal(h.gw.services.jobs.store.require(job.jobId).state, 'queued');
   assert.equal(h.fake.launches.length, 0);
+  assert.equal(h.gw.services.jobs.store.require(job.jobId).lastErrorCode, 'workspace_probe_unavailable');
+  assert.equal(h.gw.services.jobs.store.require(job.jobId).hostUnreachableSince, null);
   rmSync(flag);
   await h.tickAfter(60000);
   assert.equal(h.fake.launches.length, 1);
@@ -197,7 +199,87 @@ test('scratch aliases reject workspace overrides and explicit workspace conflict
 test('workspace probe command deadline reports a retryable timeout without output', async (t) => {
   const h = await startJobHarness(t, { host: { workspaceProbeCommand: [process.execPath, '-e', "process.stderr.write('secret-timeout'); setTimeout(() => {}, 60000);"] } });
   const error = await h.agent.callError('work_start', { project: 'pilot', task: 'synthetic', requestId: 'probe-deadline' });
-  assert.equal(error.code, 't3_timeout');
+  assert.equal(error.code, 'workspace_probe_unavailable');
   assert.equal(error.text.includes('secret-timeout'), false);
+  assert.equal(h.fake.launches.length, 0);
+});
+
+
+test('explicit worktree Git becoming plain fails policy validation before requireGit', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-explicit-class-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  git(dir, 'init', '-b', 'main');
+  const h = await startJobHarness(t, { host: { workspaceProbeCommand: command } });
+  h.fake.projects[0]!.workspaceRoot = dir;
+  const job = await startJob(h.agent, 'explicit local base', { workspace: { type: 'worktree', startFromOrigin: false } });
+  rmSync(join(dir, '.git'), { recursive: true });
+  await h.tick();
+  assert.equal(h.gw.services.jobs.store.require(job.jobId).lastErrorCode, 'launch_policy_changed');
+  assert.equal(h.fake.launches.length, 0);
+});
+
+test('persistent probe failure is bounded per job while other launches and unknown reconciliation continue', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-probe-isolation-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const flag = join(dir, 'offline');
+  const script = `const fs = require('fs'); let body=''; process.stdin.on('data', x => body+=x); process.stdin.on('end', () => { const input=JSON.parse(body); if (input.root==='/synthetic/project-1' && fs.existsSync(${JSON.stringify(flag)})) process.exit(255); process.stdout.write(JSON.stringify({kind:'root', root:input.root, identity:'1:2'})); });`;
+  const h = await startJobHarness(t, { maxConcurrentJobs: 3, watcher: { reconcileWindowMinutes: 1 }, host: { workspaceProbeCommand: [process.execPath, '-e', script] } });
+  const unknown = await startJob(h.agent, 'unknown');
+  const store = h.gw.services.jobs.store;
+  store.transition(unknown.jobId, { from: ['queued'], to: 'dispatching', changes: { t3ProjectId: 'project-1', dispatchStartedAt: h.gw.clock() } });
+  store.transition(unknown.jobId, { from: ['dispatching'], to: 'unknown' });
+  const failed = await startJob(h.agent, 'failed probe');
+  const next = await startJob(h.agent, 'healthy', { project: 'docs' });
+  writeFileSync(flag, '');
+  await h.tick();
+  assert.equal(store.require(next.jobId).state, 'running');
+  assert.equal(store.require(next.jobId).hostUnreachableSince, null);
+  assert.equal(store.require(unknown.jobId).hostUnreachableSince, null);
+  assert.equal(store.require(failed.jobId).lastErrorCode, 'workspace_probe_unavailable');
+  await h.tickAfter(30000);
+  assert.equal(store.require(failed.jobId).state, 'queued');
+  await h.tickAfter(30001);
+  assert.equal(store.require(failed.jobId).state, 'failed');
+  assert.equal(store.require(failed.jobId).lastErrorCode, 'workspace_probe_unavailable');
+  assert.equal(store.require(unknown.jobId).state, 'failed');
+  assert.equal(store.require(unknown.jobId).lastErrorCode, 'launch_not_confirmed');
+  assert.equal(h.fake.launches.length, 1);
+  assert.equal(h.gw.logs.join('\n').includes('jobs.host_unreachable'), false);
+});
+
+
+test('a queued job in probe backoff does not starve the next healthy job', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-probe-backoff-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const flag = join(dir, 'offline');
+  const script = `const fs = require('fs'); let body=''; process.stdin.on('data', x => body+=x); process.stdin.on('end', () => { const input=JSON.parse(body); if (input.root==='/synthetic/project-1' && fs.existsSync(${JSON.stringify(flag)})) process.exit(255); process.stdout.write(JSON.stringify({kind:'root', root:input.root, identity:'1:2'})); });`;
+  const h = await startJobHarness(t, { maxConcurrentJobs: 1, host: { workspaceProbeCommand: [process.execPath, '-e', script] } });
+  const waiting = await startJob(h.agent, 'waiting');
+  writeFileSync(flag, '');
+  await h.tick();
+  const next = await startJob(h.agent, 'healthy', { project: 'docs' });
+  await h.tick();
+  assert.equal(h.gw.services.jobs.store.require(waiting.jobId).state, 'queued');
+  assert.equal(h.gw.services.jobs.store.require(next.jobId).state, 'running');
+  assert.equal(h.fake.launches.length, 1);
+});
+
+
+test('changed Git identity takes priority over missing origin on the replacement', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-probe-identity-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const initial = join(dir, 'initial'); mkdirSync(initial);
+  git(initial, 'init', '-b', 'main');
+  git(initial, 'config', 'user.name', 'Synthetic'); git(initial, 'config', 'user.email', 'synthetic@example.invalid');
+  git(initial, 'commit', '--allow-empty', '-m', 'A');
+  const origin = join(dir, 'origin.git'); git(dir, 'clone', '--bare', initial, origin);
+  git(initial, 'remote', 'add', 'origin', origin);
+  const replacement = join(dir, 'replacement'); mkdirSync(replacement); git(replacement, 'init', '-b', 'main');
+  const h = await startJobHarness(t, { host: { workspaceProbeCommand: command } });
+  h.fake.projects[0]!.workspaceRoot = initial;
+  const job = await startJob(h.agent, 'identity change');
+  h.fake.projects[0]!.workspaceRoot = replacement;
+  await h.tick();
+  assert.equal(h.gw.services.jobs.store.require(job.jobId).lastErrorCode, 'launch_policy_changed');
   assert.equal(h.fake.launches.length, 0);
 });
