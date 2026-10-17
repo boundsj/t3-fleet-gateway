@@ -134,6 +134,8 @@ npm run dashboard:demo -- --scenario host-down    # or healthy, auth-issue, empt
 
 ## Wake a routine with job webhooks
 
+![A job event is saved with its feed entry, delivered over HTTPS, and wakes a routine; retries and feed catch-up cover interruptions.](docs/images/webhooks-flow.svg)
+
 Outbound webhooks are opt-in. They POST a small event when a job becomes `needs_input`, `idle`, `failed` or `cancelled`, or when its delegated work ends without a new turn. `running` is an optional event. The gateway needs outbound HTTPS access to the routine; this adds no inbound endpoint or dashboard control.
 
 For a Grok Bot routine with a webhook trigger, copy **that routine's URL, sender-key header name and sender key** from Grok. The names below are placeholders: use the exact header name Grok supplies. Store the key as the contents of `grok-routine.key` in the gateway's private data directory (owner-only `0600`, directory `0700`), using a private editor or stdin, never a command-line argument. A final newline is accepted. Add this block to your private config:
@@ -168,6 +170,8 @@ Each event carries a stable `eventId`, UTC `timestamp`, numeric `feedSequence` a
 Payloads omit worker excerpts by default. An explicit `excerptChars` from 1 to 500 includes only that bounded worker excerpt and `excerptTruncated`; no task body, questions or transcript are added. Worker output can contain arbitrary secrets that cannot be reliably redacted, so enable excerpts only for a receiver trusted to read them. Job titles are always included and may be derived from the task's first line; use a non-sensitive title.
 
 Pending events survive restarts. Attempts have a 10-second total deadline and retry with exponential backoff for up to one hour. Delivery is at least once; a receiver may accept an attempt whose acknowledgement never reaches the gateway. Redirects are refused, including redirects to the same host. Config changes take effect on restart: new subscriptions do not replay history; disabling, removing or changing a subscription cancels its old queued deliveries. A request already sent may still arrive. Use feed catch-up for any gap. Diagnostic commands expose only IDs, counts, timestamps, HTTP status and fixed outcome codes; they never show URLs, auth headers or payloads. See [configuration](docs/configuration.md#webhooks) and [design](docs/design.md#outbound-job-webhooks) for limits and recovery details.
+
+**Try it as a developer:** `npm run webhooks:smoke` exercises real HTTPS delivery, a failed receiver and process crashes using temporary data and a fake T3 host. It needs Node 24+ and OpenSSL, takes about 90 seconds, and does not use your installed gateway. [Reproduce the checks and read the evidence](docs/evidence/webhooks.md).
 
 ## Setup
 

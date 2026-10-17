@@ -391,7 +391,7 @@ As built in v0.1.8 (`src/dashboard/`). An opt-in, read-only web view of the gate
 
 - Gateway terminates MCP itself instead of proxying T3's MCP: agents get a small job-level contract, and client quirks are absorbed by our server.
 - Downstream access level defaults to T3 "auto" (Full access) because the gateway enforces its own scopes and per-project runtime modes.
-- Polling instead of webhooks: T3 has no completion webhooks; the gateway is always on.
+- The gateway polls T3 because T3 has no completion webhooks. Optional outbound gateway webhooks notify subscribers after those observations; they do not change T3 polling latency.
 - v2 MCP SDK split packages over 1.x: current stable line, far fewer dependencies, serves both protocol eras (see Runtime).
 - Own OAuth server on `node:http` instead of SDK helpers: v2 freezes its authorization-server helpers in a legacy package, and the rules here (approval codes, family revocation, grace window) need custom logic anyway.
 - `/mcp` sets the `Accept` header of every POST to `application/json, text/event-stream` before the SDK transport sees it: the gateway always answers JSON, and the transports would otherwise refuse clients that send only `application/json` or a wildcard with `406`.
