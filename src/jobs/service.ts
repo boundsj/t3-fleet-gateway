@@ -294,7 +294,8 @@ export class JobService {
     // A retry returns the job of the first request, which the project config may since have moved to another host:
     // the agent must still be allowed to operate on the job's own host.
     const hosts = permittedHosts(caller.scopes, 'operate');
-    const replayed = key && this.store.get(key.jobId, hosts === 'all' ? {} : { hostIds: hosts });
+    const scope: JobScope = hosts === 'all' ? {} : { hostIds: hosts };
+    const replayed = key && this.store.get(key.jobId, scope);
     if (key && !replayed) {
       throw new GatewayError(
         'insufficient_scope',
@@ -324,7 +325,7 @@ export class JobService {
         title: threadTitle(id, input.task, input.title),
         branch: `${project.branchPrefix}${id}`,
         runtimeMode: project.runtimeMode,
-      });
+      }, scope);
       if (result.created) this.wake();
       return result;
     }
@@ -359,7 +360,7 @@ export class JobService {
       runtimeMode: spec.runtimeMode,
       t3ProjectId: spec.projectId,
       launchSpec: spec,
-    });
+    }, scope);
     if (result.created) this.wake();
     return result;
   }

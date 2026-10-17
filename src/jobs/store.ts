@@ -485,17 +485,24 @@ export class JobStore {
    * Insert a queued job with its first event, or return the existing job for a repeated request.
    * The same (client, requestId) for work_start with a different input is rejected.
    */
-  create(job: NewJob): { job: Job; created: boolean } {
+  create(job: NewJob, scope: JobScope = {}): { job: Job; created: boolean } {
     return transaction(this.#db, () => {
       const existing = this.idempotencyKey(job.clientId, 'work_start', job.requestId);
       if (existing) {
+        const replayed = this.get(existing.jobId, scope);
+        if (!replayed) {
+          throw new GatewayError(
+            'insufficient_scope',
+            `requestId "${job.requestId}" belongs to a job on a host this agent may not operate on. Use a new requestId for new work.`,
+          );
+        }
         if (existing.inputHash !== job.inputHash) {
           throw new GatewayError(
             'request_id_conflict',
             `requestId "${job.requestId}" was already used for a different request. Use a new requestId for new work.`,
           );
         }
-        return { job: this.require(existing.jobId), created: false };
+        return { job: replayed, created: false };
       }
       const now = this.#clock();
       this.#db

@@ -124,6 +124,51 @@ describe('projectless work', () => {
     assert.deepEqual(fake.calls, []);
   });
 
+  for (const race of [
+    { host: 'main', changed: false, malformed: false, outcome: 'replay' },
+    { host: 'main', changed: true, malformed: false, outcome: 'request_id_conflict' },
+    { host: 'other', changed: false, malformed: false, outcome: 'insufficient_scope' },
+    { host: 'other', changed: true, malformed: false, outcome: 'insufficient_scope' },
+    { host: 'other', changed: false, malformed: true, outcome: 'insufficient_scope' },
+    { host: 'other', changed: true, malformed: true, outcome: 'insufficient_scope' },
+  ] as const) {
+    test(`transactional replay on ${race.host}, changed=${race.changed}, malformed=${race.malformed} returns ${race.outcome}`, async (t) => {
+      const { fake, gw, agent } = await startJobHarness(t, scratch);
+      const start = { project: 'pilot', task: 'Synthetic racing replay', requestId: 'racing-replay' };
+      const caller = { clientId: agent.clientId, scopes: ['host:main:read', 'host:main:operate'] as const };
+      fake.holdResponses.add('t3_project_list');
+      const pending = gw.services.jobs.start(caller, start);
+      await fake.whenHeld('t3_project_list');
+      const competing = gw.services.jobs.store.create({
+        id: 'racejob001',
+        clientId: agent.clientId,
+        requestId: start.requestId,
+        inputHash: startInputHash({ ...start, task: race.changed ? 'Different synthetic task' : start.task }),
+        projectAlias: 'pilot',
+        hostId: race.host,
+        task: start.task,
+        title: 'Private competing job title',
+        branch: '',
+        runtimeMode: 'full-access',
+      }).job;
+      if (race.malformed) gw.services.db.prepare('UPDATE jobs SET launch_spec = ? WHERE id = ?').run('{', competing.id);
+      fake.holdResponses.delete('t3_project_list');
+      fake.releaseHeld();
+      if (race.outcome === 'replay') {
+        assert.deepEqual(await pending, { job: competing, created: false });
+      } else {
+        await assert.rejects(pending, (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.equal('code' in error && error.code, race.outcome);
+          assert.doesNotMatch(error.message, /racejob001|main|other|Private competing job title/);
+          return true;
+        });
+      }
+      assert.equal(gw.services.db.prepare('SELECT COUNT(*) AS n FROM jobs').get()?.n, 1);
+      assert.equal(fake.launches.length, 0);
+    });
+  }
+
   for (const drift of ['workspace', 'project', 'host', 'disabled', 'runtime', 'ceiling', 'discovery'] as const) {
     test(`queued scratch rejects ${drift} policy drift before launch`, async (t) => {
       const { fake, gw, agent, tick } = await startJobHarness(t, scratch);
