@@ -246,6 +246,13 @@ ALTER TABLE jobs ADD COLUMN delegated_ended_at INTEGER;
     // for jobs from before this migration and for ordinary alias-only jobs, which dispatch as before.
     sql: `ALTER TABLE jobs ADD COLUMN launch_spec TEXT;`,
   },
+  {
+    version: 9,
+    name: 'workspace launch spec compatibility barrier',
+    // Older builds interpret an unknown launch_spec as NULL and could launch scratch work in a
+    // worktree. Their schema-version check must reject this ledger before reading v2 records.
+    sql: 'SELECT 1;',
+  },
 ];
 
 /**

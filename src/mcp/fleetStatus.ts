@@ -15,6 +15,7 @@ const errorSchema = z.object({ code: z.string(), message: z.string() });
 const hostSchema = z.object({
   id: z.string(),
   label: z.string().nullable(),
+  defaultProject: z.string().nullable().describe('Configured scratch alias for work_start { target: { host } }; null when no machine default is configured'),
   reachable: z.boolean().nullable().describe('null when the gateway has no credential to ask with; true when T3 answered, even if it refused the credential'),
   t3Version: z.string().nullable(),
   checkedAt: z.string(),
@@ -46,6 +47,7 @@ const outputSchema = z.object({
       alias: z.string(),
       description: z.string(),
       host: z.string(),
+      workspaceMode: z.enum(['scratch', 'worktree']).describe('scratch uses T3 internal scratch; worktree creates a fresh git worktree and branch'),
       runtimeMode: z
         .enum(RUNTIME_MODES)
         .describe(
@@ -92,10 +94,13 @@ function describeHost(host: HostStatus): string {
           ? `credential rejected by T3 (the operator must run: t3-fleet-gateway hosts enroll ${host.id})`
           : `credential expires in ${host.credential.daysLeft} ${host.credential.daysLeft === 1 ? 'day' : 'days'}`;
   const renewal = host.credential.renewalError ? `, last renewal failed (${host.credential.renewalError.code})` : '';
+  const scratch = host.defaultProject === null ? '' : host.discovery.enabled
+    ? `; no named project: work_start { target: { host: ${JSON.stringify(host.id)} } } uses scratch alias ${host.defaultProject}`
+    : `; scratch alias ${host.defaultProject} (host-only starts need discovery enabled)`;
   const discovery = host.discovery.enabled
     ? `; discovery on (fleet_projects, fleet_models${host.discovery.allowWorkStart ? '; work_start accepts target' : '; launches need a configured alias'})`
     : '';
-  return `${host.id}: ${reach}; ${credential}${renewal}; ${host.runningJobs} running, ${host.queuedJobs} queued (max ${host.maxConcurrentJobs})${discovery}`;
+  return `${host.id}: ${reach}; ${credential}${renewal}; ${host.runningJobs} running, ${host.queuedJobs} queued (max ${host.maxConcurrentJobs})${discovery}${scratch}`;
 }
 
 export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostRegistry; db: Database; jobs: JobService }) {
@@ -103,7 +108,9 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
     name: 'fleet_status',
     title: 'Fleet status',
     description:
-      'Show the machines (hosts) this gateway can run coding work on and the projects you can target. ' +
+      'Show the machines (hosts) this gateway can run work on and the projects you can target. ' +
+      'When the user names no project, use work_start with target { host } for the machine’s default scratch alias. ' +
+      'For a named project, resolve its alias or id; never fall back to scratch for an unknown project. ' +
       'For each host: whether its T3 Code server is reachable, its T3 version, when the gateway credential for it expires, ' +
       'and how many jobs are running or queued against its concurrency limit. For each project: the alias to use when ' +
       'starting work, a description, the host it runs on, its runtime mode and whether a model is configured. A project ' +
@@ -131,6 +138,7 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
           return {
             id: host.id,
             label: host.label ?? null,
+            defaultProject: host.defaultProject ?? null,
             reachable: health.reachable,
             t3Version: health.t3Version,
             checkedAt: isoTime(health.checkedAt),
@@ -153,6 +161,7 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
         alias: project.alias,
         description: project.description,
         host: project.host,
+        workspaceMode: project.workspaceMode,
         runtimeMode: project.runtimeMode,
         modelConfigured: configuredModel(deps.config, project) !== null,
         allowWorkStart: project.allowWorkStart,
@@ -164,7 +173,7 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
         `${GATEWAY_NAME} ${GATEWAY_VERSION}: ${hosts.length} host(s), ${projects.length} project(s).`,
         ...hosts.map(describeHost),
         ...projects.flatMap((project) => [
-          `project ${project.alias} on ${project.host} (${project.runtimeMode}${project.modelConfigured ? '' : ", T3's default model"}` +
+          `project ${project.alias} on ${project.host} (${project.runtimeMode}${project.workspaceMode === 'scratch' ? ', T3 internal scratch' : ''}${project.modelConfigured ? '' : ", T3's default model"}` +
             `${project.allowWorkStart ? '' : ', work_start disabled'})${project.description ? `: ${project.description}` : ''}`,
           ...project.standingJobs.map(
             (job) => `  standing job ${job.jobId} [${job.state}] ${job.title}: send it work with work_continue${job.link ? `; open: ${job.link}` : ''}`,

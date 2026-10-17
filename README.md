@@ -6,7 +6,7 @@ Let long-running AI agents in the cloud hand coding work to the [T3 Code](https:
 
 ![A terminal-style diagram showing a phone messaging Grok Bot, which talks to a single T3 Fleet Gateway that fans out to a Mac mini and an M3 MacBook, each branching into fleet/job worktrees and a chief-of-staff thread.](docs/images/architecture.svg)
 
-The agent says *what* to do in *which project*. The gateway decides *where* and *how*: which machine, which T3 project, a fresh git worktree per job, the T3 thread, and watching it. You never have to pick worktrees or threads, or keep checking threads by hand. Every job is an ordinary T3 thread you can open, read and interrupt.
+The agent says *what* to do and chooses a machine or project. The gateway creates the T3 thread and watches it. Named projects use a fresh git worktree per job. An optional machine default sends work with no named project to T3's internal scratch workspace, shown as "No project". Every job is an ordinary T3 thread you can open, read and interrupt.
 
 The first supported agent is Grok Bot; any MCP client with OAuth support should work.
 
@@ -63,6 +63,12 @@ Browsing does not grant launching. A project that has an alias is always started
 
 The manual steps behind the first prompt are in [Setup](#setup) below.
 
+### Work without a project
+
+Configure a scratch alias with `workspaceMode: "scratch"` and the verified ID of the machine's internal T3 scratch project. Set the host's `defaultProject` to that alias and enable discovery. The [configuration guide](docs/configuration.md#no-named-project) includes an example and upgrade instructions.
+
+When the user names no project, the agent passes `target: { host: "machine-a" }` to `work_start`. An explicit project still uses its alias or project ID. An unknown named project must be resolved rather than sent to scratch. Existing aliases keep their worktree behavior unless explicitly changed.
+
 ## How it works
 
 ```
@@ -72,7 +78,7 @@ Agent (Grok Bot, any MCP client)
 t3-fleet-gateway  ── SQLite (clients, tokens, host credentials, jobs)
    │  MCP client per host, bearer credential issued by that host's T3
    ▼
-T3 Code server(s)  ──► one T3 thread per job, in a fresh worktree on its own branch
+T3 Code server(s)  ──► one T3 thread per job, in a fresh worktree or configured scratch
 ```
 
 - One process on an always-on machine, listening on loopback; your tunnel is the only way in.
@@ -133,7 +139,7 @@ node bin/t3-fleet-gateway.js doctor               # check everything, including 
 
 1. In Grok Bot, add a remote MCP server with the URL `https://<your public URL>/mcp`.
 2. Grok Bot registers itself and opens the gateway's approval page. On the gateway machine run `node bin/t3-fleet-gateway.js pair`, enter the printed code on the page, choose **Read** or **Operate**, choose **All machines** or **Selected machines** (with the hosts ticked), and approve. All machines covers every host, including hosts you add later; Selected machines limits the agent to the ticked hosts, and it never sees or touches jobs anywhere else.
-3. Ask the agent to call `fleet_status`: it should list your hosts and project aliases. Then ask it to start a small task with `work_start` (or send one to a standing job with `work_continue`) and to check `work_feed` on a schedule. Each launched job is a T3 thread titled with `[job:<id>]` in a fresh worktree on its own branch, so you can open it in T3 at any time.
+3. Ask the agent to call `fleet_status`: it should list your hosts and project aliases. Then ask it to start a small task with `work_start` (or send one to a standing job with `work_continue`) and to check `work_feed` on a schedule. Each launched job is a T3 thread titled with `[job:<id>]` in its configured workspace, so you can open it in T3 at any time.
 
 An agent that can't sign in with OAuth and only takes a bearer token (Notion's custom MCP connections, for example) gets one from `node bin/t3-fleet-gateway.js clients token --name <name>` instead: Operate access to all hosts, valid a year by default (`--access read`, `--hosts mini,macbook`, `--ttl 90d` or `--ttl never` to change that); see [docs/operations.md](docs/operations.md#agents-that-only-take-a-bearer-token).
 

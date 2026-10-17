@@ -55,6 +55,7 @@ export interface EffectivePolicy {
   aliases: string[];
   allowWorkStart: boolean;
   runtimeMode: string | null;
+  workspaceMode: 'scratch' | 'worktree' | null;
   baseRef: string | null;
   branchPrefix: string | null;
   /** Where a launch without an explicit selection gets its model. */
@@ -71,13 +72,14 @@ export function effectivePolicy(config: GatewayConfig, policy: LaunchPolicy, pro
         aliases: [policy.project.alias],
         allowWorkStart: policy.project.allowWorkStart,
         runtimeMode: policy.project.runtimeMode,
-        baseRef: policy.project.baseRef,
-        branchPrefix: policy.project.branchPrefix,
+        workspaceMode: policy.project.workspaceMode,
+        baseRef: policy.project.workspaceMode === 'scratch' ? null : policy.project.baseRef,
+        branchPrefix: policy.project.workspaceMode === 'scratch' ? null : policy.project.branchPrefix,
         defaultModelSource: configured?.source ?? 't3_default',
       };
     }
     case 'ambiguous':
-      return { source: 'ambiguous', alias: null, aliases: policy.aliases, allowWorkStart: false, runtimeMode: null, baseRef: null, branchPrefix: null, defaultModelSource: null };
+      return { source: 'ambiguous', alias: null, aliases: policy.aliases, allowWorkStart: false, runtimeMode: null, workspaceMode: null, baseRef: null, branchPrefix: null, defaultModelSource: null };
     case 'discovered': {
       const { discovery } = policy.host;
       return {
@@ -86,6 +88,7 @@ export function effectivePolicy(config: GatewayConfig, policy: LaunchPolicy, pro
         aliases: [],
         allowWorkStart: discovery.allowWorkStart,
         runtimeMode: discovery.runtimeMode,
+        workspaceMode: 'worktree',
         baseRef: discovery.baseRef,
         branchPrefix: discovery.branchPrefix,
         defaultModelSource: policy.host.defaultModelSelection ? 'host' : project.hasDefaultModel ? 't3_default' : null,
