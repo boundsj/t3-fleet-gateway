@@ -106,6 +106,32 @@ For example, asking the bot for a project (here a fictional toy app) for a new f
 
 **How a coordinator looks to the agent.** When a T3 coordinator delegates, its own turn ends while the child thread works, and T3 starts its next turn by itself when the child is done. So the agent sees the standing job go `idle` (with `waitingOnDelegatedWork: true` and the delegated task titles while T3 shows that work running), then `running` and `idle` again with no action of its own; `work_feed` reports those turns (`turn_started`, `turn_finished`). The tool descriptions tell the agent to read the coordinator's reply and, while it waits on delegated work, to wait for its next turn rather than send new instructions (which would start a competing turn). Replies are always the coordinator's own messages, never a child's summary. Details: [docs/operations.md](docs/operations.md#standing-jobs) and [docs/configuration.md](docs/configuration.md#projects-with-a-coordinator).
 
+## See the fleet: the operator dashboard
+
+![The operator dashboard on sample data. A desktop browser in light mode shows "5 things need your attention", status cards for the gateway, hosts, clients and jobs, and a map from the agent clients Notion (never observed), Grok Bot and Muse (seen recently) through the gateway to three fictional hosts: Studio Mac mini answering, Forge workstation unreachable, and Lab VM answering with a renewal due. A phone in dark mode shows the same overview.](docs/images/dashboard.png)
+
+*Sample data: real screenshots of the dashboard running on the demo fleet from `npm run dashboard:demo` (desktop in light mode, phone in dark mode). Grok Bot, Muse and Notion are demo clients; the hosts, projects and activity are made up.*
+
+Agents hand off the work, T3 does it, and the gateway keeps track. The operator dashboard is the page you glance at to see how it is all going: optional, read-only, on desktop or phone. It answers five questions:
+
+- **Is the gateway running?** Its job engine, its database, and whether the public URL reaches it.
+- **Which machines answer?** Each host's last health check and when it ran, plus credentials due for renewal.
+- **Which agents can connect, and which actually did?** What each client may do now, kept apart from its last successful request, so a usable token that has never been used stands out.
+- **What is waiting on you?** Approvals, questions, failed runs and unreachable hosts, most serious first. Each says where to act: **Open in T3** for a thread, or a command to copy and run on the gateway machine.
+- **What happened recently?** Job events, shown as codes.
+
+It controls nothing: approvals, answers and stopping work happen in T3, and enrolling hosts or approving agents happens in the CLI. It shows no tokens, task text, replies or questions, never contacts T3 when you open it, and asks the hosts only when you press **Run checks**.
+
+**Try it on a made-up fleet** from a checkout. It uses temporary data on loopback, never reads your config and never touches a real T3:
+
+```sh
+npm install
+npm run dashboard:demo                            # open the URL it prints; Ctrl-C stops it and deletes its data
+npm run dashboard:demo -- --scenario host-down    # or healthy, auth-issue, empty; --list describes them
+```
+
+**Turn it on for real** with a `dashboard` block in your config (`"enabled": true`, its own loopback port, `3791` by default) and restart the gateway. It runs inside `serve` on that listener, never on the public MCP URL: publish it to your tailnet only, for example with `tailscale serve` on a path (never Funnel), and list the host name your browser uses in `allowedHosts`. `doctor` then checks that it answers and that the public URL does not serve it. Steps: [docs/operations.md](docs/operations.md#operator-dashboard); fields: [docs/configuration.md](docs/configuration.md#dashboard).
+
 ## Setup
 
 Requirements: Node.js 24 or newer (the latest Node 24 or 26 release is recommended), a T3 Code server, and the `t3` CLI on the machine that can mint pairing codes for it.
@@ -151,6 +177,8 @@ A network outage is separate from token expiry. Keep the OAuth credentials and s
 
 ## Status
 
+**v0.1.8** adds the opt-in, read-only operator dashboard (above; `dashboard` in [docs/configuration.md](docs/configuration.md#dashboard)): a separate loopback listener with a strict CSP and no login of its own, meant for a tailnet-only proxy, with honest host, client, job and event views built from the database and a manual **Run checks**. `doctor` checks that it answers and that the public URL does not serve it. No migration; nothing changes unless `dashboard.enabled` is set. Covered by synthetic tests (listener isolation, Host/Origin/Funnel handling, privacy, bounds, safe rendering of hostile names in every view) and a demo fleet with five scenarios; no live deployment is claimed by this release note.
+
 **v0.1.7** fixes the startup and `doctor` probe deadline: the configured non-mutating `mintPairingCodeProbe` now has ten seconds instead of two, because a launchd agent with `ProcessType` Background runs its children at a lower priority and the T3 version probe was measured at just over two seconds there, warning `probe_timeout` on every start ([evidence](docs/evidence/startup-probe.md)). Nothing else about the probe or the service template changes. It also carries opt-in discovery ([issue #12](https://github.com/boundsj/t3-fleet-gateway/issues/12)). Per host, `discovery.enabled` lets agents list that machine's T3 projects (`fleet_projects`) and its providers, models and options such as reasoning effort (`fleet_models`), read live from T3 and bounded; `work_start` then also takes a `target` by T3 project id and an explicit `modelSelection`, validated against what the host advertises. Launching into projects without an alias is a separate switch (`discovery.allowWorkStart`), and configured aliases keep all their rules. Everything is off by default and existing setups are unchanged. Covered by synthetic two-host tests and a bounded isolated smoke against one fresh QA-only T3 instance (28 of 28 checks, [evidence](docs/evidence/discovery.md)); not yet a live fleet, production or hosted-connector qualification.
 
 **v0.1.6** accepts current T3 thread responses without a `link` field, generates the documented thread URL, and retains older links. Watchers recover and clear stale response-shape errors after a successful observation. No database migration or configuration change.
@@ -177,7 +205,7 @@ Details: [docs/security.md](docs/security.md). To report a vulnerability, see [S
 ## Documentation
 
 - [docs/configuration.md](docs/configuration.md): every config field
-- [docs/operations.md](docs/operations.md): enroll, pair, revoke, renewal, standing jobs, doctor, running as a service, logs, backup, uninstall
+- [docs/operations.md](docs/operations.md): enroll, pair, revoke, renewal, standing jobs, doctor, the operator dashboard, running as a service, logs, backup, uninstall
 - [docs/security.md](docs/security.md): threat model and what is stored where
 - [docs/design.md](docs/design.md): the design specification
 
@@ -189,6 +217,7 @@ npm run check      # typecheck and the full test suite
 npm test           # tests only (node:test)
 npm run typecheck  # tsc --noEmit
 npm run compat:check  # on-demand, read-only check of the configured T3 hosts
+npm run dashboard:demo  # the operator dashboard on a synthetic fleet (loopback, temporary data)
 ```
 
 Tests use a fake T3 server built with the MCP SDK and never touch a real T3. CI runs `npm run check` on Node 24 and 26 (Linux) and 26 (macOS). See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).

@@ -639,6 +639,25 @@ export class JobStore {
     return rows.map(toEvent);
   }
 
+  /** The newest events across all jobs, newest first, with their job's project and title (the operator dashboard). */
+  latestEvents(limit: number): FeedEvent[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT job_events.*, jobs.project_alias, jobs.title, jobs.host_id, jobs.t3_project_id FROM job_events JOIN jobs ON jobs.id = job_events.job_id
+          ORDER BY job_events.id DESC LIMIT ?`,
+      )
+      .all(limit) as unknown as (EventRow & { project_alias: string; title: string; host_id: string; t3_project_id: string | null })[];
+    return rows.map((row) => ({ ...toEvent(row), projectAlias: row.project_alias, title: row.title, hostId: row.host_id, t3ProjectId: row.t3_project_id }));
+  }
+
+  /** How many jobs are in each state, per host. */
+  stateCounts(): { hostId: string; state: JobState; standing: boolean; count: number }[] {
+    const rows = this.#db
+      .prepare('SELECT host_id, state, standing, COUNT(*) AS n FROM jobs GROUP BY host_id, state, standing ORDER BY host_id, state, standing')
+      .all() as { host_id: string; state: JobState; standing: number; n: number }[];
+    return rows.map((row) => ({ hostId: row.host_id, state: row.state, standing: row.standing === 1, count: row.n }));
+  }
+
   /** Events after `cursor` (exclusive), oldest first, with their job's project and title. `scope`: see JobScope. */
   eventsAfter(cursor: number, limit: number, scope: JobScope = {}): FeedEvent[] {
     const filter = scopeClause(scope);

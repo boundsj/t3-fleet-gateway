@@ -1,4 +1,6 @@
 import { mcpResource, type GatewayConfig } from './config.ts';
+import { DashboardChecks } from './dashboard/checks.ts';
+import { startDashboard, type RunningDashboard } from './dashboard/server.ts';
 import { openDataDir } from './dataDir.ts';
 import { openDatabase, type Database } from './db/database.ts';
 import { CatalogService } from './hosts/catalog.ts';
@@ -101,6 +103,8 @@ export interface RunningGateway {
   /** The dispatcher and watcher. */
   engine: JobEngine;
   port: number;
+  /** The operator dashboard's listener, when `dashboard.enabled`; never the MCP listener. */
+  dashboard: { port: number; path: string; checks: DashboardChecks } | null;
   close(): Promise<void>;
 }
 
@@ -110,11 +114,16 @@ export interface GatewayOptions extends ServiceOptions {
   jobEngine?: { autoStart?: boolean; intervalMs?: number; launchTimeoutMs?: number };
   /** Listen on this port instead of `config.listen.port`; 0 lets the OS pick one (tests). */
   port?: number;
+  /** The same for the dashboard listener (`dashboard.listen.port`). */
+  dashboardPort?: number;
+  /** A badge the dashboard shows on every page; the synthetic demo sets it. */
+  dashboardDemoLabel?: string;
 }
 
 /** Start the HTTP server (OAuth + MCP), the job engine and the credential renewal loop. */
 export async function startGateway(options: GatewayOptions): Promise<RunningGateway> {
   const services = openServices(options);
+  const startedAt = services.clock();
   const { config, logger } = services;
   const mcp = createMcpEndpoint({
     publicUrl: config.publicUrl,
@@ -169,6 +178,32 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
     ...(options.jobEngine?.launchTimeoutMs === undefined ? {} : { launchTimeoutMs: options.jobEngine.launchTimeoutMs }),
   });
   services.jobs.wake = () => engine.wake();
+  let dashboard: RunningDashboard | undefined;
+  let checks: DashboardChecks | undefined;
+  if (config.dashboard.enabled) {
+    checks = new DashboardChecks({
+      config, db: services.db, dataDir: options.dataDir, registry: services.registry, clock: services.clock, logger,
+      ...(options.commandEnv ? { commandEnv: options.commandEnv } : {}),
+    });
+    const lastChecks = checks;
+    try {
+      dashboard = await startDashboard({
+        dashboard: config.dashboard,
+        checks,
+        logger,
+        ...(options.dashboardPort === undefined ? {} : { port: options.dashboardPort }),
+        sources: {
+          config, db: services.db, clock: services.clock, registry: services.registry, store: services.jobs.store, engine, startedAt,
+          mcpListen: `${config.listen.host}:${server.port}`, lastChecks: () => lastChecks.last, demoLabel: options.dashboardDemoLabel ?? null,
+        },
+      });
+    } catch (error) {
+      commandCheck.abort();
+      await server.close();
+      await services.close();
+      throw error;
+    }
+  }
   if (options.jobEngine?.autoStart !== false) engine.start();
   // Checked in the background: an unreachable host must not delay startup or shutdown. Logged as warnings.
   const modelCheck = new AbortController();
@@ -180,6 +215,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
     // Not awaited: a call still in flight ends when the T3 clients close below.
     modelCheck.abort();
     commandCheck.abort();
+    await dashboard?.close();
     await server.close();
     // The engine finishes its current tick; job state is already in the database.
     await engine.stop();
@@ -192,6 +228,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
     services,
     engine,
     port: server.port,
+    dashboard: dashboard && checks ? { port: dashboard.port, path: dashboard.path, checks } : null,
     close: () => (closing ??= shutdown()),
   };
 }

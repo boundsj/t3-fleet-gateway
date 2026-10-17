@@ -372,6 +372,16 @@ describe('cli', () => {
     assert.match(served.out, /"event":"gateway.stopped"/);
   });
 
+  test('doctor checks the dashboard only when it is enabled, and says when it cannot verify it', async (t) => {
+    const off = await run(await environment(t), ['doctor']);
+    assert.doesNotMatch(off.out, /dashboard/);
+    // Port 9 (discard) has no listener here: nothing serves the dashboard, and the public URL has no gateway behind it.
+    const env = await environment(t, undefined, { dashboard: { enabled: true, listen: { host: '127.0.0.1', port: 9 }, basePath: '/fleet' } });
+    const result = await run(env, ['doctor']);
+    assert.match(result.out, /WARN  dashboard: http:\/\/127\.0\.0\.1:9\/fleet\/ is not answering\. Is serve running\?/);
+    assert.match(result.out, /WARN  dashboard exposure: Could not ask the public URL/);
+  });
+
   test('doctor detects a missing renewal executable while the enrolled host is healthy', async (t) => {
     const fake = await startFakeT3();
     t.after(() => fake.close());

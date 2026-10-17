@@ -55,6 +55,8 @@ export class HostRegistry {
   readonly #hosts: Map<string, HostConfig>;
   readonly #clients = new Map<string, T3Client>();
   readonly #health = new Map<string, { value: Promise<HostHealth>; at: number; settled?: HostHealth }>();
+  /** The newest completed check per host, kept while a later one is in flight. */
+  readonly #lastHealth = new Map<string, HostHealth>();
   readonly #enrolling = new Map<string, Promise<EnrollResult>>();
   readonly #options: HostRegistryOptions;
 
@@ -107,9 +109,23 @@ export class HostRegistry {
     const entry: { value: Promise<HostHealth>; at: number; settled?: HostHealth } = {
       value: this.#checkHealth(id), at: now,
     };
-    entry.value = entry.value.then((health) => { entry.settled = health; return health; });
+    entry.value = entry.value.then((health) => {
+      entry.settled = health;
+      // A slower, older check that settles late never replaces a newer result.
+      if ((this.#lastHealth.get(id)?.checkedAt ?? -Infinity) <= health.checkedAt) this.#lastHealth.set(id, health);
+      return health;
+    });
     this.#health.set(id, entry);
     return entry.value;
+  }
+
+  /**
+   * The last completed health check, however old, without starting one (the dashboard shows its age); null when none
+   * has completed since the process started.
+   */
+  lastHealth(id: string): HostHealth | null {
+    this.host(id);
+    return this.#lastHealth.get(id) ?? null;
   }
 
   async #checkHealth(id: string): Promise<HostHealth> {
@@ -179,6 +195,7 @@ export class HostRegistry {
       store.save(credential);
       store.recordRenewal(id, clock(), { ok: true });
       this.#health.delete(id);
+      this.#lastHealth.delete(id);
       logger.info('host.enrollment_succeeded', { hostId: id, expiresAt: new Date(credential.expiresAt).toISOString() });
       return { hostId: id, t3Version, expiresAt: credential.expiresAt };
     } catch (error) {

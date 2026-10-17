@@ -69,6 +69,8 @@ export interface JobHarnessOptions {
   host?: Record<string, unknown>;
   /** Extra fields for the pilot project's config entry. */
   pilot?: Record<string, unknown>;
+  /** The operator dashboard's config block (docs/design.md, "Operator dashboard"). */
+  dashboard?: Record<string, unknown>;
 }
 
 /**
@@ -93,6 +95,7 @@ export async function startJobHarness(t: TestContext, options: JobHarnessOptions
         },
       ],
       ...(options.watcher ? { watcher: { pollSeconds: 10, ...options.watcher } } : {}),
+      ...(options.dashboard ? { dashboard: options.dashboard } : {}),
     },
     ...(options.dataDir ? { dataDir: options.dataDir } : {}),
     ...(options.door ? { door: options.door } : {}),

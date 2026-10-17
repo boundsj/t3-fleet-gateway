@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.8 (2026-10-16)
+
+### Added
+
+- An opt-in, read-only operator dashboard (`dashboard`, off by default; [operations](docs/operations.md#operator-dashboard), [design](docs/design.md#operator-dashboard), [security](docs/security.md#the-operator-dashboard)). `serve` runs it on a loopback listener of its own (default `127.0.0.1:3791`, never the MCP port), to be published with a tailnet-only proxy on a path (`dashboard.basePath`). Views: an overview (what needs you, vital signs, an agents → gateway → hosts map, recent activity), hosts (last check with its time, engine backoff, credential and renewal, capacity, policy and projects), clients (authorization separated from observed MCP and refresh successes; unknown stays unknown), jobs (waiting or recent, open, finished, with T3 thread links and a code-only activity log) and checks. It controls nothing: approvals and job control stay in T3.
+- **Run checks**, on demand only: a fresh `t3_environment_read` per host, the public URL's metadata, that the public URL does not serve the dashboard, the database quick check, data directory permissions, credential state and the mint executable's resolution. Nothing is enrolled, renewed or executed.
+- `doctor`, with the dashboard enabled, checks that it answers on its listener and that the public URL does not serve it (`dashboard exposure`).
+- `hosts[].transportNote` (a descriptive label such as "SSH tunnel", shown on the dashboard and never checked) and `dashboard.clientLabels` (display names for client ids).
+- `npm run dashboard:demo`: the dashboard on a synthetic fleet (a real gateway with temporary data, fake T3 hosts on loopback, the fictional clients Grok Bot, Muse and Notion) in five scenarios, for screenshots and browser checks.
+
+### Security
+
+- No login, session, cookie or browser storage: the network (loopback plus a tailnet-only proxy) is the boundary, and the page holds no secret. Requests with an unexpected `Host` get `421` (DNS rebinding); requests Tailscale marks as Funnel traffic get `403`; API requests need a custom header and refuse cross-site fetch metadata and foreign origins; responses carry a strict CSP without inline script or style, `frame-ancestors 'none'` and CORP. The page builds its DOM without HTML parsing and links only to its own views and `t3-thread://v1/<id>` (built from validated thread ids).
+- The dashboard shows no tokens, hashes, codes, T3 credentials, the server key, mint commands or their output, task text, replies, questions, options, answers, delegated task titles or catalogs, and errors only as codes with fixed text. Opening it never contacts T3.
+
+### Compatibility
+
+- No migration and no change to OAuth, MCP, tools, grants or the job engine's behavior. The engine and host registry gain read-only accessors (`JobEngine.status()`, `HostRegistry.lastHealth()`), the job store two read queries, and `doctor`'s public URL check shares its probe with the dashboard. Existing configs are valid unchanged.
+- Covered by synthetic tests: `test/dashboard.test.ts` (configuration, listener isolation both ways, Host/Funnel/Origin/fetch-metadata/content-type handling, headers, base paths, honest host states including outage, refusal, not enrolled and engine backoff, clients with expired, revoked, replayed and never-observed grants, jobs and attention, privacy of content and secrets in responses and logs, bounds, read-only checks, exposure through a misdirected tunnel), `test/dashboard-ui.test.ts` (hostile text in every view, unsafe links dropped, no HTML-parsing APIs) and `test/dashboard-demo.test.ts` (four demo scenarios end to end). No live deployment is claimed here.
+
 ## 0.1.7 (2026-10-16)
 
 ### Fixed

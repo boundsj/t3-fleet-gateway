@@ -44,6 +44,7 @@ Each entry is a machine running a T3 Code server.
 | --- | --- | --- |
 | `id` | required | Short stable id (lowercase letters, digits, hyphens; up to 32). Used in project config, CLI commands, tool output and per-host grants (`host:<id>:read`, `clients token --hosts <id>`): renaming a host drops it from every grant restricted to selected machines, and a grant for a removed id applies again to a new host given that id. |
 | `label` | none | Human-friendly name shown in `fleet_status` and on the approval page, which anyone who registers a client can open. |
+| `transportNote` | none | How the gateway reaches this host, in your words, up to 80 characters (for example `SSH tunnel` or `Same machine`). Shown on the operator dashboard next to `t3Url`; descriptive only, never checked. |
 | `t3Url` | required | T3 server origin. `http` only for loopback; `https` for remote hosts. |
 | `mintPairingCode` | `["t3","auth","pairing","create","--ttl","5m","--json"]` | Command (argv, no shell) that prints a T3 pairing code as JSON with a `credential` field. For a remote host use something like `["ssh","other-host","t3","auth","pairing","create","--ttl","5m","--json"]`. Adding `--label t3-fleet-gateway` makes the pairing easy to spot in T3. |
 | `mintPairingCodeProbe` | none | Optional exact argv for a non-mutating check you have verified is safe to run at `doctor` and startup. No shell; 1–32 arguments, at most 4,096 characters each. Never set this to the pairing/mint command. See "Renewal command preflight" below. |
@@ -136,6 +137,30 @@ OAuth TTLs govern gateway grants only; static bearer tokens from `clients token`
 | --- | --- | --- |
 | `pollSeconds` | `10` (2 to 300) | How often the job engine ticks: reconcile uncertain launches, poll active jobs' threads, dispatch queued jobs. Idle jobs are polled at most once a minute. A new job or agent action also triggers a tick at once. |
 | `reconcileWindowMinutes` | `10` (1 to 240) | How long a launch with an unknown outcome may go unconfirmed, while the host answers, before the job fails with `launch_not_confirmed`. Time the host is unreachable does not count. |
+
+### `dashboard`
+
+The read-only operator dashboard (v0.1.8): gateway, hosts, agent clients, jobs and recent job events in a browser, with a manual **Run checks**. Off by default. It runs inside `serve` on a listener of its own, never the MCP listener, so the tunnel that carries `/mcp` to agents does not carry it. See [operations.md](operations.md#operator-dashboard) for publishing it to your tailnet and [security.md](security.md#the-operator-dashboard) for the trust boundary.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Start the dashboard listener with `serve`. |
+| `listen` | `{ "host": "127.0.0.1", "port": 3791 }` | Loopback only (`127.0.0.1`, `::1` or `localhost`), and a different port from `listen.port`. Publish it with a tailnet-only reverse proxy; never point a public tunnel (Funnel) at it. |
+| `basePath` | `"/"` | The path it is served under: `/` or up to four lowercase segments such as `/t3-fleet-gateway`, with no trailing slash. Set it to the proxy's mount path, and have the proxy keep the path (for `tailscale serve --set-path /t3-fleet-gateway`, target `http://127.0.0.1:3791/t3-fleet-gateway`). |
+| `allowedHosts` | `[]` | `Host` header values the dashboard accepts besides its own loopback address and port, exact and lowercase, with a port only when the browser shows one: your proxy's host name, such as `<machine>.<tailnet>.ts.net`. Anything else gets `421` (protection against DNS rebinding). At most 16. |
+| `clientLabels` | `{}` | Display names for agent clients by client id (see `clients list`), for example a connector that registered as `Cursor` shown as `Grok Bot`. At most 100, each up to 80 characters. The registered name is still shown beside it. |
+
+```json
+"dashboard": {
+  "enabled": true,
+  "listen": { "host": "127.0.0.1", "port": 3791 },
+  "basePath": "/t3-fleet-gateway",
+  "allowedHosts": ["<machine>.<tailnet>.ts.net"],
+  "clientLabels": { "<client id>": "Grok Bot" }
+}
+```
+
+Changing it takes a restart of `serve`. `doctor` checks that the dashboard answers on its listener and that the public URL does not serve it.
 
 ## A remote host
 

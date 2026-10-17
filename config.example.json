@@ -5,6 +5,7 @@
     {
       "id": "main",
       "label": "Always-on workstation",
+      "transportNote": "Same machine",
       "t3Url": "http://127.0.0.1:3773",
       "mintPairingCode": ["t3", "auth", "pairing", "create", "--ttl", "5m", "--label", "t3-fleet-gateway", "--json"],
       "access": "full-access",
@@ -26,5 +27,6 @@
   ],
   "tokens": { "accessTtlSeconds": 43200, "refreshIdleTtlDays": 90 },
   "renewal": { "renewWhenDaysLeft": 5, "checkEveryMinutes": 60 },
-  "watcher": { "pollSeconds": 10, "reconcileWindowMinutes": 10 }
+  "watcher": { "pollSeconds": 10, "reconcileWindowMinutes": 10 },
+  "dashboard": { "enabled": false, "listen": { "host": "127.0.0.1", "port": 3791 }, "basePath": "/t3-fleet-gateway", "allowedHosts": [], "clientLabels": {} }
 }
