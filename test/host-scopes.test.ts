@@ -370,6 +370,42 @@ async function stopGateway(gw: TestGateway): Promise<void> {
 const unknownJob = (jobId: string) => `not_found: No job ${jobId}. Use work_list to see jobs.`;
 
 describe('host grants: work tools on two hosts', () => {
+  test('an Operate-only grant narrowed by refresh can still cancel an allowed job', async (t) => {
+    const { gw, trusted } = await startFleet(t);
+    const job = await startIn(trusted, 'beta', 'Synthetic operate-only cancellation');
+    const agent = await connect(t, gw, 'operate', ['macbook']);
+    const response = await tokenRequest(gw.baseUrl, {
+      grant_type: 'refresh_token', client_id: agent.clientId, refresh_token: agent.tokens.refresh_token, scope: 'host:macbook:operate',
+    });
+    assert.equal(response.status, 200);
+    const tokens = (await response.json()) as IssuedTokens;
+    assert.equal(tokens.scope, 'host:macbook:operate');
+    const narrowed = await agentWithToken(t, gw.baseUrl, agent.clientId, tokens.access_token);
+    assert.equal((await narrowed.call<{ outcome: string }>('work_cancel', { jobId: job.jobId })).outcome, 'cancelled');
+  });
+
+  test('hidden jobs with malformed or unsupported launch specs return the same error as unknown jobs', async (t) => {
+    const { mini, macbook, gw, trusted } = await startFleet(t);
+    const hidden = await startIn(trusted, 'beta', 'Synthetic hidden launch spec');
+    const agent = await connect(t, gw, 'operate', ['mini']);
+    const calls = [mini.calls.length, macbook.calls.length];
+    const denied: [string, Record<string, unknown>][] = [
+      ['work_status', { jobId: hidden.jobId }],
+      ['work_messages', { jobId: hidden.jobId }],
+      ['work_continue', { jobId: hidden.jobId, message: 'Synthetic follow-up', requestId: 'hidden-continue' }],
+      ['work_respond', { jobId: hidden.jobId, requestId: 'synthetic-question', answers: {} }],
+      ['work_cancel', { jobId: hidden.jobId }],
+    ];
+    for (const spec of ['{', '{"v":99}']) {
+      gw.services.db.prepare('UPDATE jobs SET launch_spec = ? WHERE id = ?').run(spec, hidden.jobId);
+      for (const [tool, args] of denied) {
+        assert.equal((await agent.callError(tool, args)).text, unknownJob(hidden.jobId), tool);
+      }
+      assert.equal((await trusted.callError('work_status', { jobId: hidden.jobId })).code, 'database_error');
+    }
+    assert.deepEqual([mini.calls.length, macbook.calls.length], calls);
+  });
+
   test('a mini-only Operate agent reads, starts and steers mini work; MacBook work is invisible and untouched', async (t) => {
     const fleet = await startFleet(t);
     const { mini, macbook, gw, trusted, tick } = fleet;

@@ -249,13 +249,12 @@ export class JobService {
     throw new GatewayError('not_found', `No project "${alias}". Known projects: ${known.join(', ') || '(none configured)'}. fleet_status lists them.`);
   }
 
-  /**
-   * A job as an agent may use it, checked before anything is read from T3 or returned from the ledger: a job on
-   * a host the agent may not read is reported exactly as an unknown job id; one it may read but not operate is
-   * refused with insufficient_scope.
-   */
   #jobFor(caller: Caller, jobId: string, level: AccessLevel): Job {
-    const job = this.store.get(jobId);
+    const requestedHosts = permittedHosts(caller.scopes, level);
+    const readableHosts = permittedHosts(caller.scopes, 'read');
+    const scope = requestedHosts === 'all' || readableHosts === 'all'
+      ? {} : { hostIds: [...new Set([...requestedHosts, ...readableHosts])] };
+    const job = this.store.get(jobId, scope);
     if (job && permits(caller.scopes, level, job.hostId)) return job;
     if (job && permits(caller.scopes, 'read', job.hostId)) {
       throw new GatewayError(
