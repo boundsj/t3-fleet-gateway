@@ -248,7 +248,10 @@ export class FakeT3 {
   readonly brokenReads = new Set<string>();
   /** Thread id to a T3 failure returned by t3_thread_read for that thread only. */
   readonly readFailures = new Map<string, { code: string; message: string }>();
-  /** Tools whose calls take effect but whose answer is held back until releaseHeld() or stop(). */
+  /**
+   * Tools whose calls take effect but whose answer is held back until releaseHeld() or stop(). `initialize` holds a new
+   * session's MCP initialization before it is handled (a client still connecting).
+   */
   readonly holdResponses = new Set<string>();
   /** When set, t3_thread_launch creates the thread but starts no run on it (thread `idle`, no runs). */
   launchWithoutRun = false;
@@ -598,6 +601,7 @@ export class FakeT3 {
       return;
     }
     const sessionId = req.headers['mcp-session-id'];
+    if (sessionId === undefined && this.holdResponses.has('initialize') && isInitialize(body)) await this.#hold('initialize');
     let transport: WebStandardStreamableHTTPServerTransport;
     if (typeof sessionId === 'string') {
       const session = this.#sessions.get(sessionId);
@@ -980,6 +984,14 @@ export class FakeT3 {
       nextPosition: page.at(-1)?.position ?? null,
       hasMore: remaining.length > page.length,
     };
+  }
+}
+
+function isInitialize(body: Buffer | undefined): boolean {
+  try {
+    return (JSON.parse(body?.toString() ?? '') as { method?: unknown }).method === 'initialize';
+  } catch {
+    return false;
   }
 }
 

@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { request } from 'node:http';
 import { describe, test, type TestContext } from 'node:test';
 import { parseConfig } from '../src/config.ts';
-import { LIMITS, threadLink, type DashboardSnapshot } from '../src/dashboard/snapshot.ts';
+import { DashboardChecks } from '../src/dashboard/checks.ts';
+import { buildSnapshot, LIMITS, threadLink, type DashboardSnapshot } from '../src/dashboard/snapshot.ts';
 import { newJobId } from '../src/jobs/ids.ts';
 import { scopesForGrant } from '../src/oauth/scopes.ts';
-import { HOUR, MINUTE } from '../src/time.ts';
+import { DAY, HOUR, MINUTE } from '../src/time.ts';
 import { startFakeT3 } from './helpers/fakeT3.ts';
+import { loadApp } from './helpers/dashboardApp.ts';
+import { FakeDocument } from './helpers/fakeDom.ts';
 import { startTestGateway, type TestGateway } from './helpers/gateway.ts';
 import { startJob, startJobHarness, type JobHarness } from './helpers/jobs.ts';
 import { registerClient, signIn, tokenRequest } from './helpers/oauthFlow.ts';
@@ -226,6 +230,20 @@ describe('dashboard: exposure', () => {
     assert.equal(exposure?.code, 'dashboard_listener_public', 'refused by Host, and reported');
     h.gw.door.disconnect();
     h.gw.door.target = h.gw.gateway.port;
+
+    // Failed checks need attention on the overview, on this and every later page load, not only on the Checks page.
+    const later = await snapshot(h.port);
+    const failed = later.attention.filter((item) => item.kind === 'gateway');
+    assert.deepEqual(failed.map((item) => [item.ref, item.tone]).sort(), [['dashboard_exposure', 'bad'], ['public_url', 'bad']]);
+    assert.ok(failed.every((item) => item.at === later.checks!.finishedAt && item.action?.kind === 'view'));
+    assert.equal(later.attention.some((item) => item.kind === 'host'), false, 'the host answered: nothing about it is repeated');
+    const app = await loadApp();
+    const doc = new FakeDocument();
+    const root = doc.createElement('div');
+    app.render(doc, root, { snapshot: later, route: { view: 'overview', id: null }, error: null, notice: null, loading: false, checking: false, fetchedAt: Date.now(), jobFilter: 'attention' },
+      { refresh() {}, runChecks() {}, setJobFilter() {}, copy() {} });
+    assert.doesNotMatch(root.textContent, /All clear/);
+    assert.match(root.textContent, /2 things need your attention/);
   });
 });
 
@@ -280,6 +298,36 @@ describe('dashboard: hosts', () => {
     const reloaded = await snapshot(h.port);
     assert.equal(reloaded.hosts[0]!.reachability.state, 'unreachable');
     assert.equal(h.fake.calls.length, calls);
+  });
+
+  test('a host check has an absolute deadline, even on a connection another caller is still initializing', async (t) => {
+    const h = await harness(t);
+    const { config, db, clock, logger, registry, jobs } = h.gw.services;
+    // Another caller (the engine, discovery) opens the host's shared connection, with the client's long default timeout.
+    h.fake.holdResponses.add('initialize');
+    const ongoing = registry.client('main').listProjects();
+    await h.fake.whenHeld('initialize');
+    const checks = new DashboardChecks({ config, db, dataDir: h.gw.dataDir, registry, clock, logger, hostDeadlineMs: 200 });
+    const run = await checks.run();
+    const t3 = run.results.find((result) => result.id === 'host:main:t3');
+    assert.equal(t3?.level, 'fail');
+    assert.equal(t3?.code, 't3_timeout', 'a timeout, never a cached or assumed success');
+    const sources = {
+      config, db, clock, registry, store: jobs.store, engine: h.gw.gateway.engine, startedAt: clock(), mcpListen: 'test', lastChecks: () => checks.last,
+    };
+    let snap = buildSnapshot(sources);
+    assert.equal(snap.hosts[0]!.reachability.state, 'unchecked', 'no answer yet');
+    assert.ok(snap.attention.some((item) => item.kind === 'host' && item.ref === 'main' && item.tone === 'bad' && /T3 answers check failed/.test(item.title)));
+
+    // The ongoing operation is unaffected, and the check's own read finishes later and is shown with its own time.
+    h.fake.holdResponses.delete('initialize');
+    h.fake.releaseHeld();
+    assert.ok((await ongoing).length > 0, 'the other caller got its answer');
+    const settled = await registry.health('main');
+    assert.equal(settled.reachable, true);
+    snap = buildSnapshot(sources);
+    assert.equal(snap.hosts[0]!.reachability.state, 'reachable');
+    assert.equal(snap.attention.some((item) => item.kind === 'host'), false, 'the late answer replaces the timed-out check');
   });
 
   test('a repeated check within seconds reuses the last run; the engine backoff and job marks are reported', async (t) => {
@@ -374,6 +422,47 @@ describe('dashboard: clients', () => {
     assert.equal(snap.clients.items.find((client) => client.id === bearer.clientId)!.grant.state, 'revoked');
     assert.equal(snap.attention.some((item) => item.ref === bearer.clientId), false);
     assert.equal(snap.clients.items.at(-1)!.id, bearer.clientId, 'revoked clients sort last');
+  });
+
+  test('a bearer replacement command keeps the token\'s access and hosts, and its name is one literal shell word', async (t) => {
+    const h = await harness(t);
+    const name = `Reader $(printf EXPANDED) \`printf TICKED\` "quoted" it's \${HOME} \\ end`;
+    const restricted = h.gw.services.tokens.issueOperatorToken({ name, scopes: scopesForGrant('read', ['main']), expiresAt: h.gw.clock() + 2 * HOUR });
+    const fleet = h.gw.services.tokens.issueOperatorToken({ name: 'Fleet', scopes: scopesForGrant('operate', 'all'), expiresAt: h.gw.clock() + 2 * HOUR });
+    const snap = await snapshot(h.port);
+    const command = (clientId: string) => {
+      const action = snap.attention.find((item) => item.ref === clientId && /expires soon/.test(item.title))?.action;
+      assert.equal(action?.kind, 'command');
+      return (action as { command: string }).command;
+    };
+    // The shell's own parse of the command, with a harmless printf in place of the CLI: one argument per line.
+    const argv = (line: string) => execFileSync('/bin/sh', ['-c', line.replace(/^t3-fleet-gateway /, "printf '%s\\n' ")], { encoding: 'utf8' }).split('\n').slice(0, -1);
+    assert.deepEqual(argv(command(restricted.clientId)), ['clients', 'token', '--name', name, '--access', 'read', '--hosts', 'main']);
+    assert.deepEqual(argv(command(fleet.clientId)), ['clients', 'token', '--name', 'Fleet', '--access', 'operate', '--hosts', 'all']);
+  });
+
+  test('access is what usable tokens carry now: a narrowed refresh or an expired privileged grant never counts', async (t) => {
+    const h = await harness(t);
+    const { clientId, tokens } = await signIn(h.gw.baseUrl, h.gw.mintApprovalCode, { access: 'operate' });
+    const narrowed = await tokenRequest(h.gw.baseUrl, { grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: clientId, scope: 'fleet:read' });
+    assert.equal(narrowed.status, 200);
+    h.gw.clock.advance(5 * MINUTE);
+    let client = (await snapshot(h.port)).clients.items.find((item) => item.id === clientId)!;
+    assert.equal(client.access.operate.length, 0, 'the operate tokens were rotated away and their grace window has passed');
+    assert.equal(client.access.read, 'all');
+    assert.equal(client.access.text, 'read (all hosts)');
+    assert.equal(client.access.approved, 'operate (all hosts)', 'the approval ceiling is shown apart');
+
+    // An operate grant that expired, and a newer read-only grant for the same client.
+    const second = await signIn(h.gw.baseUrl, h.gw.mintApprovalCode, { access: 'operate' });
+    h.gw.clock.advance(91 * DAY);
+    await signIn(h.gw.baseUrl, h.gw.mintApprovalCode, { access: 'read', clientId: second.clientId });
+    client = (await snapshot(h.port)).clients.items.find((item) => item.id === second.clientId)!;
+    assert.equal(client.grant.state, 'active');
+    assert.deepEqual([client.access.operate, client.access.read, client.access.approved], [[], 'all', 'operate (all hosts)']);
+    const gone = (await snapshot(h.port)).clients.items.find((item) => item.id === clientId)!;
+    assert.equal(gone.grant.state, 'unusable');
+    assert.deepEqual([gone.access.text, gone.access.operate, gone.access.read], ['-', [], []], 'nothing is accepted from it any more');
   });
 
   test('token replay is flagged; labels from the config; registrations without approval are listed apart, as text', async (t) => {

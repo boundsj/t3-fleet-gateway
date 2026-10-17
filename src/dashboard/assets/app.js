@@ -255,12 +255,17 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
       vitals(),
       topology(),
       h('div', { class: 'grid-2' },
-        panel('Needs your attention', plural(snap.attention.length, 'item'),
+        panel('Needs your attention', attentionMeta(issues.length, snap.attention.length),
           snap.attention.length === 0 ? emptyState('Nothing needs you right now.') : h('ul', { class: 'attention' }, snap.attention.map(attentionItem))),
         panel('Recent activity', 'job events, codes only',
           snap.events.length === 0 ? emptyState('No job events yet.', 'jobs') : h('ul', { class: 'feed' }, snap.events.slice(0, 10).map(eventItem)),
           snap.events.length > 10 ? h('div', { class: 'feed__more' }, h('a', { class: 'text-link', href: '#/jobs' }, 'All activity →')) : null)),
     ];
+  }
+
+  function attentionMeta(issues, total) {
+    if (total === issues) return plural(total, 'item');
+    return issues === 0 ? `${total} for information` : `${issues} to act on · ${total - issues} for information`;
   }
 
   function vitals() {
@@ -274,7 +279,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     const clientSub = [d.needsApproval && `${d.needsApproval} unusable`, d.neverSeen && `${d.neverSeen} never observed`, d.quiet && `${d.quiet} quiet`].filter(Boolean).join(' · ') || 'all seen in the last day';
     const waitingSub = [d.waiting && `${d.waiting} waiting on you`, snap.jobs.counts.queued && `${snap.jobs.counts.queued} queued`, snap.jobs.counts.running && `${snap.jobs.counts.running} running`].filter(Boolean).join(' · ') || 'nothing waiting';
     return h('div', { class: 'vitals' },
-      tile('#/checks', !dbOk ? 'bad' : g.engine.running ? 'good' : 'unknown', 'pulse', 'Gateway', dbOk ? 'Running' : 'Schema mismatch', ['up ', span(g.startedAt, now), ' · ', engineText]),
+      tile('#/checks', !dbOk || d.gatewayIssues ? 'bad' : g.engine.running ? 'good' : 'unknown', 'pulse', 'Gateway', dbOk ? 'Running' : 'Schema mismatch', ['up ', span(g.startedAt, now), ' · ', engineText]),
       tile('#/hosts', d.hostTone, 'hosts', 'Hosts', `${d.answering} of ${snap.hosts.length} answering`, hostSub),
       tile('#/clients', d.clientTone, 'clients', 'Clients', d.activeClients === 0 ? 'None connected' : `${d.seen} of ${d.activeClients} seen today`, d.activeClients === 0 ? 'approve one with t3-fleet-gateway pair' : clientSub),
       tile('#/jobs', d.waiting > 0 ? 'warn' : 'good', 'jobs', 'Jobs', `${snap.jobs.openTotal} open`, waitingSub));
@@ -378,7 +383,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
           h('div', { class: 'entity__tags' },
             tag(client.kind === 'oauth' ? 'OAuth' : 'Bearer token'),
             client.redirectOrigins.map((origin) => tag(`signs in via ${origin.replace(/^https:\/\//, '')}`, false, origin)),
-            tag(client.access.text, true, 'Granted access'),
+            tag(client.access.text, true, 'Access its usable tokens carry now'),
             client.access.unconfiguredHosts.length ? h('span', { class: 'tag tone-warn' }, `not configured: ${client.access.unconfiguredHosts.join(', ')}`) : null)),
         h('div', { class: 'entity__status' }, pill(client.status.tone, client.status.label))),
       h('p', { class: 'entity__summary' }, client.status.detail),
@@ -386,10 +391,13 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
         h('div', { class: 'entity__col' }, h('h3', null, icon('shield'), 'Authorization'),
           kv([
             ['Grant', GRANT_LABELS[g.state] ?? g.state],
+            ['Access now', client.access.text === '-' ? h('span', { class: 'muted' }, 'none') : client.access.text],
+            client.access.approved ? ['Approved for', client.access.approved] : null,
             ['Access token', accessUntil],
             ['Refresh', refresh],
             ['Grants issued', g.families === 0 ? 'none' : `${g.families}${g.revokedFamilies.length ? ` · ${g.revokedFamilies.length} revoked` : ''}`],
           ]),
+          client.access.approved ? h('p', { class: 'entity__note' }, 'Its usable tokens carry less than it was approved for: a refresh narrowed them, or the wider tokens expired or were revoked.') : null,
           g.revokedFamilies.slice(0, 2).map((family) => h('p', { class: 'entity__note' }, 'A grant was ', family.detail, family.at ? [' ', time(family.at)] : null, '.'))),
         h('div', { class: 'entity__col' }, h('h3', null, icon('eye'), 'Observed'),
           kv([
@@ -582,6 +590,7 @@ export function derive(snap) {
     worstTone: worst(issues.map((item) => item.tone)),
     clientIssues: snap.attention.filter((item) => item.kind === 'client' && item.tone === 'bad').length,
     hostIssues: snap.attention.filter((item) => item.kind === 'host' && item.tone === 'bad').length,
+    gatewayIssues: snap.attention.filter((item) => item.kind === 'gateway' && item.tone === 'bad').length,
     waiting: snap.jobs.open.filter((job) => job.state === 'needs_input').length,
     checkFailures: snap.checks ? snap.checks.results.filter((result) => result.level === 'fail').length : 0,
   };

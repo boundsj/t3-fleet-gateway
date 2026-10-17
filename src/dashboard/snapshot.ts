@@ -219,7 +219,11 @@ export interface ClientView {
   registeredName: string;
   kind: 'oauth' | 'bearer';
   redirectOrigins: string[];
-  access: { text: string; operate: 'all' | string[]; read: 'all' | string[]; unconfiguredHosts: string[] };
+  /**
+   * What its tokens the gateway would accept now carry (usable access tokens, usable or grace-retry refresh tokens): a
+   * narrowed refresh or an expired privileged sibling never counts. `approved` is the approval's own ceiling, when wider.
+   */
+  access: { text: string; operate: 'all' | string[]; read: 'all' | string[]; unconfiguredHosts: string[]; approved: string | null };
   grant: {
     state: ClientDiagnostic['state'];
     usableAccess: boolean;
@@ -247,7 +251,8 @@ function clientView(sources: DashboardSources, summary: ClientSummary, now: numb
   const families = diagnostic.families;
   const accessUntil = latest(families.flatMap((family) => family.access), ['usable']);
   const refreshUntil = latest(families.flatMap((family) => family.refresh), ['usable', 'grace_retry']);
-  const scopes = [...new Set(families.filter((family) => family.revokedAt === null).flatMap((family) => parseScope(family.scope) ?? []))];
+  const scopes = [...new Set(families.flatMap((family) => family.currentScopes.flatMap((scope) => parseScope(scope) ?? [])))];
+  const approved = describeAccess([...new Set(families.filter((family) => family.revokedAt === null).flatMap((family) => parseScope(family.scope) ?? []))]);
   const hostIds = new Set(sources.config.hosts.map((host) => host.id));
   const label = sources.config.dashboard.clientLabels[summary.id];
   const view: ClientView = {
@@ -267,6 +272,7 @@ function clientView(sources: DashboardSources, summary: ClientSummary, now: numb
       operate: permittedHosts(scopes, 'operate'),
       read: permittedHosts(scopes, 'read'),
       unconfiguredHosts: [...new Set(scopes.map(parseHostScope).flatMap((scope) => (scope && !hostIds.has(scope.hostId) ? [scope.hostId] : [])))],
+      approved: approved === describeAccess(scopes) ? null : approved,
     },
     grant: {
       state: diagnostic.state,
@@ -312,6 +318,28 @@ function clientStatus(client: ClientView, diagnostic: ClientDiagnostic, now: num
     return { tone: 'good', label: 'Seen recently', detail: 'A request with its token completed recently. Its routine and future retries are not confirmed by this.' };
   }
   return { tone: 'info', label: 'Quiet', detail: 'Its grant is usable; its last successful request was more than a day ago. Quiet is normal for agents that call rarely.' };
+}
+
+/** One POSIX shell word: single-quoted unless plainly safe, so quotes, `$`, backticks and backslashes stay literal. */
+export function shellWord(text: string): string {
+  return /^[A-Za-z0-9._:/@-]+$/.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * The `clients token` command that mints a bearer token with this one's current access, never more (its defaults are
+ * operate on every host, including later ones), or null when no single --access and --hosts says exactly that.
+ * Host ids no longer configured are left out: they grant nothing, and clients token refuses them.
+ */
+function replacementCommand(client: ClientView): string | null {
+  const { operate, read, unconfiguredHosts } = client.access;
+  const level = operate === 'all' || operate.length > 0 ? 'operate' : 'read';
+  const selected = level === 'operate' ? operate : read;
+  // clients token grants read with operate, on the same hosts.
+  const same = (a: 'all' | string[], b: 'all' | string[]) => (a === 'all' || b === 'all' ? a === b : [...a].sort().join(',') === [...b].sort().join(','));
+  if (level === 'operate' && !same(operate, read)) return null;
+  const hosts = selected === 'all' ? 'all' : selected.filter((id) => !unconfiguredHosts.includes(id)).sort().join(',');
+  if (hosts === '') return null;
+  return `t3-fleet-gateway clients token --name ${shellWord(client.registeredName)} --access ${level} --hosts ${shellWord(hosts)}`;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -397,10 +425,14 @@ export interface AttentionItem {
 
 const TONE_ORDER: Record<Tone, number> = { bad: 0, warn: 1, info: 2, unknown: 3, good: 4 };
 
-function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[], now: number): AttentionItem[] {
+function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[], checks: CheckRun | null, now: number): AttentionItem[] {
   const items: AttentionItem[] = [];
+  /** Hosts whose T3 answer is already shown, from a health result at least as new as the last check run, or as an item. */
+  const answerShown = new Set<string>();
   for (const host of hosts) {
     const name = host.label;
+    const checkedAt = host.reachability.checkedAt === null ? null : Date.parse(host.reachability.checkedAt);
+    if (checks && checkedAt !== null && checkedAt >= Date.parse(checks.startedAt)) answerShown.add(host.id);
     if (host.reachability.state === 'credential_rejected') {
       items.push({ tone: 'bad', kind: 'host', ref: host.id, title: `T3 on ${name} refuses the gateway's credential`, detail: host.reachability.detail,
         at: host.reachability.checkedAt, action: { kind: 'command', label: 'Enroll again', command: `t3-fleet-gateway hosts enroll ${host.id}` } });
@@ -414,6 +446,7 @@ function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[
         detail: `${explainHostError(code)}${open > 0 ? ` Its ${open} open job${open === 1 ? '' : 's'} keep their state and resume when it answers.` : ''}`,
         at: host.engine?.unreachableSince ?? host.reachability.checkedAt, action: { kind: 'view', label: 'Host details', view: `hosts/${host.id}` } });
     }
+    if (items.some((item) => item.kind === 'host' && item.ref === host.id)) answerShown.add(host.id);
     if (host.credential.state === 'expired') {
       items.push({ tone: 'bad', kind: 'host', ref: host.id, title: `${name}'s T3 credential has expired`, detail: 'Renewal re-enrolls automatically when the mint command works; until then the gateway cannot use this host.',
         at: host.credential.expiresAt, action: { kind: 'command', label: 'Enroll again', command: `t3-fleet-gateway hosts enroll ${host.id}` } });
@@ -421,6 +454,18 @@ function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[
       items.push({ tone: 'warn', kind: 'host', ref: host.id, title: `Credential renewal failed for ${name}`, detail: host.credential.renewalError.detail,
         at: host.credential.renewalError.at, action: { kind: 'command', label: 'Diagnose', command: 't3-fleet-gateway doctor' } });
     }
+  }
+  // The last manual check run's failures and warnings, except what the snapshot shows live: a host's credential and
+  // renewal state, and its T3 answer once a health result as new as the run is shown (a timed-out check has none).
+  for (const result of checks?.results ?? []) {
+    if (result.level === 'ok') continue;
+    const host = result.hostId === null ? null : hosts.find((candidate) => candidate.id === result.hostId);
+    if (result.hostId !== null) {
+      if (!host || result.id.endsWith(':credential') || result.id.endsWith(':renewal') || (result.id.endsWith(':t3') && answerShown.has(host.id))) continue;
+    }
+    items.push({ tone: result.level === 'fail' ? 'bad' : 'warn', kind: host ? 'host' : 'gateway', ref: host ? host.id : result.id,
+      title: `${host ? `${host.label}: ` : ''}${result.name} check ${result.level === 'fail' ? 'failed' : 'needs a look'}`, detail: result.detail,
+      at: checks!.finishedAt, action: { kind: 'view', label: 'Checks', view: 'checks' } });
   }
   for (const client of clients) {
     if (client.grant.state === 'revoked') continue;
@@ -437,8 +482,13 @@ function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[
     const until = client.kind === 'bearer' && typeof client.grant.accessUsableUntil === 'string' && client.grant.accessUsableUntil !== 'never'
       ? Date.parse(client.grant.accessUsableUntil) : null;
     if (until !== null && until - now <= TOKEN_EXPIRY_WARNING_MS && client.grant.usableAccess) {
-      items.push({ tone: 'warn', kind: 'client', ref: client.id, title: `${client.label}'s bearer token expires soon`, detail: 'Bearer tokens do not refresh. Mint a replacement and update the connector before it expires.',
-        at: client.grant.accessUsableUntil as string, action: { kind: 'command', label: 'Mint replacement', command: `t3-fleet-gateway clients token --name "${client.registeredName.replaceAll('"', '')}"` } });
+      const command = replacementCommand(client);
+      items.push({ tone: 'warn', kind: 'client', ref: client.id, title: `${client.label}'s bearer token expires soon`, at: client.grant.accessUsableUntil as string,
+        ...(command
+          ? { detail: 'Bearer tokens do not refresh. Mint a replacement with the same access and update the connector before it expires.',
+            action: { kind: 'command', label: 'Mint replacement', command } }
+          : { detail: "Bearer tokens do not refresh. Mint a replacement with clients token, choosing --access and --hosts no wider than this token's (the defaults are operate on all hosts), and update the connector before it expires.",
+            action: { kind: 'view', label: 'Client details', view: `clients/${client.id}` } }) });
     }
     if ((client.grant.state === 'active' || client.grant.state === 'refreshable') && client.observed.lastMcpSuccessAt === null) {
       items.push({ tone: 'info', kind: 'client', ref: client.id, title: `${client.label} has not been observed`, detail: 'Its grant is usable but no successful request is recorded. Ask it to call fleet_status; a completed request shows here.',
@@ -564,7 +614,7 @@ export function buildSnapshot(sources: DashboardSources): DashboardSnapshot {
     },
     jobs: { counts: totals, open, openTotal, recent, attention: attentionJobs },
     events,
-    attention: attentionItems(hosts, clients, mergeJobs(attentionJobs, open, recent), now),
+    attention: attentionItems(hosts, clients, mergeJobs(attentionJobs, open, recent), checks, now),
   };
 }
 

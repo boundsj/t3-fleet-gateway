@@ -14,6 +14,8 @@ export interface FamilyDiagnostic {
   id: string;
   /** The scope the grant was approved with (narrowed refreshes may carry less). */
   scope: string;
+  /** The distinct scopes of its tokens that the gateway would accept now: usable access tokens, usable or grace-retry refresh tokens. */
+  currentScopes: string[];
   revokedAt: number | null;
   revocationReason: string | null;
   usableAccess: boolean;
@@ -57,18 +59,18 @@ export function diagnoseClient(db: Database, clock: Clock, resource: string, id:
   };
   const families = (db.prepare('SELECT id, scope, resource, revoked_at, revoked_reason FROM token_families WHERE client_id = ? ORDER BY created_at, id')
     .all(id) as { id: string; scope: string; resource: string; revoked_at: number | null; revoked_reason: string | null }[]).map((family): FamilyDiagnostic => {
-    const access = summarize((db.prepare('SELECT expires_at, revoked_at FROM access_tokens WHERE family_id = ? ORDER BY created_at, rowid')
-      .all(family.id) as { expires_at: number; revoked_at: number | null }[]).map((row) => {
+    const accessRows = (db.prepare('SELECT expires_at, revoked_at, scope FROM access_tokens WHERE family_id = ? ORDER BY created_at, rowid')
+      .all(family.id) as { expires_at: number; revoked_at: number | null; scope: string }[]).map((row) => {
       const state: GrantState = accessIsUsable({ ...row, resource: family.resource,
         family_revoked_at: family.revoked_at, client_revoked_at: client.revokedAt }, now, resource) ? 'usable'
         : row.revoked_at !== null || family.revoked_at !== null || client.revokedAt !== null ? 'revoked'
         : row.expires_at <= now ? 'expired' : 'wrong_resource';
-      return { state, expires_at: row.expires_at };
-    }));
-    const refresh = summarize((db.prepare(`SELECT r.expires_at, r.rotated_at, r.superseded_at,
+      return { state, expires_at: row.expires_at, scope: row.scope };
+    });
+    const refreshRows = (db.prepare(`SELECT r.expires_at, r.rotated_at, r.superseded_at, r.scope,
         EXISTS(SELECT 1 FROM refresh_tokens child WHERE child.parent_hash = r.token_hash AND child.rotated_at IS NOT NULL) AS child_rotated
         FROM refresh_tokens r WHERE r.family_id = ? ORDER BY r.created_at, r.rowid`).all(family.id) as {
-      expires_at: number; rotated_at: number | null; superseded_at: number | null; child_rotated: number;
+      expires_at: number; rotated_at: number | null; superseded_at: number | null; child_rotated: number; scope: string;
     }[]).map((row) => {
       // Same precedence as TokenService.refresh: replay is rejected before expiry/resource checks.
       const state: GrantState = family.revoked_at !== null || client.revokedAt !== null ? 'revoked'
@@ -77,9 +79,15 @@ export function diagnoseClient(db: Database, clock: Clock, resource: string, id:
         : row.expires_at <= now ? 'expired'
         : !resourceMatches(family.resource, resource) ? 'wrong_resource'
         : row.rotated_at !== null ? 'grace_retry' : 'usable';
-      return { state, expires_at: row.expires_at };
-    }));
-    return { id: family.id, scope: family.scope, revokedAt: family.revoked_at, revocationReason: family.revoked_reason,
+      return { state, expires_at: row.expires_at, scope: row.scope };
+    });
+    const access = summarize(accessRows);
+    const refresh = summarize(refreshRows);
+    const currentScopes = [...new Set([
+      ...accessRows.filter((row) => row.state === 'usable'),
+      ...refreshRows.filter((row) => row.state === 'usable' || row.state === 'grace_retry'),
+    ].map((row) => row.scope))];
+    return { id: family.id, scope: family.scope, currentScopes, revokedAt: family.revoked_at, revocationReason: family.revoked_reason,
       usableAccess: access.some((grant) => grant.state === 'usable'),
       usableRefresh: refresh.some((grant) => grant.state === 'usable' || grant.state === 'grace_retry'), access, refresh };
   });

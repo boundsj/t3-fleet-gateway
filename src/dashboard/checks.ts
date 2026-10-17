@@ -2,7 +2,7 @@ import { mcpResource, type GatewayConfig } from '../config.ts';
 import { checkDataDirPermissions } from '../dataDir.ts';
 import { SCHEMA_VERSION, schemaVersion, type Database } from '../db/database.ts';
 import { checkMintExecutable } from '../hosts/commandPreflight.ts';
-import type { HostRegistry } from '../hosts/registry.ts';
+import type { HostHealth, HostRegistry } from '../hosts/registry.ts';
 import type { Logger } from '../log.ts';
 import { probePublicUrl, type PublicUrlProbe } from '../oauth/metadata.ts';
 import { SECOND, type Clock } from '../time.ts';
@@ -39,6 +39,11 @@ export interface CheckRun {
 
 /** A run that finished this recently is returned again rather than repeated (double clicks, several open tabs). */
 export const CHECK_REUSE_MS = 5 * SECOND;
+/**
+ * Each host's check has this long in all. The health read's own timeout covers its call, but it may join a connection
+ * that another caller (the engine, discovery) is still initializing with that caller's longer timeout.
+ */
+export const HOST_CHECK_DEADLINE_MS = 5 * SECOND;
 
 export interface DashboardChecksOptions {
   config: GatewayConfig;
@@ -48,6 +53,8 @@ export interface DashboardChecksOptions {
   clock: Clock;
   logger: Logger;
   commandEnv?: NodeJS.ProcessEnv;
+  /** Overrides HOST_CHECK_DEADLINE_MS (tests). */
+  hostDeadlineMs?: number;
 }
 
 function publicUrlCheck(probe: PublicUrlProbe): CheckItem {
@@ -114,10 +121,11 @@ export class DashboardChecks {
     } catch {
       results.push(gateway('data_dir', 'Data directory', 'fail', 'data_dir_insecure', 'The data directory or a file in it is readable by others. Run doctor for the path.'));
     }
-    // In parallel: each is bounded (five seconds for the public URL and for each host's health read).
+    // The network checks, in parallel, each with a five-second deadline: the two probes through their fetch timeouts, each
+    // host through #health. (The database and directory checks above are synchronous and have no deadline.)
     const publicUrl = probePublicUrl(config.publicUrl, mcpResource(config));
     const exposure = probeDashboardExposure(config.publicUrl, config.dashboard.basePath);
-    const hosts = await Promise.all(config.hosts.map(async (host) => ({ host, health: await registry.health(host.id, { fresh: true }) })));
+    const hosts = await Promise.all(config.hosts.map(async (host) => ({ host, health: await this.#health(host.id) })));
     results.push(publicUrlCheck(await publicUrl));
     const isolation = describeExposure(await exposure);
     results.push(gateway('dashboard_exposure', 'Dashboard stays private', isolation.level, isolation.code, isolation.detail));
@@ -127,6 +135,8 @@ export class DashboardChecks {
       const credential = registry.credentialStatus(host.id);
       if (credential.state === 'missing') {
         results.push(item('t3', 'T3 answers', 'fail', 'host_not_enrolled', explainHostError('host_not_enrolled')));
+      } else if (health === null) {
+        results.push(item('t3', 'T3 answers', 'fail', 't3_timeout', `${explainHostError('t3_timeout')} A late answer is shown on Hosts with its own time.`));
       } else if (health.credentialRejected) {
         results.push(item('t3', 'T3 answers', 'fail', 't3_unauthorized', explainHostError('t3_unauthorized')));
       } else if (health.reachable === true) {
@@ -152,5 +162,21 @@ export class DashboardChecks {
     const failed = results.filter((result) => result.level === 'fail').length;
     logger.info('dashboard.checks_run', { results: results.length, failed });
     return run;
+  }
+
+  /**
+   * A fresh health read, or null when it has not settled by the deadline. The read itself is left to finish (it may share
+   * its connection with other callers' calls, which a cancellation must not touch) and records its result as usual.
+   */
+  async #health(hostId: string): Promise<HostHealth | null> {
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<null>((resolve) => {
+      timer = setTimeout(resolve, this.#options.hostDeadlineMs ?? HOST_CHECK_DEADLINE_MS, null);
+    });
+    try {
+      return await Promise.race([this.#options.registry.health(hostId, { fresh: true }), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }

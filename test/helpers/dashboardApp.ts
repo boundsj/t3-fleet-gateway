@@ -28,4 +28,3 @@ export function assertSafeTree(root: FakeNode): void {
     }
   }
 }
-

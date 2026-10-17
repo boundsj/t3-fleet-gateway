@@ -45,7 +45,7 @@ function hostileSnapshot(): DashboardSnapshot {
     clients: {
       items: [{
         id: 'c1', label: EVIL, registeredName: `${EVIL}2`, kind: 'oauth', redirectOrigins: [EVIL],
-        access: { text: EVIL, operate: [EVIL], read: 'all', unconfiguredHosts: [EVIL] },
+        access: { text: EVIL, operate: [EVIL], read: 'all', unconfiguredHosts: [EVIL], approved: EVIL },
         grant: { state: 'unusable', usableAccess: false, usableRefresh: false, accessUsableUntil: null, refreshUsableUntil: null, families: 2,
           revokedFamilies: [{ at: ago(10), reason: EVIL, detail: EVIL }] },
         observed: { lastMcpSuccessAt: null, lastRefreshSuccessAt: ago(100), lastUsedAt: ago(100) },
