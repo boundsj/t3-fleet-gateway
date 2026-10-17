@@ -42,6 +42,12 @@ const FORBIDDEN_KEYS = new Set([
   'stdout',
   'stderr',
   'commandoutput',
+  'webhookurl',
+  'subscriberurl',
+  'headername',
+  'headervalue',
+  'payload',
+  'responsebody',
 ]);
 
 function isForbiddenKey(key: string): boolean {

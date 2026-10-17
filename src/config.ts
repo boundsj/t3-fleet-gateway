@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as z from 'zod';
 import { GatewayError } from './errors.ts';
+import { webhooksSchema } from './webhooks/config.ts';
 
 /** Approval levels T3 accepts for an MCP client. Anything above read-only is also the runtime-mode ceiling. */
 export const T3_ACCESS_LEVELS = ['read-only', 'approval-required', 'auto-accept-edits', 'auto', 'full-access'] as const;
@@ -186,6 +187,7 @@ const configSchema = z
       })
       .default({ pollSeconds: 10, reconcileWindowMinutes: 10 }),
     dashboard: dashboardSchema.default(DEFAULT_DASHBOARD),
+    webhooks: webhooksSchema.default({ subscriptions: [] }),
   })
   .superRefine((config, ctx) => {
     // One port for both would put the dashboard behind the tunnel that carries /mcp to agents.
@@ -260,6 +262,7 @@ export function parseConfig(input: unknown): GatewayConfig {
   const result = configSchema.safeParse(input);
   if (result.success) return result.data;
   const problems = result.error.issues.map((issue) => {
+    if (issue.path[0] === 'webhooks') return '  webhooks: invalid webhook configuration';
     const path = issue.path.map((part) => (typeof part === 'number' ? `[${part}]` : `.${String(part)}`)).join('');
     return `  ${path.replace(/^\./, '') || '(root)'}: ${issue.message}`;
   });
@@ -279,8 +282,8 @@ export function loadConfig(path: string): GatewayConfig {
   let json: unknown;
   try {
     json = JSON.parse(text);
-  } catch (error) {
-    throw new GatewayError('config_invalid', `Config file ${path} is not valid JSON: ${(error as Error).message}`);
+  } catch {
+    throw new GatewayError('config_invalid', `Config file ${path} is not valid JSON`);
   }
   return parseConfig(json);
 }

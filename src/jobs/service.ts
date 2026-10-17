@@ -687,18 +687,7 @@ export class JobService {
         `${described.message}. The message may or may not have reached T3: call work_continue again with the same requestId; T3 deduplicates it.`,
       );
     }
-    this.store.completeIdempotencyKey(caller.clientId, 'work_continue', input.requestId, JSON.stringify({ runId: sent.runId, delivery: sent.delivery }));
-    job = this.store.require(job.id);
-    const moved = this.store.transition(job.id, {
-      from: ['idle'],
-      to: 'running',
-      changes: { lastRunId: sent.runId, lastErrorCode: null, lastErrorMessage: null },
-      detail: { reason: 'followup' },
-    });
-    if (!moved && !isTerminal(job.state)) {
-      this.store.update(job.id, { lastRunId: sent.runId });
-      this.store.appendEvent(job.id, 'followup_sent', job.state, { reason: sent.delivery });
-    }
+    this.store.recordSend(job.id, sent, caller.clientId, input.requestId);
     this.wake();
     return { job: this.store.require(job.id), delivery: sent.delivery, replayed: false };
   }

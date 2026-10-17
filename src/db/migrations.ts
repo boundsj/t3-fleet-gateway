@@ -246,6 +246,58 @@ ALTER TABLE jobs ADD COLUMN delegated_ended_at INTEGER;
     // for jobs from before this migration and for ordinary alias-only jobs, which dispatch as before.
     sql: `ALTER TABLE jobs ADD COLUMN launch_spec TEXT;`,
   },
+  {
+    version: 9,
+    name: 'outbound webhooks and turn attribution',
+    sql: `
+CREATE TABLE job_turns (
+  job_id TEXT NOT NULL REFERENCES jobs(id),
+  run_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  PRIMARY KEY (job_id, run_id)
+) STRICT;
+CREATE TABLE webhook_subscriptions (
+  id TEXT PRIMARY KEY,
+  revision TEXT NOT NULL,
+  identity TEXT NOT NULL,
+  settings TEXT NOT NULL,
+  route TEXT NOT NULL,
+  overflow_count INTEGER NOT NULL DEFAULT 0,
+  overflow_sequence INTEGER,
+  overflow_at INTEGER,
+  overflow_reason TEXT CHECK (overflow_reason IN ('backlog', 'payload_limit'))
+) STRICT;
+CREATE TABLE webhook_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subscription_id TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  feed_sequence INTEGER NOT NULL REFERENCES job_events(id),
+  payload TEXT,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  next_attempt_at INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'sending', 'delivered', 'expired', 'cancelled')),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  lease TEXT,
+  lease_until INTEGER,
+  UNIQUE (subscription_id, revision, event_id)
+) STRICT;
+CREATE INDEX webhook_delivery_due ON webhook_deliveries(state, next_attempt_at);
+CREATE INDEX webhook_delivery_subscription ON webhook_deliveries(subscription_id, id);
+CREATE TABLE webhook_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subscription_id TEXT NOT NULL,
+  delivery_id INTEGER,
+  event_id TEXT NOT NULL,
+  attempted_at INTEGER NOT NULL,
+  status_code INTEGER,
+  outcome TEXT NOT NULL,
+  lease TEXT
+) STRICT;
+CREATE INDEX webhook_attempt_subscription ON webhook_attempts(subscription_id, id DESC);
+`,
+  },
 ];
 
 /**

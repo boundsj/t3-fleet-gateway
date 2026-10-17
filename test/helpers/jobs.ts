@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import type { TestContext } from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import type { GatewayOptions } from '../../src/gateway.ts';
 import type { TestClock } from './clock.ts';
 import { startFakeT3, type FakeT3 } from './fakeT3.ts';
 import type { FrontDoor } from './frontDoor.ts';
@@ -55,6 +56,8 @@ export interface JobHarness {
 }
 
 export interface JobHarnessOptions {
+  webhooks?: Record<string, unknown>;
+  webhookSender?: GatewayOptions['webhookSender'];
   maxConcurrentJobs?: number;
   fake?: FakeT3;
   dataDir?: string;
@@ -81,7 +84,9 @@ export async function startJobHarness(t: TestContext, options: JobHarnessOptions
   const fake = options.fake ?? (await startFakeT3());
   if (!options.fake) t.after(() => fake.close());
   const gw = await startTestGateway(t, {
+    ...(options.webhookSender ? { webhookSender: options.webhookSender } : {}),
     config: {
+      ...(options.webhooks ? { webhooks: options.webhooks } : {}),
       hosts: [{ id: 'main', t3Url: fake.url, mintPairingCode: fake.mintCommand(), maxConcurrentJobs: options.maxConcurrentJobs ?? 2, ...options.host }],
       projects: [
         { alias: 'pilot', description: 'Synthetic pilot project', host: 'main', t3ProjectId: 'project-1', runtimeMode: 'auto', baseRef: 'main', ...options.pilot },

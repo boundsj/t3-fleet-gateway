@@ -175,3 +175,23 @@ Changing it takes a restart of `serve`. `doctor` checks that the dashboard answe
 ```
 
 Then run `t3-fleet-gateway hosts enroll studio`. Adding a host is configuration plus enrollment. Agents approved for *All machines* (and every grant from before v0.1.5) can use it at once; agents approved for selected machines cannot until you approve them again with it ticked (see [operations.md](operations.md#connect-an-agent)).
+
+## Webhooks
+
+Unreleased: `webhooks: { "subscriptions": [] }` is the default. Configure at most 32 subscriptions; restart `serve` to apply changes. The [README example](../README.md#wake-a-routine-with-job-webhooks) uses a Grok routine URL and sender-key header. No new incoming connection is required.
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Stable lowercase letters/digits/hyphens, 1–64 characters; unique in this config. Use in CLI commands. |
+| `enabled` | Default `false`. Disabled entries enqueue/send nothing; an explicit test ping is still allowed. |
+| `url` | Absolute HTTPS destination, up to 4,096 characters, no embedded credentials or fragment. Treat it as secret. No redirects are followed. |
+| `auth.header` | Exact HTTP authentication header name supplied by the receiver, such as `X-Sender-Key` or `Authorization`. Transport/control headers (`Host`, framing, connection, proxy headers, etc.) are refused. |
+| `auth.secretFile` | A single filename in the gateway data directory, owned by the current user and readable only by that user (`0600`), never a symlink. Contents are the header value, up to 8 KiB; one final newline is removed. Empty/missing/invalid secrets fail closed. |
+| `projects`, `hosts` | Optional nonempty lists; OR within each, AND between them. Omitted means all. Project matching uses the stored alias (or discovery's `@host/projectId` ref). |
+| `events` | Nonempty selection of `needs_input`, `idle`, `failed`, `cancelled`, `delegated_work_ended`, `running`. Defaults to the first five. |
+| `excerptChars` | Default `0` omits both excerpt fields. Opt in with 1–500 for a bounded worker excerpt and truncation flag. Worker secrets cannot be reliably redacted. |
+| `allowLoopbackHttp` | Default `false`. Isolated development only: permits HTTP at literal `127.0.0.1` or `[::1]`; no other HTTP host. HTTPS always validates certificates. |
+
+Use `webhooks ping <id>` to test config without creating a job, then restart the gateway. `webhooks list` and `webhooks attempts <id> --limit 20` are offline diagnostics and do not apply their config over the serving process. Secrets are stored as plaintext inside the existing protected data directory/database, like downstream credentials. Keep config private too because URLs can contain credentials in their path/query. Protect backups.
+
+New subscriptions do not replay history. Disabling/removing a subscription, or changing its route, key, filters or excerpt policy, cancels its old queue. Unchanged routes resume after restart. An already transmitted request can still arrive. Payloads are capped at 16 KiB; oversized upstream metadata increments the same explicit overflow diagnostic as a full queue. [Delivery, overflow, retention and feed catch-up](design.md#outbound-job-webhooks) define recovery; retain polling even when notifications work.
