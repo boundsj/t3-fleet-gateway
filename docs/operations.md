@@ -149,9 +149,43 @@ t3-fleet-gateway jobs release <job id>
 t3-fleet-gateway doctor
 ```
 
-Checks, in order: the config, data directory permissions, database integrity and schema version, each host's credential and live reachability plus mint executable resolution and any explicit non-mutating probe, that each project resolves to a T3 project and has a model (its own `modelSelection`, its host's `defaultModelSelection`, or the T3 project's default model; without one T3 refuses every launch), and that `publicUrl` serves this gateway's protected resource metadata (which needs `serve` and the tunnel running): the `resource` must be `<publicUrl>/mcp` and `resource_name` must be `t3-fleet-gateway`, so another server behind the same URL (T3 itself behind a different proxy, say) fails with "serves a different server's metadata". Each line is `OK`, `WARN` or `FAIL`; any `FAIL` exits `1`.
+Checks, in order: the config, data directory permissions, database integrity and schema version, each host's credential and live reachability plus mint executable resolution and any explicit non-mutating probe, that each project resolves to a T3 project and has a model (its own `modelSelection`, its host's `defaultModelSelection`, or the T3 project's default model; without one T3 refuses every launch), and that `publicUrl` serves this gateway's protected resource metadata (which needs `serve` and the tunnel running): the `resource` must be `<publicUrl>/mcp` and `resource_name` must be `t3-fleet-gateway`, so another server behind the same URL (T3 itself behind a different proxy, say) fails with "serves a different server's metadata". With the dashboard enabled, it also checks that the dashboard answers on its loopback listener and that the public URL does not serve it (see "Operator dashboard"). Each line is `OK`, `WARN` or `FAIL`; any `FAIL` exits `1`.
 
 Mint checks use doctor's actual environment: repeat with the service's PATH to verify service resolution. Missing/non-executable commands fail before a future renewal needs them, even when T3 is healthy and its credential is active. Version-pinned paths warn. Without `mintPairingCodeProbe`, wrapper internals, remote execution and CLI version remain explicitly unverified; nothing is minted to test them. Only an explicitly configured safe probe is run (ten-second deadline, 4,096 bytes per output stream; it was two seconds before 0.1.7, which the Background launchd agent exceeded), with fixed diagnostics and no raw command output or argv. Version comparison accepts bare semver, exact native `t3 v<semver>` output and JSON `{"version":"x.y.z"}`. Doctor uses fresh health; startup uses only completed, unexpired cached health (otherwise comparison remains unverified), with no preflight health request. Disagreement warns without declaring incompatibility. See [configuration.md](configuration.md#renewal-command-preflight).
+
+## Operator dashboard
+
+A read-only page for you, the operator: is the gateway running, do the hosts answer, which agents can connect and which actually did, what work is waiting on you, and what happened recently. It changes nothing. Approvals, answers and stopping work happen in T3; enrolling hosts, approving and revoking agents happen in this CLI. Design: [design.md](design.md#operator-dashboard); trust boundary: [security.md](security.md#the-operator-dashboard).
+
+### Turn it on
+
+1. In the config, add a `dashboard` block ([configuration.md](configuration.md#dashboard)) with `"enabled": true`, a loopback `listen` on its own port (default `3791`, never `listen.port`) and a `basePath` you will mount it under, for example `/t3-fleet-gateway`. Optionally set `transportNote` on hosts (`"SSH tunnel"`, `"Same machine"`) and `clientLabels` for connectors whose registered name is not the one you know them by (`clients list` shows the ids).
+2. Restart the service (see "Run as a service": stop, update, `doctor`, install). `serve` logs `dashboard.started` with the listener and path.
+3. Publish it to your tailnet only, on a path of its own, keeping the path, for example with Tailscale:
+
+   ```sh
+   tailscale serve status    # see what is taken first
+   tailscale serve --bg --https=443 --set-path /t3-fleet-gateway http://127.0.0.1:3791/t3-fleet-gateway
+   ```
+
+   Use `tailscale serve`, never `tailscale funnel`: Funnel would publish it to the internet. (The dashboard refuses requests Tailscale marks as Funnel traffic anyway.) Then add the host name your browser uses (`<machine>.<tailnet>.ts.net`) to `dashboard.allowedHosts` and restart; until then the page answers `421` "This host name is not allowed". On the gateway machine itself, `http://127.0.0.1:3791/t3-fleet-gateway/` always works.
+4. Run `doctor`. With the dashboard enabled it adds two lines: `dashboard` (it answers on its loopback listener) and `dashboard exposure` (the public MCP URL does **not** serve it, checked through your real tunnel). A `FAIL` on the second means your public tunnel points at the dashboard's port: point it at `listen.port`.
+
+To turn it off: `tailscale serve --https=443 --set-path /t3-fleet-gateway off`, set `enabled` to `false` and restart.
+
+### Reading it
+
+- **Overview** opens with what needs you, most serious first, each saying where to act: a T3 thread link (`Open in T3`), a command to run on the gateway machine (copyable), or a dashboard view. The map shows agents → gateway → hosts with each one's state.
+- **Hosts.** Reachability is the **last** health check the gateway made, with its time; opening the page never contacts T3. `Not checked yet` means none since the gateway started: press **Run checks**. `No answer` means nothing answered at the host's `t3Url`; the gateway cannot tell which hop failed (an SSH tunnel, the network or T3), and the transport note is only your description. `Refused credential` means T3 answered but rejected the stored credential: run `hosts enroll <id>`. Jobs on an unreachable host keep their state.
+- **Clients** separate *Authorization* (what the gateway would accept now: grant state, access, expiries) from *Observed* (the last successful MCP request and refresh). `Never observed` and `unknown` mean nothing was recorded, not that the connector is broken; `Seen recently` means a request completed in the last day, not that the connector's routine keeps running; a usable grant does not prove the connector still holds its token. `Needs new approval` / `Token unusable` mean no usable grant is left. A grant revoked for token reuse is flagged: run `clients diagnose <id>`.
+- **Jobs** lists jobs waiting on someone or recently finished, open jobs and finished ones, with state, host, who started it and a link to its T3 thread. No task text, replies or questions are shown; open the thread in T3. The activity log shows job events as codes.
+- **Run checks** asks every host now (one read-only call each), checks the public URL's metadata from this machine, confirms the public URL does not serve the dashboard, and checks the database, the data directory and whether the renewal command resolves. Nothing is enrolled, renewed or executed. What it cannot tell (a connector's own route, which tunnel hop failed, whether a connector holds its token) is listed on the page.
+
+The page reloads its data when you open it, press Refresh, or come back to it after a minute; there are no alerts and no background polling of T3.
+
+### Dashboard demo
+
+`npm run dashboard:demo` (or `node scripts/dashboard-demo.ts`) runs the dashboard on a synthetic fleet: a real gateway with a temporary data directory, three fake T3 hosts on loopback and the fictional clients Grok Bot, Muse and Notion, seeded through the gateway's own sign-in and tools. It never reads your config or data directory and contacts nothing beyond loopback. Options: `--scenario mixed|healthy|host-down|auth-issue|empty` (`--list` describes them; `mixed` is the default and the richest), `--port 4791` (`0` picks one), `--base-path /t3-fleet-gateway`, and `--no-badge` to hide the "Synthetic demo" badge for screenshots. It prints the URL and runs until Ctrl-C, which deletes the temporary directory. Use it for screenshots and browser checks; never point it at production data.
 
 ## Developer compatibility check
 
@@ -257,7 +291,9 @@ Make it executable (`chmod +x ~/.local/bin/t3`), check that `~/.local/bin/t3 --v
 | `jobs.host_unreachable` (warn), `jobs.host_reachable` | The job engine lost or regained a host; jobs keep their state |
 | `jobs.reconcile_failed`, `jobs.watch_failed`, `jobs.interrupt_failed`, `jobs.interrupt_deferred` (warn) | A T3 call for one job failed (job id, error code); the error is on the job and the call is retried next tick |
 | `jobs.tick_failed`, `jobs.host_tick_failed` (error) | Unexpected engine errors (with an error code and, per host, the step); the next step still runs |
-| `http.request` | Method, path (no query), status, duration |
+| `http.request` | Method, path (no query), status, duration; `listener: dashboard` for the dashboard's listener |
+| `dashboard.started`, `dashboard.checks_run` | The dashboard listener (address and path); a manual check run (result counts) |
+| `dashboard.request_refused` (warn) | A dashboard request refused: `reason` (`host_not_allowed`, `funnel`, `cross_site`, `origin_not_allowed`, `missing_api_header`, `content_type`) and status; never the host or origin |
 | `process.transient_socket_error` (warn) | Node 26.0's `setTypeOfService EINVAL` after T3 reset a new connection; harmless (see Run as a service) |
 | `process.fatal` (error) | An uncaught error (name and code): `serve` shuts down and exits `1`; `gateway.shutdown_timeout` if that took over 10 seconds |
 

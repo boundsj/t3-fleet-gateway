@@ -57,6 +57,8 @@ export async function startTestGateway(
     logger,
     clock,
     port: 0,
+    // Used only when the config enables the dashboard: its listener also takes a port the OS picks.
+    dashboardPort: 0,
     ...(options.tools ? { tools: options.tools } : {}),
     ...(options.jobEngine ? { jobEngine: options.jobEngine } : {}),
     ...(options.runCommand ? { runCommand: options.runCommand } : {}),

@@ -15,6 +15,7 @@ The gateway can make T3 Code start and steer coding agents on your machines. A s
 | Your tunnel | Transport only. It terminates TLS and forwards to `127.0.0.1`. It never sees anything but HTTPS requests and responses. |
 | Agents (Grok Bot and other MCP clients) | Only what you approved: Read or Operate, on all machines (`fleet:read`, `fleet:operate`) or on selected machines only (`host:<id>:read`, `host:<id>:operate`). They never see T3 credentials. |
 | T3 Code servers | Their own data. T3 never sees agent tokens. |
+| Whoever can reach the dashboard (if enabled) | Reading operational metadata: host, client and job states, job titles, client names, granted access and success times, error codes. No secrets, no task text or worker content, no control. See "The operator dashboard". |
 
 ## Threats and mitigations
 
@@ -50,6 +51,18 @@ The gateway can make T3 Code start and steer coding agents on your machines. A s
 
 - **No CORS on registration and token endpoints.** `/oauth/register` and `/oauth/token` send no CORS headers, so an MCP client running as a web page in a browser cannot complete sign-in. Server-side agents (Grok Bot and other hosted or native clients) are unaffected; the metadata documents do allow any origin.
 - **No per-source rate limits.** The OAuth throttles are global (see above), because the tunnel in front of the gateway may not forward client addresses.
+
+## The operator dashboard
+
+The optional dashboard (`dashboard.enabled`, off by default) is read-only and has **no login of its own: the network is its boundary.** It listens on loopback on a port of its own and is meant to be published with a tailnet-only proxy (`tailscale serve` on a path), so whoever can reach it is a process on the gateway machine or a device your tailnet admits to that machine. If you share your tailnet, restrict that path with your tailnet's access rules. On a machine with other local users, any local user can reach a loopback port: leave the dashboard off there, or accept that they can read what it shows.
+
+What it shows and never shows. It shows host labels, ids, T3 URLs and your transport notes, credential states and expiries, access ceilings and project policies; client names (including names unauthenticated registrants chose, shown as text), redirect origins, granted access, grant states and expiries, and success times; job ids, titles (the agent's title or the task's first line, as T3 shows the thread), projects, hosts, states, counts and T3 thread links; job event codes; check results. It never shows tokens, token or code hashes, approval codes, T3 credentials, the server key, the mint command or its argv or output, task text, replies, questions, options, answers, delegated task titles, catalogs, or error messages (codes only, with fixed text). Nothing is stored in the browser and no cookie is set. Tests check this (`test/dashboard.test.ts`).
+
+How it keeps other origins out. A website you visit cannot read it through DNS rebinding: requests with a `Host` other than the listener's loopback address and port or an exact `dashboard.allowedHosts` entry get `421`. Its API needs a custom request header, which a cross-origin page cannot send without a CORS preflight the dashboard never grants, and refuses cross-site fetch metadata and foreign `Origin`s; the one POST (Run checks) needs JSON. Responses carry a strict CSP (`script-src 'self'`, no inline script or style, `frame-ancestors 'none'`), `X-Frame-Options: DENY` and `Cross-Origin-Resource-Policy: same-origin`. The page builds its DOM without parsing HTML and links only to its own views and `t3-thread://v1/<id>`, so stored text cannot become markup or a `javascript:` link.
+
+Not on the public URL. The MCP listener, which your public tunnel carries, has no dashboard routes, and the dashboard listener has no MCP or OAuth routes. If a public tunnel were pointed at the dashboard's port by mistake, `doctor` and the dashboard's Run checks report it (they ask the public URL for the dashboard's API), and requests Tailscale marks as Funnel traffic (`Tailscale-Funnel-Request`) are refused; the Funnel marker is defense in depth that depends on Tailscale setting it, while the separate port is the primary control.
+
+Run checks only reads: one `t3_environment_read` per host, the public URL's metadata, the database's quick check, file permissions and the mint executable's resolution. It runs no command, enrolls nothing and renews nothing.
 
 ## What is stored, and where
 

@@ -30,7 +30,8 @@ export interface CliIo {
 const USAGE = `Usage: ${GATEWAY_NAME} <command> [options]
 
 Commands:
-  serve                     Run the gateway (HTTP server and credential renewal)
+  serve                     Run the gateway (HTTP server, job engine, credential renewal and,
+                            when dashboard.enabled, the read-only operator dashboard)
   pair [--ttl 15m]          Mint a one-time approval code for connecting an agent
   clients list              List registered agent clients
   clients token --name <name> [--access operate|read] [--hosts all|<id>,<id>] [--ttl 1y|never]
@@ -47,7 +48,7 @@ Commands:
                             Register an existing T3 thread as a standing job agents can drive
   jobs list [--all]         List open jobs (--all: finished ones too)
   jobs release <jobId>      Stop following a standing job; the T3 thread is left as it is
-  doctor                    Check config, permissions, database, hosts and public URL
+  doctor                    Check config, permissions, database, hosts, public URL and dashboard
 
 Options:
   --config <path>           Config file (default: $T3FG_CONFIG or ~/.config/t3-fleet-gateway/config.json)

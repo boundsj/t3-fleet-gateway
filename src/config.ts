@@ -77,6 +77,8 @@ export const DEFAULT_DISCOVERY: z.output<typeof discoverySchema> = {
 const hostSchema = z.strictObject({
   id: slug(32),
   label: z.string().min(1).max(80).optional(),
+  /** How the gateway reaches this host, in the operator's words (for example "SSH tunnel"); shown on the dashboard, never checked. */
+  transportNote: z.string().min(1).max(80).optional(),
   t3Url: originUrl('t3Url'),
   mintPairingCode: z.array(z.string().min(1)).min(1).default(DEFAULT_MINT_COMMAND),
   /** Operator asserts this exact argv is non-mutating; never inferred from the mint command. */
@@ -109,13 +111,54 @@ const projectSchema = z
     message: 'set exactly one of t3ProjectId or t3ProjectTitle',
   });
 
+const LOOPBACK_LISTEN_HOSTS = ['127.0.0.1', '::1', 'localhost'];
+
+/** A Host header value the dashboard accepts: a lowercase DNS name or IP literal, with an optional port. */
+const HOST_HEADER_PATTERN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*|\[[0-9a-f:.]+\])(?::\d{1,5})?$/;
+
+/**
+ * The read-only operator dashboard (docs/design.md, "Operator dashboard"). Off by default. It has a listener of its own,
+ * never the MCP listener, so the tunnel that carries /mcp to agents never carries the dashboard.
+ */
+const dashboardSchema = z.strictObject({
+  enabled: z.boolean().default(false),
+  listen: z
+    .strictObject({
+      host: z.string().refine((host) => LOOPBACK_LISTEN_HOSTS.includes(host), {
+        message: 'dashboard.listen.host must be a loopback address; publish it with a tailnet-only proxy such as tailscale serve',
+      }),
+      port: z.int().min(1).max(65535),
+    })
+    .default({ host: '127.0.0.1', port: 3791 }),
+  /** The path the dashboard is served under, the same as the proxy's mount path: "/" or "/segment[/segment]". */
+  basePath: z
+    .string()
+    .regex(/^\/(?:[a-z0-9][a-z0-9._-]{0,62}(?:\/[a-z0-9][a-z0-9._-]{0,62}){0,3})?$/, 'use "/" or a path such as "/fleet" (lowercase, no trailing slash)')
+    .default('/'),
+  /** Host header values accepted besides the listener's own loopback address (DNS rebinding protection). */
+  allowedHosts: z.array(z.string().regex(HOST_HEADER_PATTERN, 'use a lowercase host name with an optional port, no scheme or path')).max(16).default([]),
+  /** Display names for agent clients, by client id (see clients list), for example a connector that registered as "Cursor". */
+  clientLabels: z
+    .record(z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, 'use a client id from clients list'), z.string().min(1).max(80))
+    .refine((labels) => Object.keys(labels).length <= 100, { message: 'at most 100 client labels' })
+    .default({}),
+});
+
+export const DEFAULT_DASHBOARD: z.output<typeof dashboardSchema> = {
+  enabled: false,
+  listen: { host: '127.0.0.1', port: 3791 },
+  basePath: '/',
+  allowedHosts: [],
+  clientLabels: {},
+};
+
 const configSchema = z
   .strictObject({
     $schema: z.string().optional(),
     publicUrl: originUrl('publicUrl'),
     listen: z
       .strictObject({
-        host: z.string().refine((host) => ['127.0.0.1', '::1', 'localhost'].includes(host), {
+        host: z.string().refine((host) => LOOPBACK_LISTEN_HOSTS.includes(host), {
           message: 'listen.host must be a loopback address; expose the gateway through a tunnel',
         }),
         port: z.int().min(1).max(65535),
@@ -142,8 +185,17 @@ const configSchema = z
         reconcileWindowMinutes: z.int().min(1).max(240).default(10),
       })
       .default({ pollSeconds: 10, reconcileWindowMinutes: 10 }),
+    dashboard: dashboardSchema.default(DEFAULT_DASHBOARD),
   })
   .superRefine((config, ctx) => {
+    // One port for both would put the dashboard behind the tunnel that carries /mcp to agents.
+    if (config.dashboard.enabled && config.dashboard.listen.port === config.listen.port) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['dashboard', 'listen', 'port'],
+        message: 'dashboard.listen.port must differ from listen.port: the dashboard never shares the MCP listener',
+      });
+    }
     const hostIds = new Set<string>();
     config.hosts.forEach((host, index) => {
       if (hostIds.has(host.id)) ctx.addIssue({ code: 'custom', path: ['hosts', index, 'id'], message: `duplicate host id "${host.id}"` });
@@ -189,6 +241,7 @@ export type GatewayConfig = z.infer<typeof configSchema>;
 export type HostConfig = GatewayConfig['hosts'][number];
 export type ProjectConfig = GatewayConfig['projects'][number];
 export type DiscoveryConfig = HostConfig['discovery'];
+export type DashboardConfig = GatewayConfig['dashboard'];
 
 /** Where a project's launches get their model in the gateway config, or null to leave it to the T3 project's default. */
 export function configuredModel(config: GatewayConfig, project: ProjectConfig): { source: 'project' | 'host'; selection: Record<string, unknown> } | null {
