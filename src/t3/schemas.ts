@@ -86,7 +86,7 @@ export const RUNTIME_MODE_VALUES = ['approval-required', 'auto-accept-edits', 'a
 export interface LaunchThreadInput {
   projectId: string;
   title: string;
-  workspaceStrategy: { type: 'worktree'; baseRef: string; branch: string; startFromOrigin: boolean };
+  workspaceStrategy: { type: 'root' } | { type: 'worktree'; baseRef: string; branch: string; startFromOrigin: boolean };
   runtimeMode: (typeof RUNTIME_MODE_VALUES)[number];
   modelSelection?: Record<string, unknown>;
   message: string;

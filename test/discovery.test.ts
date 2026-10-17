@@ -286,7 +286,7 @@ describe('discovery: fleet_projects and fleet_models', () => {
     assert.equal(countCalls(mini, 't3_project_list'), 3, 'expired: read again');
     assert.equal(again.hosts[0]!.total, 8);
     assert.deepEqual(again.hosts[0]!.projects!.at(-1)!.launch, {
-      allowed: true, source: 'discovered', alias: null, aliases: [], runtimeMode: 'auto', baseRef: 'main', branchPrefix: 'fleet/', defaultModelSource: null,
+      allowed: true, source: 'discovered', alias: null, aliases: [], runtimeMode: 'auto', workspaceMode: 'worktree', baseRef: 'main', branchPrefix: 'fleet/', defaultModelSource: null,
     });
     assert.match(again.hosts[0]!.projects!.at(-1)!.guidance, /No default model: pass modelSelection/);
 

@@ -1,3 +1,4 @@
+import * as z from 'zod';
 import { GatewayError } from '../errors.ts';
 import type { CatalogModel, CatalogProvider } from '../hosts/catalog.ts';
 
@@ -16,35 +17,49 @@ export interface ModelSelection {
 /** Where a job's model comes from: the agent's selection, the gateway config, or T3's own project default (nothing sent). */
 export type ModelSource = 'explicit' | 'project' | 'host' | 't3_default';
 
-/**
- * What a job launched through a direct target or an explicit model selection resolved to when it was
- * created (`jobs.launch_spec`, migration 8): the dispatcher launches from this record, so a later config
- * change, catalog change or alias ambiguity cannot move the job. Ordinary alias-only jobs have none and
- * dispatch as before. Never holds task text.
- */
-export interface LaunchSpec {
-  v: 1;
-  projectId: string;
-  projectName: string;
-  /** `alias`: policy from a configured project; `discovered`: the host's discovery policy. */
-  source: 'alias' | 'discovered';
-  alias: string | null;
-  baseRef: string;
-  runtimeMode: string;
-  model: {
-    source: ModelSource;
-    /** The exact `modelSelection` sent to T3; null leaves the choice to the T3 project's default. */
-    selection: Record<string, unknown> | null;
-  };
-}
+/** A root launch is permitted only for an operator-pinned T3 scratch alias. */
+const workspaceSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('scratch') }),
+  z.strictObject({ kind: z.literal('worktree'), baseRef: z.string().min(1), branch: z.string().min(1) }),
+]);
+export type Workspace = z.infer<typeof workspaceSchema>;
+
+const modelSchema = z.strictObject({
+  source: z.enum(['explicit', 'project', 'host', 't3_default']),
+  selection: z.record(z.string(), z.unknown()).nullable(),
+});
+const sharedSpec = {
+  projectId: z.string().min(1),
+  projectName: z.string(),
+  source: z.enum(['alias', 'discovered']),
+  alias: z.string().min(1).nullable(),
+  runtimeMode: z.enum(['approval-required', 'auto-accept-edits', 'auto', 'full-access']),
+  model: modelSchema,
+};
+const launchSpecSchema = z.union([
+  z.strictObject({ v: z.literal(1), ...sharedSpec, baseRef: z.string().min(1) }),
+  z.strictObject({
+    v: z.literal(2), ...sharedSpec,
+    hostId: z.string().min(1),
+    workspace: workspaceSchema,
+    /** The host-only intention binds this alias; null for explicit aliases and project ids. */
+    defaultProject: z.string().min(1).nullable(),
+  }).refine((spec) => spec.workspace.kind !== 'scratch' || (spec.source === 'alias' && spec.alias !== null), {
+    message: 'scratch launches require a configured alias',
+  }).refine((spec) => spec.defaultProject === null || (spec.workspace.kind === 'scratch' && spec.defaultProject === spec.alias), {
+    message: 'host defaults must bind the recorded scratch alias',
+  }),
+]);
+
+/** Version 1 always means worktree. Version 2 records workspace and host-default identity explicitly. */
+export type LaunchSpec = z.infer<typeof launchSpecSchema>;
 
 export function parseLaunchSpec(text: string | null): LaunchSpec | null {
   if (text === null) return null;
   try {
-    const value = JSON.parse(text) as LaunchSpec;
-    return value && value.v === 1 && typeof value.projectId === 'string' ? value : null;
+    return launchSpecSchema.parse(JSON.parse(text));
   } catch {
-    return null;
+    throw new GatewayError('database_error', 'The job has an unsupported or malformed launch spec. Upgrade or repair the ledger before dispatching.');
   }
 }
 

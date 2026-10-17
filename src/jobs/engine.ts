@@ -1,4 +1,4 @@
-import { configuredModel, type GatewayConfig, type HostConfig, type ProjectConfig, type RuntimeMode } from '../config.ts';
+import { configuredModel, runtimeModeAllowed, type GatewayConfig, type HostConfig, type ProjectConfig, type RuntimeMode } from '../config.ts';
 import { describeError, GatewayError } from '../errors.ts';
 import type { CatalogService } from '../hosts/catalog.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
@@ -11,7 +11,7 @@ import { MINUTE, SECOND, type Clock } from '../time.ts';
 import { readActivity, refreshDelegated, scanActivity } from './activity.ts';
 import { EXCERPT_CHARS, isActiveStatus, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { deliverInterrupt } from './interrupt.ts';
-import { validateSelection, type LaunchSpec, type ModelSelection } from './launchSpec.ts';
+import { validateSelection, type LaunchSpec, type ModelSelection, type Workspace } from './launchSpec.ts';
 import { jobMarker } from './service.ts';
 import type { Job, JobChanges, JobStore } from './store.ts';
 import { launchPolicy, mapProjects } from './targets.ts';
@@ -57,13 +57,16 @@ function isHostFailure(error: unknown): error is GatewayError {
 
 /** Appended to every task so the worker (and anyone reading the thread) knows where it came from. */
 export function launchMessage(job: Job): string {
-  return `${job.task}\n\n---\nStarted through t3-fleet-gateway as job ${job.id}, in a fresh worktree on branch ${job.branch}.`;
+  const workspace = job.launchSpec?.v === 2 && job.launchSpec.workspace.kind === 'scratch'
+    ? 'in T3’s internal scratch workspace'
+    : `in a fresh worktree on branch ${job.branch}`;
+  return `${job.task}\n\n---\nStarted through t3-fleet-gateway as job ${job.id}, ${workspace}.`;
 }
 
 /** What one launch sends: from the project config (alias-only jobs) or from the job's recorded launch spec. */
 interface LaunchPlan {
   projectId: string;
-  baseRef: string;
+  workspace: Workspace;
   modelSelection: Record<string, unknown> | undefined;
   /** The configured alias whose cached project id a project error should drop, if any. */
   alias: string | null;
@@ -71,11 +74,11 @@ interface LaunchPlan {
   missingModelHint: string;
 }
 
-function planFromConfig(config: GatewayConfig, project: ProjectConfig, projectId: string): LaunchPlan {
+function planFromConfig(config: GatewayConfig, project: ProjectConfig, projectId: string, branch: string): LaunchPlan {
   const model = configuredModel(config, project);
   return {
     projectId,
-    baseRef: project.baseRef,
+    workspace: { kind: 'worktree', baseRef: project.baseRef, branch },
     modelSelection: model?.selection,
     alias: project.alias,
     missingModelHint: model
@@ -84,10 +87,10 @@ function planFromConfig(config: GatewayConfig, project: ProjectConfig, projectId
   };
 }
 
-function planFromSpec(spec: LaunchSpec, hostId: string): LaunchPlan {
+function planFromSpec(spec: LaunchSpec, hostId: string, branch: string): LaunchPlan {
   return {
     projectId: spec.projectId,
-    baseRef: spec.baseRef,
+    workspace: spec.v === 1 ? { kind: 'worktree', baseRef: spec.baseRef, branch } : spec.workspace,
     modelSelection: spec.model.selection ?? undefined,
     alias: spec.alias,
     missingModelHint: spec.model.selection
@@ -257,8 +260,12 @@ export class JobEngine {
       this.#failQueued(job, 'project_not_configured', `Project "${job.projectAlias}" is no longer configured.`);
       return undefined;
     }
+    if (project.host !== job.hostId || project.workspaceMode !== 'worktree') {
+      this.#failQueued(job, 'launch_policy_changed', 'The configured project host or workspace mode changed. Start the work again under the current policy.');
+      return undefined;
+    }
     try {
-      return planFromConfig(config, project, await this.#projectId(project));
+      return planFromConfig(config, project, await this.#projectId(project), job.branch);
     } catch (error) {
       if (isHostFailure(error)) throw error;
       this.#failQueued(job, 'project_not_found', describeError(error).message);
@@ -275,6 +282,15 @@ export class JobEngine {
    */
   async #planFromSpec(host: HostConfig, job: Job, spec: LaunchSpec): Promise<LaunchPlan | undefined> {
     const { config, catalog } = this.#options;
+    if (spec.v === 2 && (spec.hostId !== job.hostId ||
+        (spec.defaultProject !== null && (!host.discovery.enabled || host.defaultProject !== spec.defaultProject)))) {
+      this.#failQueued(job, 'launch_policy_changed', 'The recorded host or default scratch binding changed. Start the work again under the current policy.');
+      return undefined;
+    }
+    if (!runtimeModeAllowed(spec.runtimeMode, host.access)) {
+      this.#failQueued(job, 'launch_policy_changed', 'The recorded runtime mode exceeds the host access ceiling.');
+      return undefined;
+    }
     if (spec.alias !== null && !config.projects.some((candidate) => candidate.alias === spec.alias)) {
       this.#failQueued(job, 'project_not_configured', `Project "${spec.alias}" is no longer configured.`);
       return undefined;
@@ -291,6 +307,8 @@ export class JobEngine {
       if (alias) {
         // The agent named the alias: it must still resolve to the recorded project (a title may have moved) and accept work.
         if (!mapping.aliases.includes(alias)) changed = `project "${alias.alias}" no longer resolves to T3 project ${spec.projectId} on host ${job.hostId}`;
+        else if (alias.workspaceMode !== (spec.v === 1 ? 'worktree' : spec.workspace.kind)) changed = `project "${alias.alias}" changed workspace mode`;
+        else if (spec.v === 2 && alias.runtimeMode !== spec.runtimeMode) changed = `project "${alias.alias}" changed runtime mode`;
         else if (!alias.allowWorkStart) changed = `project "${alias.alias}" no longer accepts work_start`;
       } else {
         const policy = launchPolicy(host, mapping);
@@ -322,7 +340,7 @@ export class JobEngine {
         return undefined;
       }
     }
-    return planFromSpec(spec, job.hostId);
+    return planFromSpec(spec, job.hostId, job.branch);
   }
 
   #failQueued(job: Job, code: string, message: string): void {
@@ -345,7 +363,9 @@ export class JobEngine {
           {
             projectId: plan.projectId,
             title: job.title,
-            workspaceStrategy: { type: 'worktree', baseRef: plan.baseRef, branch: job.branch, startFromOrigin: false },
+            workspaceStrategy: plan.workspace.kind === 'scratch'
+              ? { type: 'root' }
+              : { type: 'worktree', baseRef: plan.workspace.baseRef, branch: plan.workspace.branch, startFromOrigin: false },
             runtimeMode: job.runtimeMode as RuntimeMode,
             ...(plan.modelSelection ? { modelSelection: plan.modelSelection } : {}),
             message: launchMessage(job),

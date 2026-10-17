@@ -10,6 +10,7 @@ interface FleetStatus {
   hosts: {
     id: string;
     label: string | null;
+    defaultProject: string | null;
     reachable: boolean | null;
     t3Version: string | null;
     error: { code: string } | null;
@@ -23,6 +24,7 @@ interface FleetStatus {
     alias: string;
     description: string;
     host: string;
+    workspaceMode: string;
     runtimeMode: string;
     modelConfigured: boolean;
     allowWorkStart: boolean;
@@ -77,6 +79,7 @@ test('fleet_status reports hosts, credentials, job counts and projects', async (
   assert.equal(alpha?.reachable, true);
   assert.equal(alpha?.t3Version, '1.2.3');
   assert.equal(alpha?.label, 'Primary');
+  assert.deepEqual(status.hosts.map((host) => host.defaultProject), [null, null, null]);
   assert.equal(alpha?.credential.state, 'active');
   assert.equal(alpha?.credential.daysLeft, 30, 'the test clock has not moved since enrollment');
   assert.equal(alpha?.maxConcurrentJobs, 3);
@@ -91,8 +94,8 @@ test('fleet_status reports hosts, credentials, job counts and projects', async (
   assert.equal(gamma?.reachable, null);
   assert.equal(gamma?.credential.state, 'missing');
   assert.deepEqual(status.projects, [
-    { alias: 'pilot', description: 'Scratch repository', host: 'alpha', runtimeMode: 'auto', modelConfigured: false, allowWorkStart: true, standingJobs: [] },
-    { alias: 'docs', description: '', host: 'beta', runtimeMode: 'approval-required', modelConfigured: true, allowWorkStart: true, standingJobs: [] },
+    { alias: 'pilot', description: 'Scratch repository', host: 'alpha', workspaceMode: 'worktree', runtimeMode: 'auto', modelConfigured: false, allowWorkStart: true, standingJobs: [] },
+    { alias: 'docs', description: '', host: 'beta', workspaceMode: 'worktree', runtimeMode: 'approval-required', modelConfigured: true, allowWorkStart: true, standingJobs: [] },
   ]);
   const text = JSON.stringify(result.content);
   assert.match(text, /alpha: reachable, T3 1\.2\.3; credential expires in 30 days; 2 running, 1 queued \(max 3\); discovery on \(fleet_projects, fleet_models; launches need a configured alias\)/);

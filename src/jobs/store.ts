@@ -69,8 +69,8 @@ export interface Job {
    */
   delegatedEndedAt: number | null;
   /**
-   * What a job started through a direct target or an explicit model selection resolved to (migration 8):
-   * the dispatcher launches from it. Null for alias-only jobs, which dispatch from the config as before.
+   * The resolved target and launch policy (v1 worktree, v2 workspace-aware). Scratch always records
+   * one. Null for legacy alias-only worktree jobs, which dispatch from the config as before.
    */
   launchSpec: LaunchSpec | null;
 }
