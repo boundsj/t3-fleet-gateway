@@ -5,7 +5,7 @@
  * reads your config or data directory and never contacts a real T3 or connector. See docs/operations.md, "Dashboard demo".
  *
  *   node scripts/dashboard-demo.ts [--scenario mixed|healthy|host-down|auth-issue|empty] [--port 4791] [--base-path /]
- *                                  [--no-badge] [--list]
+ *                                  [--no-badge] [--webhook-receiver] [--list]
  */
 import { parseArgs } from 'node:util';
 import { demoLogger, SCENARIO_NOTES, SCENARIOS, startDemoFleet, type Scenario } from './lib/demo-fleet.ts';
@@ -16,6 +16,7 @@ const { values } = parseArgs({
     port: { type: 'string', default: '4791' },
     'base-path': { type: 'string', default: '/' },
     'no-badge': { type: 'boolean', default: false },
+    'webhook-receiver': { type: 'boolean', default: false },
     list: { type: 'boolean', default: false },
   },
   strict: true,
@@ -44,8 +45,16 @@ const fleet = await startDemoFleet({
   badge: values['no-badge'] ? null : 'Synthetic demo',
   logger: demoLogger(),
   runEngine: true,
+  webhookReceiver: values['webhook-receiver'],
 });
 process.stdout.write(`\nDashboard: ${fleet.dashboardUrl}\n(loopback only; synthetic data; Ctrl-C stops it and deletes the temporary data directory)\n`);
+if (fleet.webhookReceiver) {
+  const receiver = fleet.webhookReceiver;
+  process.stdout.write(`\nSynthetic webhook setup: ${fleet.dashboardUrl}#/webhooks\n`);
+  process.stdout.write(`Webhook URL: ${receiver.acceptUrl}\nFull auth header: ${receiver.authHeader}\nProject: atlas-web (Studio Mac mini)\n`);
+  process.stdout.write(`Failure URLs: ${receiver.rejectUrl} (401), ${receiver.timeoutUrl} (one-second timeout)\n`);
+  process.stdout.write('This key is fictional. Use only these local URLs and this key in the demo. No real bot is contacted.\n');
+}
 
 const stop = async () => {
   process.stdout.write('\nStopping…\n');

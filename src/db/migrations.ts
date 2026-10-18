@@ -298,6 +298,17 @@ CREATE TABLE webhook_attempts (
 CREATE INDEX webhook_attempt_subscription ON webhook_attempts(subscription_id, id DESC);
 `,
   },
+  {
+    version: 10,
+    name: 'dashboard webhook ownership and test results',
+    // Existing subscriptions remain file managed; no delivery, revision or private route is rewritten.
+    sql: `
+ALTER TABLE webhook_subscriptions ADD COLUMN source TEXT NOT NULL DEFAULT 'config' CHECK (source IN ('config', 'dashboard'));
+ALTER TABLE webhook_subscriptions ADD COLUMN last_test_at INTEGER;
+ALTER TABLE webhook_subscriptions ADD COLUMN last_test_outcome TEXT;
+ALTER TABLE webhook_subscriptions ADD COLUMN last_test_status_code INTEGER;
+`,
+  },
 ];
 
 /**

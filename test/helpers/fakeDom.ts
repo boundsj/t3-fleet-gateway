@@ -10,6 +10,8 @@ export class FakeNode {
   readonly kind: 'element' | 'text';
   readonly tag: string;
   text: string;
+  value = '';
+  focused = false;
 
   constructor(kind: 'element' | 'text', tag: string, text = '') {
     this.kind = kind;
@@ -18,17 +20,19 @@ export class FakeNode {
   }
 
   readonly attributes = new Map<string, string>();
-  readonly listeners = new Map<string, ((event: unknown) => void)[]>();
+  readonly listeners = new Map<string, ((event: unknown) => unknown)[]>();
 
   append(...nodes: (FakeNode | string)[]): void {
     for (const node of nodes) {
       if (typeof node === 'string') throw new Error('append() of a string: the app must create text nodes');
       node.parent = this;
       this.children.push(node);
+      if (this.tag === 'select' && this.children.length === 1) this.value = node.getAttribute('value') ?? '';
     }
   }
 
   replaceChildren(...nodes: FakeNode[]): void {
+    for (const child of this.children) child.parent = null;
     this.children.length = 0;
     this.append(...nodes);
   }
@@ -46,7 +50,7 @@ export class FakeNode {
     this.attributes.delete(name);
   }
 
-  addEventListener(event: string, handler: (event: unknown) => void): void {
+  addEventListener(event: string, handler: (event: unknown) => unknown): void {
     this.listeners.set(event, [...(this.listeners.get(event) ?? []), handler]);
   }
 
@@ -74,7 +78,15 @@ export class FakeNode {
     throw new Error('insertAdjacentHTML is never used');
   }
 
-  focus(): void {}
+  focus(): void { this.focused = true; }
+
+  /** Await async handlers so tests exercise the running app without timers or sleeps. */
+  async dispatch(event: string): Promise<void> {
+    if (this.attributes.has('disabled')) return;
+    for (const handler of this.listeners.get(event) ?? []) {
+      await handler({ target: this, preventDefault() {} });
+    }
+  }
 
   /** Every node in the subtree, this one included. */
   *walk(): Generator<FakeNode> {
@@ -91,12 +103,15 @@ export class FakeNode {
     const target = this.elements().find((node) =>
       node.listeners.has('click') && (node.textContent.includes(label) || (node.getAttribute('aria-label') ?? '').includes(label)));
     if (!target) throw new Error(`nothing clickable labelled ${label}`);
-    for (const handler of target.listeners.get('click') ?? []) handler({});
+    if (target.attributes.has('disabled')) return;
+    for (const handler of target.listeners.get('click') ?? []) handler({ target, preventDefault() {} });
   }
 }
 
 export class FakeDocument {
   readonly body = new FakeNode('element', 'body');
+  visibilityState = 'visible';
+  readonly listeners = new Map<string, (() => unknown)[]>();
 
   createElement(tag: string): FakeNode {
     return new FakeNode('element', tag.toLowerCase());
@@ -110,8 +125,16 @@ export class FakeDocument {
     return new FakeNode('text', '#text', text);
   }
 
-  getElementById(): null {
-    return null;
+  getElementById(id: string): FakeNode | null {
+    return this.body.elements().find((node) => node.getAttribute('id') === id) ?? null;
+  }
+
+  addEventListener(event: string, handler: () => unknown): void {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), handler]);
+  }
+
+  async dispatch(event: string): Promise<void> {
+    for (const handler of this.listeners.get(event) ?? []) await handler();
   }
 
   write(): void {

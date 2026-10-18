@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { describe, test } from 'node:test';
 import { startDemoFleet, type Scenario } from '../scripts/lib/demo-fleet.ts';
 import type { DashboardSnapshot } from '../src/dashboard/snapshot.ts';
@@ -86,5 +87,61 @@ describe('dashboard demo fleet', () => {
       assert.equal(snap.checks, null);
       assert.ok(snap.hosts.every((host) => host.reachability.state === 'unchecked'));
     });
+  });
+
+  test('local webhook demo exercises connect, rejected and timed-out replacement, test and disconnect', async () => {
+    const fleet = await startDemoFleet({ scenario: 'empty', webhookReceiver: true });
+    try {
+      const receiver = fleet.webhookReceiver!;
+      const headers = { 'x-t3fg-dashboard': '1', 'content-type': 'application/json', origin: new URL(fleet.dashboardUrl).origin };
+      const list = async () => {
+        const response = await fetch(new URL('api/webhooks', fleet.dashboardUrl), { headers });
+        assert.equal(response.status, 200);
+        const text = await response.text();
+        for (const secret of [receiver.acceptUrl, receiver.rejectUrl, receiver.timeoutUrl, receiver.authHeader, 'demo-only-key']) {
+          assert.equal(text.includes(secret), false, 'management GET never returns saved URL/header material');
+        }
+        return JSON.parse(text) as {
+          session: string;
+          connections: { id: string; revision: string; source: string; projects: string[]; hosts: string[] }[];
+        };
+      };
+      const first = await list();
+      assert.deepEqual(first.connections, []);
+      const mutate = async (action: string, input: Record<string, unknown>) => {
+        const response = await fetch(new URL(`api/webhooks/${action}`, fleet.dashboardUrl), {
+          method: 'POST', headers, body: JSON.stringify({ session: first.session, requestId: randomUUID(), ...input }),
+        });
+        return { status: response.status, body: await response.json() as { error?: string; code?: string; test?: { outcome: string; statusCode: number | null } } };
+      };
+      const blocked = await mutate('connect', { project: 'atlas-web', url: 'https://receiver.example.test/never-contacted', authHeader: receiver.authHeader });
+      assert.equal(blocked.status, 400);
+      assert.equal(blocked.body.error, 'invalid_route');
+      assert.deepEqual(receiver.counts, { accepted: 0, rejected: 0, stalled: 0 });
+
+      const connected = await mutate('connect', { project: 'atlas-web', url: receiver.acceptUrl, authHeader: receiver.authHeader });
+      assert.equal(connected.status, 200);
+      assert.equal(connected.body.code, 'connected');
+      assert.deepEqual(connected.body.test, { outcome: 'delivered', statusCode: 202 });
+      const connection = (await list()).connections[0]!;
+      assert.equal(connection.source, 'dashboard');
+      assert.deepEqual(connection.projects, ['atlas-web']);
+      assert.deepEqual(connection.hosts, ['studio']);
+      const target = { id: connection.id, revision: connection.revision };
+      for (const [url, outcome, statusCode] of [[receiver.rejectUrl, 'http_error', 401], [receiver.timeoutUrl, 'timeout', null]] as const) {
+        const rejected = await mutate('replace', { ...target, url, authHeader: receiver.authHeader });
+        assert.equal(rejected.status, 502);
+        assert.deepEqual(rejected.body.test, { outcome, statusCode });
+        assert.equal((await list()).connections[0]!.revision, target.revision, 'failed test preserves working connection');
+      }
+      const tested = await mutate('test', target);
+      assert.equal(tested.status, 200);
+      assert.deepEqual(tested.body.test, { outcome: 'delivered', statusCode: 202 });
+      assert.deepEqual(receiver.counts, { accepted: 2, rejected: 1, stalled: 1 });
+      assert.equal((await mutate('disconnect', target)).status, 200);
+      assert.deepEqual((await list()).connections, []);
+    } finally {
+      await fleet.close();
+    }
   });
 });

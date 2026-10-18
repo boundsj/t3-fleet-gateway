@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 import type { DashboardSnapshot } from '../src/dashboard/snapshot.ts';
-import { APP_URL, assertSafeTree, loadApp, VIEWS } from './helpers/dashboardApp.ts';
-import { FakeDocument } from './helpers/fakeDom.ts';
+import { APP_URL, assertSafeTree, FakeWindow, loadApp, VIEWS } from './helpers/dashboardApp.ts';
+import { FakeDocument, type FakeNode } from './helpers/fakeDom.ts';
 
 const EVIL = '<img src=x onerror=alert(1)>"\'><script>alert(2)</script>';
 const NOW = '2026-01-15T12:00:00.000Z';
@@ -145,6 +145,7 @@ describe('dashboard page: safe rendering', () => {
   test('routes and links are parsed strictly', async () => {
     const app = await loadApp();
     assert.deepEqual(app.parseRoute('#/hosts/forge'), { view: 'hosts', id: 'forge' });
+    assert.deepEqual(app.parseRoute('#/webhooks/connect'), { view: 'webhooks', id: 'connect' });
     assert.deepEqual(app.parseRoute('#/clients/a"b'), { view: 'clients', id: null });
     assert.deepEqual(app.parseRoute('#/nowhere'), { view: 'overview', id: null });
     assert.deepEqual(app.parseRoute(''), { view: 'overview', id: null });
@@ -152,5 +153,294 @@ describe('dashboard page: safe rendering', () => {
     for (const bad of ['javascript:alert(1)', 'https://example.com', '//evil', 't3-thread://v1/a b', 't3-thread://v2/x', '#/x"y', 'data:text/html,x', null]) {
       assert.equal(app.safeHref(bad), false, String(bad));
     }
+  });
+});
+
+const WEBHOOK_URL = 'https://hooks.example.test/private-synthetic-route';
+const AUTH_HEADER = 'Authorization: Bearer synthetic-private-key';
+const webhookRow = (source: 'config' | 'dashboard' = 'dashboard') => ({
+  id: source === 'dashboard' ? 'ui-connection' : 'file-connection', revision: 3, source, enabled: true,
+  projects: ['alpha'], hosts: ['h1'], lastTest: { at: NOW, outcome: 'delivered', statusCode: 202 },
+});
+type WebhookRow = ReturnType<typeof webhookRow>;
+
+async function webhookPage(options: {
+  connections?: WebhookRow[];
+  post?: (path: string, body: Record<string, unknown>) => Promise<Response> | Response;
+} = {}) {
+  const doc = new FakeDocument();
+  const root = doc.createElement('div');
+  root.setAttribute('id', 'app');
+  doc.body.append(root);
+  const posts: { path: string; body: Record<string, unknown>; init: RequestInit }[] = [];
+  let reads = 0;
+  let rows = options.connections ?? [];
+  let session = 'synthetic-session';
+  const win = new FakeWindow(async (path, init = {}) => {
+    assert.equal(new Headers(init.headers).get('x-t3fg-dashboard'), '1');
+    assert.equal(init.cache, 'no-store');
+    assert.equal(init.credentials, 'same-origin');
+    if (path === 'api/snapshot') return Response.json(hostileSnapshot());
+    if (path === 'api/webhooks') {
+      reads++;
+      assert.equal(init.method ?? 'GET', 'GET');
+      return Response.json({ projects: [{ alias: 'alpha', host: 'h1' }, { alias: 'beta', host: 'h2' }], connections: rows, session });
+    }
+    assert.match(path, /^api\/webhooks\/(connect|replace|test|disconnect)$/);
+    assert.equal(init.method, 'POST');
+    assert.equal(new Headers(init.headers).get('content-type'), 'application/json');
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    assert.match(String(body.requestId), /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+    assert.equal(body.session, session);
+    posts.push({ path, body, init });
+    if (options.post) return options.post(path, body);
+    if (path.endsWith('/connect')) rows = [...rows, webhookRow()];
+    if (path.endsWith('/disconnect')) rows = rows.filter((row) => row.id !== body.id);
+    return Response.json({ ok: true, code: path.split('/').at(-1), test: { outcome: 'delivered', statusCode: 202 } });
+  });
+  const app = await loadApp();
+  await app.boot(win, doc).ready;
+  const button = (label: string) => {
+    const node = root.elements('button').find((item) => item.textContent === label);
+    assert.ok(node, `button ${label} exists`);
+    return node;
+  };
+  const field = (id: string) => {
+    const node = doc.getElementById(id);
+    assert.ok(node, `field ${id} exists`);
+    return node;
+  };
+  const form = () => {
+    const node = root.elements('form')[0];
+    assert.ok(node, 'setup form exists');
+    return node;
+  };
+  const fill = (url = WEBHOOK_URL) => {
+    field('webhook-url').value = url;
+    field('webhook-auth').value = AUTH_HEADER;
+  };
+  const assertNoSecrets = () => {
+    const all = [...doc.body.walk()].map((node) => [node.textContent, node.value, ...node.attributes.values()].join(' ')).join(' ');
+    for (const secret of [WEBHOOK_URL, AUTH_HEADER, 'synthetic-private-key', session]) assert.equal(all.includes(secret), false, `no ${secret}`);
+    assertSafeTree(root);
+  };
+  return { app, doc, root, win, posts, button, field, form, fill, assertNoSecrets,
+    reads: () => reads, setSession: (next: string) => { session = next; }, setConnections: (next: WebhookRow[]) => { rows = next; } };
+}
+
+describe('dashboard webhook connections: running browser handlers', () => {
+  test('overview entry and setup use two accessible paste fields, configured projects and a safe private-panel prompt', async () => {
+    const page = await webhookPage();
+    assert.equal(page.root.elements('input').length, 2, 'no separate key field');
+    assert.equal(page.field('webhook-auth').getAttribute('type'), 'password');
+    for (const id of ['webhook-url', 'webhook-auth', 'webhook-project']) {
+      assert.ok(page.root.elements('label').some((label) => label.getAttribute('for') === id));
+      assert.ok(page.doc.getElementById(page.field(id).getAttribute('aria-describedby')!));
+    }
+    assert.deepEqual(page.field('webhook-project').elements('option').map((option) => option.textContent), ['alpha · h1', 'beta · h2']);
+    assert.match(page.root.textContent, /POST to/);
+    assert.match(page.root.textContent, /value labelled “header”/);
+    assert.match(page.root.textContent, /Reply excerpts are off/);
+    assert.match(page.root.textContent, /ready for follow-up, needs input, failed, cancelled, and delegated work ended/);
+    await page.button('Copy setup prompt').dispatch('click');
+    assert.match(page.win.copied[0]!, /clickable links to its Webhook URL, Webhook key and Authorization header panels/);
+    assert.match(page.win.copied[0]!, /do not print the key or header value/);
+    page.assertNoSecrets();
+    page.win.location.hash = '#/overview';
+    await page.win.dispatch('hashchange');
+    assert.ok(page.root.elements('a').some((node) => node.textContent === 'Connect Grok Bot' && node.getAttribute('href') === '#/webhooks/connect'));
+  });
+
+  test('connect submits JSON once, clears detached inputs before awaiting, then reports accepted rather than bot completion', async () => {
+    const pending = Promise.withResolvers<Response>();
+    const page = await webhookPage({ post: () => pending.promise });
+    page.fill();
+    page.field('webhook-project').value = 'beta';
+    const oldForm = page.form();
+    const url = page.field('webhook-url');
+    const auth = page.field('webhook-auth');
+    const sending = oldForm.dispatch('submit');
+    assert.equal(page.posts.length, 1);
+    assert.equal(url.value, '');
+    assert.equal(auth.value, '');
+    assert.equal(page.button('Sending test…').getAttribute('disabled'), '');
+    assert.equal(page.button('Sending test…').getAttribute('aria-busy'), 'true');
+    await oldForm.dispatch('submit');
+    assert.equal(page.posts.length, 1, 'a repeated submit cannot create a second request while awaiting the first');
+    assert.equal(page.posts[0]!.body.project, 'beta');
+    assert.equal(page.posts[0]!.body.url, WEBHOOK_URL);
+    assert.equal(page.posts[0]!.body.authHeader, AUTH_HEADER);
+    page.assertNoSecrets();
+    pending.resolve(Response.json({ ok: true, code: 'connected', test: { outcome: 'delivered', statusCode: 202 } }));
+    await sending;
+    assert.match(page.root.textContent, /Connected\. Test accepted\. Check the bot conversation; the bot may still be working/);
+    assert.equal(page.root.elements('form').length, 0);
+    assert.equal(page.reads(), 2, 'successful setup reloads the safe list');
+    page.assertNoSecrets();
+  });
+
+  test('HTTP refusal and timeout show fixed safe guidance, leave blank inputs, and do not reflect server text', async () => {
+    for (const failure of [{ outcome: 'http_error', statusCode: 401 }, { outcome: 'timeout', statusCode: null }]) {
+      const page = await webhookPage({ post: () => Response.json({ error: 'ping_failed', test: failure,
+        message: `${WEBHOOK_URL} ${AUTH_HEADER}`, details: EVIL }, { status: 422 }) });
+      page.fill();
+      await page.form().dispatch('submit');
+      assert.match(page.root.textContent, /No connection was saved/);
+      assert.match(page.root.textContent, failure.statusCode ? /HTTP 401/ : /Timed out/);
+      assert.equal(page.field('webhook-url').value, '');
+      assert.equal(page.field('webhook-auth').value, '');
+      page.assertNoSecrets();
+    }
+  });
+
+  test('failed replacement keeps the existing connection and supports both a changed URL and retaining the URL', async () => {
+    const page = await webhookPage({ connections: [webhookRow()], post: () => Response.json({ error: 'ping_failed',
+      test: { outcome: 'http_error', statusCode: 401 } }, { status: 422 }) });
+    await page.button('Replace key').dispatch('click');
+    assert.match(page.root.textContent, /If you recreated the routine, paste its new URL and full authorization header/);
+    assert.equal(page.field('webhook-url').getAttribute('required'), null);
+    assert.equal(page.root.elements('select').length, 0, 'replacement preserves the project');
+    page.fill();
+    await page.form().dispatch('submit');
+    assert.equal(page.posts[0]!.body.id, 'ui-connection');
+    assert.equal(page.posts[0]!.body.revision, 3);
+    assert.equal(page.posts[0]!.body.url, WEBHOOK_URL);
+    assert.match(page.root.textContent, /The current connection was kept/);
+    assert.match(page.root.textContent, /Connections \(1\)/);
+    page.fill('');
+    await page.form().dispatch('submit');
+    assert.equal(Object.hasOwn(page.posts[1]!.body, 'url'), false, 'blank URL means retain; it is never fetched into the form');
+    assert.equal(page.posts[1]!.body.authHeader, AUTH_HEADER);
+    assert.notEqual(page.posts[1]!.body.requestId, page.posts[0]!.body.requestId, 'corrected values are a new explicit operation');
+    page.assertNoSecrets();
+  });
+
+  test('disconnect requires confirmation; file-managed rows can only send tests', async () => {
+    const page = await webhookPage({ connections: [webhookRow(), webhookRow('config')] });
+    const cards = page.root.elements('article');
+    const fileCard = cards.find((card) => card.textContent.includes('File-managed'))!;
+    assert.ok(fileCard);
+    assert.deepEqual(fileCard.elements('button').map((button) => button.textContent), ['Send test']);
+    await page.button('Disconnect').dispatch('click');
+    assert.equal(page.posts.length, 0);
+    assert.match(page.root.textContent, /A request already being sent may still arrive/);
+    await page.button('Keep connection').dispatch('click');
+    assert.equal(page.root.elements().some((node) => node.getAttribute('aria-label') === 'Confirm disconnect'), false);
+    await page.button('Disconnect').dispatch('click');
+    await page.button('Yes, disconnect').dispatch('click');
+    assert.equal(page.posts.length, 1);
+    assert.equal(page.posts[0]!.path, 'api/webhooks/disconnect');
+    assert.equal(page.posts[0]!.body.id, 'ui-connection');
+    assert.equal(page.posts[0]!.body.revision, 3);
+    assert.equal(Object.hasOwn(page.posts[0]!.body, 'url'), false);
+    assert.equal(Object.hasOwn(page.posts[0]!.body, 'authHeader'), false);
+    assert.match(page.root.textContent, /Connections \(1\)/);
+    assert.match(page.root.textContent, /Disconnected\. Queued notifications were cancelled/);
+    page.assertNoSecrets();
+  });
+
+  test('test buttons use only id and revision, prevent competing clicks, and show a conflict safely', async () => {
+    const pending = Promise.withResolvers<Response>();
+    const page = await webhookPage({ connections: [webhookRow()], post: () => pending.promise });
+    const testButton = page.button('Send test');
+    const sending = testButton.dispatch('click');
+    await testButton.dispatch('click');
+    assert.equal(page.posts.length, 1);
+    assert.equal(page.button('Disconnect').getAttribute('disabled'), '');
+    assert.equal(page.button('Replace key').getAttribute('disabled'), '');
+    assert.deepEqual(Object.keys(page.posts[0]!.body).sort(), ['id', 'requestId', 'revision', 'session']);
+    pending.resolve(Response.json({ error: 'conflict', message: AUTH_HEADER }, { status: 409 }));
+    await sending;
+    assert.match(page.root.textContent, /changed while the test was running/);
+    assert.equal(page.button('Send test').getAttribute('disabled'), null);
+    page.assertNoSecrets();
+  });
+
+  test('refreshing existing connections is safe and closes an outdated replacement without rebasing its revision', async () => {
+    const page = await webhookPage({ connections: [webhookRow()] });
+    await page.button('Replace key').dispatch('click');
+    page.fill();
+    const oldAuth = page.field('webhook-auth');
+    page.setConnections([{ ...webhookRow(), revision: 4 }]);
+    await page.button('Refresh').dispatch('click');
+    assert.equal(oldAuth.value, '');
+    assert.equal(page.root.elements('form').length, 0, 'operator must reopen replacement after another edit');
+    assert.equal(page.button('Replace key').getAttribute('disabled'), null);
+    await page.button('Replace key').dispatch('click');
+    page.fill();
+    await page.form().dispatch('submit');
+    assert.equal(page.posts[0]!.body.revision, 4);
+    page.assertNoSecrets();
+  });
+
+  test('closing, navigating and leaving the page clear the original input nodes', async () => {
+    const page = await webhookPage();
+    const assertCleared = (fields: FakeNode[]) => fields.forEach((field) => assert.equal(field.value, ''));
+    page.fill();
+    let fields = [page.field('webhook-url'), page.field('webhook-auth')];
+    await page.button('Close').dispatch('click');
+    assertCleared(fields);
+    assert.equal(page.root.elements('form').length, 0);
+    await page.button('Connect Grok Bot').dispatch('click');
+    page.fill();
+    fields = [page.field('webhook-url'), page.field('webhook-auth')];
+    page.win.location.hash = '#/clients';
+    await page.win.dispatch('hashchange');
+    assertCleared(fields);
+    page.win.location.hash = '#/webhooks';
+    await page.win.dispatch('hashchange');
+    page.fill();
+    fields = [page.field('webhook-url'), page.field('webhook-auth')];
+    await page.win.dispatch('pagehide');
+    assertCleared(fields);
+    page.assertNoSecrets();
+    assert.equal(page.posts.length, 0);
+  });
+
+  test('returning from Grok after a minute preserves partially pasted setup; explicit Refresh still clears it', async (t) => {
+    const page = await webhookPage();
+    page.field('webhook-url').value = WEBHOOK_URL;
+    const url = page.field('webhook-url');
+    const later = Date.now() + 61_000;
+    t.mock.method(Date, 'now', () => later);
+    page.doc.visibilityState = 'hidden';
+    await page.doc.dispatch('visibilitychange');
+    page.doc.visibilityState = 'visible';
+    await page.doc.dispatch('visibilitychange');
+    assert.equal(page.reads(), 1, 'no automatic request while the setup form is open');
+    assert.equal(url.value, WEBHOOK_URL);
+    assert.equal(page.field('webhook-url'), url, 'the partly completed form is not replaced');
+    await page.button('Refresh').dispatch('click');
+    assert.equal(page.reads(), 2);
+    assert.equal(url.value, '');
+    page.assertNoSecrets();
+  });
+
+  test('a lost response is not replayed, raw errors are hidden, and restart requires another explicit action with the refreshed session', async () => {
+    const page = await webhookPage({ post: () => { throw new Error(`${AUTH_HEADER} ${WEBHOOK_URL}`); } });
+    page.fill();
+    await page.form().dispatch('submit');
+    assert.equal(page.posts.length, 1);
+    assert.match(page.root.textContent, /did not confirm the result/);
+    assert.equal(page.reads(), 2);
+    page.assertNoSecrets();
+
+    let first = true;
+    const restarted = await webhookPage({ post: () => {
+      if (first) {
+        first = false;
+        restarted.setSession('new-synthetic-session');
+        return Response.json({ error: 'session_expired' }, { status: 409 });
+      }
+      return Response.json({ ok: true, code: 'connected' });
+    } });
+    restarted.fill();
+    await restarted.form().dispatch('submit');
+    assert.match(restarted.root.textContent, /gateway restarted/);
+    assert.equal(restarted.posts.length, 1);
+    restarted.fill();
+    await restarted.form().dispatch('submit');
+    assert.equal(restarted.posts[1]!.body.session, 'new-synthetic-session');
+    restarted.assertNoSecrets();
   });
 });

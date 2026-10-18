@@ -117,7 +117,7 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 9);
+    assert.equal(SCHEMA_VERSION, 10);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
       after.map(
@@ -408,6 +408,55 @@ CREATE TABLE jobs (
     const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
     t.after(() => fresh.close());
     const schema = (target: typeof db) => target.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name").all();
+    assert.deepEqual(schema(db), schema(fresh));
+  });
+
+  test('migration 10 preserves populated version 9 queues, leases, secrets and revisions with config ownership and unknown test results', (t) => {
+    const path = openDataDir(join(tempDir(t), 'data')).databasePath;
+    const old = new DatabaseSync(path);
+    migrate(old, MIGRATIONS.slice(0, 9));
+    assert.equal(schemaVersion(old), 9);
+    old.exec(`
+      INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode,
+        created_at, updated_at, state_changed_at)
+        VALUES ('jobold0001', 'synthetic-client', 'r1', 'pilot', 'main', 'idle', 'Synthetic task', 'Synthetic job', 'fleet/old', 'auto', 1, 2, 2);
+      INSERT INTO job_events (id, job_id, type, from_state, to_state, created_at) VALUES (1, 'jobold0001', 'state_changed', 'running', 'idle', 2);
+      INSERT INTO job_turns (job_id, run_id, client_id) VALUES ('jobold0001', 'run-1', 'synthetic-client');
+      INSERT INTO webhook_subscriptions (id, revision, identity, settings, route, overflow_count, overflow_sequence, overflow_at, overflow_reason)
+        VALUES ('old-route', 'original-revision', 'original-identity', '{"events":["idle"],"excerptChars":0}',
+          '{"url":"https://receiver.example.com/synthetic-private-path","header":"authorization","value":"Bearer synthetic-private-key"}',
+          4, 1, 2, 'backlog');
+      INSERT INTO webhook_deliveries (id, subscription_id, revision, event_id, feed_sequence, payload, created_at, expires_at,
+        next_attempt_at, state, attempt_count, lease, lease_until)
+        VALUES (1, 'old-route', 'original-revision', 'event-1', 1, '{"synthetic":"immutable payload"}', 2, 3600002, 2, 'sending', 1, 'lease-1', 30002);
+      INSERT INTO webhook_deliveries (id, subscription_id, revision, event_id, feed_sequence, payload, created_at, expires_at, next_attempt_at, state)
+        VALUES (2, 'old-route', 'original-revision', 'event-2', 1, '{"synthetic":"pending payload"}', 2, 3600002, 2, 'pending');
+      INSERT INTO webhook_attempts (subscription_id, delivery_id, event_id, attempted_at, outcome, lease)
+        VALUES ('old-route', 1, 'event-1', 2, 'in_progress', 'lease-1');
+      INSERT INTO webhook_attempts (subscription_id, event_id, attempted_at, status_code, outcome)
+        VALUES ('old-route', 'old-ping', 1, 204, 'delivered');
+    `);
+    const tables = ['jobs', 'job_events', 'job_turns', 'webhook_deliveries', 'webhook_attempts'];
+    const before = tables.map((table) => old.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const subscriptions = old.prepare('SELECT * FROM webhook_subscriptions ORDER BY id').all().map((row) => ({ ...row }));
+    old.close();
+
+    const db = openDatabase(path);
+    t.after(() => db.close());
+    assert.equal(schemaVersion(db), SCHEMA_VERSION);
+    assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
+    const migrated = db.prepare('SELECT * FROM webhook_subscriptions ORDER BY id').all()
+      .map(({ source, last_test_at, last_test_outcome, last_test_status_code, ...rest }) =>
+        ({ source, last_test_at, last_test_outcome, last_test_status_code, original: rest }));
+    assert.deepEqual(migrated, subscriptions.map((original) =>
+      ({ source: 'config', last_test_at: null, last_test_outcome: null, last_test_status_code: null, original })));
+    assert.throws(() => db.prepare("UPDATE webhook_subscriptions SET source = 'unknown'").run(), /CHECK constraint/);
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+    assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
+    assert.throws(() => db.prepare('DELETE FROM job_events').run(), /append-only/);
+    const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
+    t.after(() => fresh.close());
+    const schema = (target: typeof db) => target.prepare('SELECT type, name, sql FROM sqlite_master ORDER BY name').all();
     assert.deepEqual(schema(db), schema(fresh));
   });
 

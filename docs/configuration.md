@@ -140,7 +140,7 @@ OAuth TTLs govern gateway grants only; static bearer tokens from `clients token`
 
 ### `dashboard`
 
-The read-only operator dashboard (v0.1.8): gateway, hosts, agent clients, jobs and recent job events in a browser, with a manual **Run checks**. Off by default. It runs inside `serve` on a listener of its own, never the MCP listener, so the tunnel that carries `/mcp` to agents does not carry it. See [operations.md](operations.md#operator-dashboard) for publishing it to your tailnet and [security.md](security.md#the-operator-dashboard) for the trust boundary.
+The operator dashboard (v0.1.9): gateway, hosts, agent clients, jobs and recent job events in a browser, with manual **Run checks** and **Webhook connections**. Monitoring remains read-only; only webhook connection management changes state. Off by default. It runs inside `serve` on a listener of its own, never the MCP listener, so the tunnel that carries `/mcp` to agents does not carry it. See [operations.md](operations.md#operator-dashboard) for publishing it to your tailnet and [security.md](security.md#the-operator-dashboard) for the trust boundary.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -160,7 +160,7 @@ The read-only operator dashboard (v0.1.8): gateway, hosts, agent clients, jobs a
 }
 ```
 
-Changing it takes a restart of `serve`. `doctor` checks that the dashboard answers on its listener and that the public URL does not serve it.
+Changing dashboard listener settings takes a restart of `serve`. Connections created or changed in the Webhooks view take effect immediately. `doctor` checks that the dashboard answers on its listener and that the public URL does not serve it.
 
 ## A remote host
 
@@ -178,7 +178,9 @@ Then run `t3-fleet-gateway hosts enroll studio`. Adding a host is configuration 
 
 ## Webhooks
 
-Unreleased: `webhooks: { "subscriptions": [] }` is the default. Configure at most 32 subscriptions; restart `serve` to apply changes. The [README example](../README.md#wake-a-routine-with-job-webhooks) uses a Grok routine URL and sender-key header. No new incoming connection is required.
+v0.1.9: `webhooks: { "subscriptions": [] }` is the default. The easiest setup is **Connect Grok Bot** in the private dashboard: paste a URL and full authentication header, choose a configured project and test the connection. It works with generic HTTPS receivers too. Dashboard connections live in the database, require no secret file or restart, and use the five default events with excerpts off. They survive config edits and restarts.
+
+The file-managed alternative below remains supported. At most 32 saved active subscriptions across both sources are allowed; restart `serve` to apply file changes. The dashboard labels file-managed rows and cannot replace or disconnect them. ID collisions between ownership types are refused. The [manual setup example](setup.md#configure-a-webhook-by-hand) uses a Grok routine URL and sender-key header. No new incoming connection is required.
 
 | Field | Meaning |
 | --- | --- |
@@ -192,6 +194,6 @@ Unreleased: `webhooks: { "subscriptions": [] }` is the default. Configure at mos
 | `excerptChars` | Default `0` omits both excerpt fields. Opt in with 1–500 for a bounded worker excerpt and truncation flag. Worker secrets cannot be reliably redacted. |
 | `allowLoopbackHttp` | Default `false`. Isolated development only: permits HTTP at literal `127.0.0.1` or `[::1]`; no other HTTP host. HTTPS always validates certificates. |
 
-Use `webhooks ping <id>` to test config without creating a job, then restart the gateway. `webhooks list` and `webhooks attempts <id> --limit 20` are offline diagnostics and do not apply their config over the serving process. Secrets are stored as plaintext inside the existing protected data directory/database, like downstream credentials. Keep config private too because URLs can contain credentials in their path/query. Protect backups.
+Use `webhooks ping <id>` to test config without creating a job, then restart the gateway to apply file changes. The CLI also supports persisted dashboard connections; `webhooks list` identifies the management source. A 2xx test result means the receiver accepted the request; check the bot conversation for its result. `webhooks list` and `webhooks attempts <id> --limit 20` are offline diagnostics and do not apply their config over the serving process. Secrets are stored as plaintext inside the existing protected data directory/database, like downstream credentials. Keep config private too because URLs can contain credentials in their path/query. Protect backups.
 
 New subscriptions do not replay history. Disabling/removing a subscription, or changing its route, key, filters or excerpt policy, cancels its old queue. Unchanged routes resume after restart. An already transmitted request can still arrive. Payloads are capped at 16 KiB; oversized upstream metadata increments the same explicit overflow diagnostic as a full queue. [Delivery, overflow, retention and feed catch-up](design.md#outbound-job-webhooks) define recovery; retain polling even when notifications work.

@@ -25,6 +25,7 @@ import { TokenService } from './oauth/tokens.ts';
 import { MINUTE, systemClock, type Clock } from './time.ts';
 import { WebhookSender, type SenderOptions } from './webhooks/sender.ts';
 import { WebhookStore } from './webhooks/store.ts';
+import { WebhookManagement, type ManagementOptions } from './webhooks/management.ts';
 
 /** Everything that shares the database: used by the server and by CLI commands. */
 export interface GatewayServices {
@@ -117,6 +118,8 @@ export interface GatewayOptions extends ServiceOptions {
   tools?: (services: GatewayServices) => GatewayTool[];
   /** Tests drive the actual network sender by hand and can shorten its deadline. */
   webhookSender?: SenderOptions;
+  /** Isolated synthetic test/demo transport policy; never populated from operator config. */
+  webhookManagement?: ManagementOptions;
   /** Tests drive the job engine by hand (`autoStart: false`) or with a short interval. */
   jobEngine?: { autoStart?: boolean; intervalMs?: number; launchTimeoutMs?: number };
   /** Listen on this port instead of `config.listen.port`; 0 lets the OS pick one (tests). */
@@ -133,6 +136,9 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   const webhooks = new WebhookSender(services.webhooks, services.logger, options.webhookSender);
   const startedAt = services.clock();
   const { config, logger } = services;
+  const management = new WebhookManagement(services.webhooks, config, services.clock, logger, () => {
+    if (options.webhookSender?.autoStart !== false) webhooks.start();
+  }, options.webhookManagement);
   const mcp = createMcpEndpoint({
     publicUrl: config.publicUrl,
     allowedOrigins: config.allowedOrigins,
@@ -174,6 +180,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
         dashboard: config.dashboard,
         checks,
         logger,
+        management,
         ...(options.dashboardPort === undefined ? {} : { port: options.dashboardPort }),
         sources: {
           config, db: services.db, clock: services.clock, registry: services.registry, store: services.jobs.store, engine, startedAt,
@@ -185,7 +192,9 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
     // reserved listeners close, and no engine, sender, renewal or startup probe has been started.
     services.webhooks.reconcile(config.webhooks, options.dataDir);
     ready = true;
+    management.ready();
   } catch (error) {
+    await management.stop();
     await Promise.allSettled([dashboard?.close(0), server?.close(0), mcp.close()]);
     await services.close();
     throw error;
@@ -216,7 +225,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
       if (!commandCheck.signal.aborted) renewal = startRenewalLoop(services.registry, config.renewal.checkEveryMinutes * MINUTE, logger);
     }
   });
-  if (config.webhooks.subscriptions.some((s) => s.enabled) && options.webhookSender?.autoStart !== false) webhooks.start();
+  if (services.webhooks.listConnections().length && options.webhookSender?.autoStart !== false) webhooks.start();
   if (options.jobEngine?.autoStart !== false) engine.start();
   // Checked in the background: an unreachable host must not delay startup or shutdown. Logged as warnings.
   const modelCheck = new AbortController();
@@ -225,10 +234,13 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   let closing: Promise<void> | undefined;
   const shutdown = async (): Promise<void> => {
     logger.info('gateway.stopping');
+    ready = false;
+    const stoppedManagement = management.stop();
     // Not awaited: a call still in flight ends when the T3 clients close below.
     modelCheck.abort();
     commandCheck.abort();
     await dashboard?.close();
+    await stoppedManagement;
     await server!.close();
     // The engine finishes its current tick; job state is already in the database.
     await engine.stop();
