@@ -12,7 +12,7 @@ const BLOCKED_HEADERS = new Set([
   'content-encoding', 'content-range', 'http2-settings', 'accept', 'accept-encoding', 'origin', 'referer', 'user-agent', 'via', 'forwarded', 'keep-alive',
 ]);
 
-function authHeader(value: string): boolean {
+export function authHeaderAllowed(value: string): boolean {
   const name = value.toLowerCase();
   if (BLOCKED_HEADERS.has(name) || /^(proxy-|sec-|x-forwarded-)/.test(name)) return false;
   try { validateHeaderName(value); return true; } catch { return false; }
@@ -31,7 +31,7 @@ const subscriptionSchema = z.strictObject({
   enabled: z.boolean().default(false),
   url: z.string().min(1).max(4096),
   auth: z.strictObject({
-    header: z.string().min(1).max(128).refine(authHeader),
+    header: z.string().min(1).max(128).refine(authHeaderAllowed),
     // A filename within the private data directory, never an arbitrary path or symlink.
     secretFile: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
   }),
@@ -53,7 +53,7 @@ export interface WebhookRoute { url: string; header: string; value: string }
 export function loadRoute(subscription: SubscriptionConfig, dataDir: string): WebhookRoute {
   let fd: number | undefined;
   try {
-    if (!destinationAllowed(subscription.url, subscription.allowLoopbackHttp) || !authHeader(subscription.auth.header)) throw new Error();
+    if (!destinationAllowed(subscription.url, subscription.allowLoopbackHttp) || !authHeaderAllowed(subscription.auth.header)) throw new Error();
     // Opening a FIFO without a writer would block before fstat can reject it. Regular files ignore O_NONBLOCK.
     fd = openSync(join(dataDir, subscription.auth.secretFile), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const stat = fstatSync(fd);

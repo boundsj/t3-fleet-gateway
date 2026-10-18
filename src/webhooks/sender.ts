@@ -135,3 +135,14 @@ export async function pingWebhook(subscription: SubscriptionConfig, dataDir: str
   store.recordPing(subscription.id, eventId, now, result);
   return result;
 }
+
+/** Dashboard-owned routes live only in the private database; the CLI never copies them into configuration. */
+export async function pingStoredWebhook(id: string, revision: string, store: WebhookStore, clock: Clock): Promise<AttemptResult> {
+  const route = store.route(id, revision);
+  const eventId = randomUUID();
+  const at = clock();
+  const payload = JSON.stringify({ eventId, type: 'ping', timestamp: new Date(at).toISOString(), feedSequence: null, feedCursor: null });
+  const result = await postWebhook(route, payload);
+  store.testConnection(id, revision, { eventId, at, result });
+  return result;
+}

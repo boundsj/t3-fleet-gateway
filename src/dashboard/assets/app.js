@@ -1,15 +1,43 @@
-// t3-fleet-gateway operator dashboard (read-only).
+// t3-fleet-gateway operator dashboard: monitoring and private webhook connections.
 //
 // Security rules for this file, checked by test/dashboard-ui.test.ts:
 // - The DOM is built with createElement, createTextNode and setAttribute only. No innerHTML, outerHTML,
 //   insertAdjacentHTML, document.write, eval or Function: every value from the server is text, never markup.
 // - Links are hash routes inside the dashboard or T3 thread links of the documented form t3-thread://v1/<id>.
-// - No storage, cookies or credentials: the page reads the snapshot and asks for checks; nothing else.
+// - No browser storage or cookies. Pasted webhook credentials live only in the form and its outgoing request,
+//   are cleared before awaiting a submission, and are never received back from the server.
 
 const API_HEADER = 'x-t3fg-dashboard';
 const SAFE_THREAD_LINK = /^t3-thread:\/\/v1\/[A-Za-z0-9._:-]{1,200}$/;
 const SAFE_ROUTE = /^#\/[A-Za-z0-9/_-]*$/;
-const VIEWS = ['overview', 'clients', 'hosts', 'jobs', 'checks'];
+const VIEWS = ['overview', 'clients', 'hosts', 'jobs', 'checks', 'webhooks'];
+const SETUP_PROMPT = 'For the routine I want to connect, send clickable links to its Webhook URL, Webhook key and Authorization header panels. Send private panel links only; do not print the key or header value.';
+const WEBHOOK_ERRORS = {
+  invalid_request: 'Check the fields and paste a full authorization header, including its name and colon.',
+  invalid_route: 'Use an HTTPS webhook URL and a valid full authorization header.',
+  project_not_found: 'That project is no longer configured. Refresh and choose a project again.',
+  not_found: 'This connection was disconnected. Refresh the list before continuing.',
+  conflict: 'This connection changed while the test was running. Refresh the list before trying again.',
+  file_managed: 'This connection is managed in the gateway configuration file.',
+  subscription_limit: 'The gateway has reached its limit of 32 webhook connections.',
+  busy: 'Another connection operation is still running. Wait a moment and try again.',
+  session_expired: 'The gateway restarted. Refresh this page before trying again.',
+  request_conflict: 'This request has already been used. Refresh before trying again.',
+  request_limit: 'Refresh this page before starting another connection operation.',
+  unavailable: 'Connection management is not ready. The gateway may be starting or stopping.',
+};
+const WEBHOOK_TESTS = {
+  delivered: 'Accepted', timeout: 'Timed out', network_error: 'Could not reach the receiver',
+  http_error: 'Receiver refused the test', redirect: 'Receiver redirected the test',
+  tls_error: 'Could not verify the receiver’s secure connection', response_too_large: 'Receiver response exceeded the limit',
+  stopped: 'Test stopped', cancelled: 'Test stopped', abandoned: 'Test interrupted', expired: 'Test expired',
+};
+
+function webhookTestText(test) {
+  const status = Number.isInteger(test?.statusCode) && test.statusCode >= 100 && test.statusCode <= 599
+    ? ` (HTTP ${test.statusCode})` : '';
+  return `${Object.hasOwn(WEBHOOK_TESTS, test?.outcome) ? WEBHOOK_TESTS[test.outcome] : 'Test did not succeed'}${status}`;
+}
 const SVG_NS = 'http://www.w3.org/2000/svg';
 /** Coming back to the tab after this long reloads the snapshot (database reads only; T3 is never contacted). */
 const STALE_MS = 60_000;
@@ -182,6 +210,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     ['hosts', 'Hosts', 'hosts', derived ? derived.hostIssues : 0, 'bad'],
     ['jobs', 'Jobs', 'jobs', derived ? derived.waiting : 0, 'warn'],
     ['checks', 'Checks', 'pulse', derived ? derived.checkFailures : 0, 'bad'],
+    ['webhooks', 'Webhooks', 'link', 0, 'info'],
   ];
   const navLink = ([view, label, iconName, count, tone], cls) => h('a', {
     class: cls, href: `#/${view}`, 'aria-current': route.view === view ? 'page' : null,
@@ -219,16 +248,124 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
   else if (route.view === 'hosts') content = hostsView();
   else if (route.view === 'jobs') content = jobsView();
   else if (route.view === 'checks') content = checksView();
+  else if (route.view === 'webhooks') content = webhooksView();
   else content = overviewView();
 
   const footer = h('footer', { class: 'footer' },
-    h('span', null, 'Read-only operator view · approvals and controls stay in T3'),
-    h('span', null, 'No credentials are shown here or kept in this browser'));
+    h('span', null, 'Private operator dashboard · job controls and approvals stay in T3'),
+    h('span', null, 'Saved credentials are never shown or stored in this browser'));
   const tabbar = h('nav', { class: 'tabbar', 'aria-label': 'Dashboard sections' }, navItems.map((item) => navLink(item, '')));
 
   root.replaceChildren(topbar, h('main', { class: 'main', id: 'main' }, banners, content), footer, tabbar);
   root.setAttribute('aria-busy', snap ? 'false' : 'true');
   return times;
+
+  // -------------------------------------------------------------- webhook connections
+
+  function webhooksView() {
+    const data = model.webhooks;
+    const busy = Boolean(model.webhookBusy || model.webhooksLoading);
+    const form = model.webhookForm;
+    const formTitle = form?.mode === 'replace' ? 'Replace key or webhook URL' : 'Connect Grok Bot';
+    const testSummary = (test) => test
+      ? [webhookTestText(test), ' · ', time(test.at)] : 'No test recorded';
+    const connection = (row) => {
+      const managed = row.source === 'dashboard';
+      const confirming = model.disconnectId === row.id;
+      return h('article', { class: 'panel webhook-connection', 'aria-label': `Connection for ${row.projects.join(', ') || 'all projects'}` },
+        h('div', { class: 'panel__head' }, h('h3', { class: 'panel__title' }, row.projects.join(', ') || 'All projects'),
+          pill(row.enabled === false ? 'unknown' : 'good', row.enabled === false ? 'Disabled' : 'Connected')),
+        h('div', { class: 'panel__body' },
+          kv([
+            ['Host', row.hosts.join(', ') || 'All hosts'],
+            ['Managed by', managed ? 'Dashboard' : 'Configuration file'],
+            ['Last test', testSummary(row.lastTest)],
+          ]),
+          managed ? null : h('p', { class: 'sub webhook-note' }, 'File-managed connection. Change or remove it in the gateway configuration.'),
+          h('div', { class: 'webhook-actions' },
+            button(model.webhookBusy?.id === row.id && model.webhookBusy.action === 'test' ? 'Testing…' : 'Send test',
+              'pulse', () => actions.webhookOperation('test', { id: row.id, revision: row.revision }), { busy }),
+            managed ? button('Replace key', 'key', () => actions.openWebhookForm(row), { busy }) : null,
+            managed ? button('Disconnect', 'x', () => actions.confirmDisconnect(row.id), { busy }) : null),
+          confirming ? h('div', { class: 'webhook-confirm', role: 'group', 'aria-label': 'Confirm disconnect' },
+            h('p', null, 'Disconnect this project? Queued notifications will be cancelled. A request already being sent may still arrive.'),
+            h('div', { class: 'webhook-actions' },
+              button('Yes, disconnect', 'x', () => actions.webhookOperation('disconnect', { id: row.id, revision: row.revision }), { cls: 'btn--danger', busy }),
+              button('Keep connection', 'check', () => actions.confirmDisconnect(null), { busy }))) : null));
+    };
+    return [
+      pageHead('Webhooks', 'Let your bot know when work changes',
+        'Connect a Grok Bot routine to a project. The gateway sends updates so the bot can follow up. Any HTTPS webhook with an authorization header works too.',
+        !form ? button('Connect Grok Bot', 'link', () => actions.openWebhookForm(), { cls: 'btn--accent', busy: busy || !data }) : null),
+      model.webhookError ? h('div', { class: 'callout callout--bad', role: 'alert' }, icon('bad', 'callout__icon'), h('span', null, model.webhookError)) : null,
+      model.webhookNotice ? h('div', { class: 'callout', role: 'status' }, icon('check', 'callout__icon'), h('span', null, model.webhookNotice)) : null,
+      !data ? h('section', { class: 'panel', 'aria-busy': model.webhooksLoading ? 'true' : 'false' },
+        emptyState(model.webhooksLoading ? 'Loading connections…' : 'Connections could not be loaded. Use Refresh to try again.', 'link')) : null,
+      data && form ? h('div', { class: 'webhook-setup' },
+        panel(formTitle, 'Private setup', webhookForm(form, data, busy)),
+        panel('Find the two values in Grok', null, h('div', { class: 'panel__body webhook-help' },
+          h('p', null, 'Ask your bot for private links to the routine’s setup panels. The prompt below asks for links, not the key itself.'),
+          button('Copy setup prompt', 'copy', () => actions.copy(SETUP_PROMPT, 'Setup prompt copied.')),
+          h('ol', null,
+            h('li', null, h('strong', null, 'Webhook URL: '), 'open this panel and copy the address labelled “POST to”.'),
+            h('li', null, h('strong', null, 'Authorization header: '), 'open this panel and copy the value labelled “header”, including its name and colon. There is no separate key field here.'),
+            h('li', null, h('strong', null, 'Choose a project: '), 'only updates from that project and its configured host will be sent.')),
+          h('p', { class: 'sub' }, 'Recreated the routine? Its URL and key may both have changed. Copy both values from the new routine.')))) : null,
+      data ? h('section', { class: 'section', 'aria-labelledby': 'webhook-connections-title' },
+        h('h2', { id: 'webhook-connections-title', class: 'webhook-list-title' }, `Connections (${data.connections.length})`),
+        data.connections.length ? h('div', { class: 'cards' }, data.connections.map(connection))
+          : h('div', { class: 'panel' }, emptyState('No connections yet. Connect and test a routine above to receive project updates.', 'link'))) : null,
+      h('p', { class: 'sub section' }, 'Anyone who can reach this private dashboard can manage webhook destinations. Saved URLs and keys are never shown here.'),
+    ];
+  }
+
+  function webhookForm(form, data, busy) {
+    const replacing = form.mode === 'replace';
+    const url = h('input', {
+      id: 'webhook-url', type: 'url', inputmode: 'url', placeholder: 'https://hooks.example.com/your-routine',
+      autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', maxlength: '4096',
+      required: !replacing, disabled: busy, 'aria-describedby': 'webhook-url-help',
+    });
+    const auth = h('input', {
+      id: 'webhook-auth', type: 'password', placeholder: 'Authorization: Bearer …',
+      autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', maxlength: '8192',
+      required: true, disabled: busy, 'aria-describedby': 'webhook-auth-help',
+    });
+    const project = replacing ? null : h('select', {
+      id: 'webhook-project', required: true, disabled: busy || data.projects.length === 0, 'aria-describedby': 'webhook-project-help',
+    }, data.projects.map((item) => h('option', { value: item.alias }, `${item.alias} · ${item.host}`)));
+    const clear = () => { url.value = ''; auth.value = ''; };
+    return h('form', {
+      class: 'panel__body webhook-form', autocomplete: 'off', 'aria-label': replacing ? 'Replace connection' : 'Connect webhook',
+      on: { submit: (event) => {
+        event.preventDefault();
+        if (busy) return;
+        const fields = replacing ? { id: form.id, revision: form.revision } : { project: project.value };
+        if (url.value.trim() || !replacing) fields.url = url.value.trim();
+        fields.authHeader = auth.value;
+        clear();
+        return actions.webhookOperation(replacing ? 'replace' : 'connect', fields);
+      } },
+    },
+    replacing ? h('p', { class: 'webhook-replace-note' }, 'If you recreated the routine, paste its new URL and full authorization header. Leave the URL blank only if it has not changed. The current connection stays active unless the new test succeeds.') : null,
+    h('div', { class: 'field' }, h('label', { for: 'webhook-url' }, replacing ? 'Webhook URL (if changed)' : 'Webhook URL'), url,
+      h('p', { class: 'field__hint', id: 'webhook-url-help' }, 'Where the gateway sends updates. In Grok, copy the “POST to” address.')),
+    h('div', { class: 'field' }, h('label', { for: 'webhook-auth' }, 'Full authorization header'), auth,
+      h('p', { class: 'field__hint', id: 'webhook-auth-help' }, 'Proves the update came from your gateway. In Grok, copy “header” in full, such as Authorization: Bearer your-key.')),
+    project ? h('div', { class: 'field' }, h('label', { for: 'webhook-project' }, 'Project'), project,
+      h('p', { class: 'field__hint', id: 'webhook-project-help' }, data.projects.length
+        ? 'The host is selected automatically from the project.' : 'Configure a project on the gateway before connecting a webhook.'))
+      : h('p', { class: 'sub' }, `Project: ${form.projects.join(', ')} · Host: ${form.hosts.join(', ')}`),
+    h('div', { class: 'webhook-defaults' },
+      h('p', null, h('strong', null, 'Five updates: '), 'ready for follow-up, needs input, failed, cancelled, and delegated work ended.'),
+      h('p', null, h('strong', null, 'Reply excerpts are off. '), 'Updates identify the job and its state without copying the worker’s reply.')),
+    h('div', { class: 'webhook-actions' },
+      h('button', { type: 'submit', class: 'btn btn--accent', disabled: busy || (!replacing && data.projects.length === 0),
+        'aria-busy': busy ? 'true' : null },
+      icon('link', 'btn__icon'), busy ? 'Sending test…' : replacing ? 'Replace & Test' : 'Connect & Test'),
+      button('Close', 'x', () => { clear(); actions.closeWebhookForm(); })),
+    h('p', { class: 'field__hint' }, 'We send a synthetic test before saving. Both paste fields clear after submission. Then check the bot conversation; an accepted test does not mean the bot has finished.'));
+  }
 
   // -------------------------------------------------------------- overview
 
@@ -251,7 +388,8 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
       lede = 'Every host answered its last check, and no job is waiting on you.';
     }
     return [
-      pageHead('Overview', headline, lede, checksButton()),
+      pageHead('Overview', headline, lede, checksButton(),
+        h('a', { class: 'btn btn--accent', href: '#/webhooks/connect' }, icon('link', 'btn__icon'), 'Connect Grok Bot')),
       vitals(),
       topology(),
       h('div', { class: 'grid-2' },
@@ -608,20 +746,34 @@ async function readError(response) {
   return `The gateway answered HTTP ${response.status}${text ? `: ${text}` : '.'}`;
 }
 
-function boot(win, doc) {
+export function boot(win, doc) {
   const root = doc.getElementById('app');
   const live = doc.createElement('div');
   live.setAttribute('class', 'sr-only');
   live.setAttribute('role', 'status');
   live.setAttribute('aria-live', 'polite');
   doc.body.append(live);
-  const model = { snapshot: null, route: parseRoute(win.location.hash), error: null, notice: null, loading: false, checking: false, fetchedAt: 0, jobFilter: 'attention' };
+  const route = parseRoute(win.location.hash);
+  const model = {
+    snapshot: null, route, error: null, notice: null, loading: false, checking: false, fetchedAt: 0, jobFilter: 'attention',
+    webhooks: null, webhooksLoading: false, webhookBusy: null, webhookError: null, webhookNotice: null,
+    webhookForm: route.view === 'webhooks' ? { mode: 'connect' } : null, disconnectId: null,
+  };
+  let webhookLoadVersion = 0;
   let times = [];
+  const clearWebhookFields = () => {
+    for (const id of ['webhook-url', 'webhook-auth']) {
+      const field = doc.getElementById(id);
+      if (field) field.value = '';
+    }
+  };
   const announce = (text) => {
     live.textContent = '';
     win.setTimeout(() => { live.textContent = text; }, 50);
   };
   const draw = (focus = false) => {
+    // Clear detached inputs too: navigating, refreshing or closing must leave no secret in the old form.
+    clearWebhookFields();
     times = render(doc, root, model, actions);
     if (focus) {
       const target = model.route.id ? doc.getElementById(`${model.route.view === 'clients' ? 'client' : 'host'}-${model.route.id}`) : null;
@@ -655,6 +807,7 @@ function boot(win, doc) {
         model.loading = false;
         draw();
       }
+      if (model.route.view === 'webhooks') await actions.loadWebhooks(true);
     },
     async runChecks() {
       if (model.checking) return;
@@ -683,10 +836,91 @@ function boot(win, doc) {
       model.jobFilter = filter;
       draw();
     },
-    async copy(text) {
+    async loadWebhooks(clearError = false) {
+      const version = ++webhookLoadVersion;
+      model.webhooksLoading = true;
+      draw();
+      try {
+        const response = await request('api/webhooks');
+        if (!response.ok) throw new Error();
+        const data = await response.json();
+        if (version !== webhookLoadVersion) return;
+        model.webhooks = data;
+        if (clearError) model.webhookError = null;
+        if (model.webhookForm?.mode === 'replace' && !data.connections.some((row) =>
+          row.id === model.webhookForm.id && row.revision === model.webhookForm.revision && row.source === 'dashboard')) {
+          model.webhookForm = null;
+        }
+        if (model.disconnectId && !data.connections.some((row) => row.id === model.disconnectId)) model.disconnectId = null;
+      } catch {
+        if (version === webhookLoadVersion) model.webhookError = 'Connections could not be refreshed. Use Refresh before trying another action.';
+      } finally {
+        if (version === webhookLoadVersion) {
+          model.webhooksLoading = false;
+          draw();
+        }
+      }
+    },
+    openWebhookForm(row) {
+      if (model.webhookBusy) return;
+      model.webhookForm = row ? { mode: 'replace', id: row.id, revision: row.revision, projects: row.projects, hosts: row.hosts }
+        : { mode: 'connect' };
+      model.disconnectId = null;
+      model.webhookError = null;
+      model.webhookNotice = null;
+      draw();
+      doc.getElementById('webhook-url')?.focus();
+    },
+    closeWebhookForm() {
+      model.webhookForm = null;
+      draw();
+    },
+    confirmDisconnect(id) {
+      model.disconnectId = id;
+      draw();
+    },
+    async webhookOperation(action, fields) {
+      if (model.webhookBusy || !model.webhooks) return;
+      model.webhookBusy = { action, id: fields.id ?? null };
+      model.webhookError = null;
+      model.webhookNotice = null;
+      draw();
+      try {
+        const response = await request(`api/webhooks/${action}`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ...fields, session: model.webhooks.session, requestId: win.crypto.randomUUID() }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok || body.ok !== true) {
+          const failure = body.error === 'ping_failed' ? `${webhookTestText(body.test)}. ${action === 'replace'
+            ? 'The current connection was kept. Paste the corrected values to try again.'
+            : action === 'connect' ? 'No connection was saved. Paste the corrected values to try again.' : 'The connection was kept.'}`
+            : Object.hasOwn(WEBHOOK_ERRORS, body.error) ? WEBHOOK_ERRORS[body.error]
+              : 'The connection action failed. Refresh the list before trying again.';
+          model.webhookError = failure;
+          announce(failure);
+        } else {
+          model.webhookNotice = action === 'disconnect'
+            ? 'Disconnected. Queued notifications were cancelled. A request already being sent may still arrive.'
+            : `${action === 'connect' ? 'Connected. ' : action === 'replace' ? 'Connection updated. ' : ''}Test accepted. Check the bot conversation; the bot may still be working.`;
+          if (action === 'connect' || action === 'replace') model.webhookForm = null;
+          model.disconnectId = null;
+          announce(model.webhookNotice);
+        }
+      } catch {
+        model.webhookError = 'The gateway did not confirm the result. Refresh the connections before trying again; the action may have completed.';
+        announce(model.webhookError);
+      } finally {
+        // The list is safe to reload even after a lost response; never automatically replay a secret-bearing POST.
+        await actions.loadWebhooks();
+        model.webhookBusy = null;
+        draw();
+      }
+    },
+    async copy(text, message = 'Command copied.') {
       try {
         await win.navigator.clipboard.writeText(text);
-        announce('Command copied.');
+        announce(message);
       } catch {
         announce('Copy is not available here; select the command instead.');
       }
@@ -695,11 +929,18 @@ function boot(win, doc) {
   win.addEventListener('hashchange', () => {
     model.route = parseRoute(win.location.hash);
     model.notice = null;
+    model.webhookForm = model.route.view === 'webhooks' ? { mode: 'connect' } : null;
+    model.disconnectId = null;
+    model.webhookError = null;
+    model.webhookNotice = null;
     draw(true);
+    if (model.route.view === 'webhooks') return actions.loadWebhooks();
   });
   doc.addEventListener('visibilitychange', () => {
-    if (doc.visibilityState === 'visible' && Date.now() - model.fetchedAt > STALE_MS) void actions.refresh();
+    // Operators switch to the bot's panels while pasting. Do not erase a partly filled form when they return.
+    if (doc.visibilityState === 'visible' && !model.webhookForm && Date.now() - model.fetchedAt > STALE_MS) return actions.refresh();
   });
+  win.addEventListener('pagehide', clearWebhookFields);
   // Keep relative times current without asking the server.
   win.setInterval(() => {
     if (!model.snapshot) return;
@@ -707,7 +948,7 @@ function boot(win, doc) {
     for (const { el, iso } of times) el.textContent = relative(iso, now);
   }, 20_000);
   draw();
-  void actions.refresh();
+  return { ready: actions.refresh() };
 }
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined' && document.getElementById('app')) boot(window, document);

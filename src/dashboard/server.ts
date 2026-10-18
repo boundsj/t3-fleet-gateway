@@ -2,16 +2,17 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DashboardConfig } from '../config.ts';
-import { readBody, sendJson } from '../http/io.ts';
+import { readBody, readJson, sendJson } from '../http/io.ts';
 import { createRouter, listen, type Route, type RunningServer } from '../http/server.ts';
 import type { Logger } from '../log.ts';
+import type { WebhookManagement } from '../webhooks/management.ts';
 import type { DashboardChecks } from './checks.ts';
 import { buildSnapshot, type DashboardSources } from './snapshot.ts';
 
 /**
  * The operator dashboard's own HTTP listener (docs/design.md, "Operator dashboard"). It is never the MCP listener and
- * serves nothing of the MCP or OAuth surface; the MCP listener serves nothing of this. Read-only: GET serves the page,
- * its assets and a snapshot built from the database; the one POST runs the manual checks, which only read.
+ * serves nothing of the MCP or OAuth surface; the MCP listener serves nothing of this. Monitoring reads the database;
+ * only private webhook management can mutate state. Manual checks remain read-only.
  *
  * The trust boundary is the network: loopback, published by a tailnet-only proxy. The dashboard holds no session and
  * puts no secret in the browser. It refuses Host headers it was not configured for (DNS rebinding), requests that
@@ -83,6 +84,7 @@ export interface DashboardOptions {
   sources: DashboardSources;
   checks: DashboardChecks;
   logger: Logger;
+  management?: WebhookManagement;
   /** Listen on this port instead of `dashboard.listen.port`; 0 lets the OS pick one (tests and the demo). */
   port?: number;
 }
@@ -165,6 +167,34 @@ export function dashboardHandler(options: DashboardOptions, port: () => number):
       },
     },
   ];
+  if (options.management) {
+    const management = options.management;
+    routes.push({ path: `${base}/api/webhooks`, methods: { GET: (req, res) => {
+      if (!apiRequest(req, res)) return;
+      sendJson(res, 200, management.list(), { 'cache-control': 'no-store' });
+    } } });
+    for (const action of ['connect', 'replace', 'test', 'disconnect'] as const) {
+      routes.push({ path: `${base}/api/webhooks/${action}`, methods: { POST: async (req, res) => {
+        res.setHeader('cache-control', 'no-store');
+        if (!apiRequest(req, res)) return;
+        // Mutations require the exact request authority, not any other host on the allowlist.
+        // Only literal loopback may use cleartext HTTP. A reverse proxy must present HTTPS Origin.
+        let originMatches = false;
+        try {
+          const origin = new URL(req.headers.origin ?? '');
+          originMatches = origin.origin === req.headers.origin && origin.host.toLowerCase() === req.headers.host?.toLowerCase() &&
+            (origin.protocol === 'https:' || (origin.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(origin.hostname)));
+        } catch { /* Missing, null and malformed Origins are refused without echoing their values. */ }
+        if (!originMatches) {
+          refuse(res, 403, 'origin_mismatch', 'A matching Origin is required.');
+          return;
+        }
+        if (!management.available) { sendJson(res, 503, { error: 'unavailable' }); return; }
+        const result = await management.execute(action, await readJson(req, 16 * 1024));
+        sendJson(res, result.status, result.body, { 'cache-control': 'no-store' });
+      } } });
+    }
+  }
   if (base !== '') {
     routes.push({ path: base, methods: { GET: (_req, res) => { res.writeHead(308, { location: `${base}/`, 'content-length': 0 }); res.end(); } } });
   }

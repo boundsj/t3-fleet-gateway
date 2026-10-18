@@ -197,6 +197,32 @@ code, .mono { font-family: var(--mono); font-size: .86em; }
 .callout--warn .callout__icon { color: var(--warn); }
 .callout--bad .callout__icon { color: var(--bad); }
 
+/* Private webhook setup: native labelled fields, with paste values confined to the form. */
+.webhook-setup { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+.webhook-form { display: grid; gap: 18px; }
+.field { display: grid; gap: 7px; min-width: 0; }
+.field label { color: var(--ink); font-size: 14px; font-weight: 650; }
+.field input, .field select {
+  width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm); background: var(--surface); color: var(--ink); font: inherit; font-size: 16px;
+}
+.field input::placeholder { color: var(--sub); }
+.field input:disabled, .field select:disabled { opacity: .6; }
+.field__hint { color: var(--sub); font-size: 12.5px; line-height: 1.55; }
+.webhook-help { display: grid; gap: 16px; color: var(--ink-2); font-size: 14px; }
+.webhook-help .btn { justify-self: start; }
+.webhook-help ol { padding-left: 22px; display: grid; gap: 14px; }
+.webhook-defaults { padding: 13px 15px; border-radius: var(--radius-sm); background: var(--surface-2); font-size: 13px; color: var(--ink-2); }
+.webhook-defaults p + p { margin-top: 8px; }
+.webhook-replace-note { color: var(--ink-2); font-size: 14px; }
+.webhook-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.webhook-connection .webhook-actions, .webhook-note { margin-top: 16px; }
+.webhook-connection .panel__head { flex-wrap: wrap; }
+.webhook-connection .panel__title { overflow-wrap: anywhere; }
+.webhook-list-title { margin-bottom: 12px; font-size: 18px; }
+.webhook-confirm { margin-top: 16px; padding: 14px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); font-size: 14px; }
+.btn--danger { color: var(--bad); border-color: var(--bad); }
+
 .empty { padding: 22px 18px; text-align: center; color: var(--sub); font-size: 14px; }
 .empty__icon { width: 26px; height: 26px; color: var(--good); margin: 0 auto 8px; display: block; }
 
@@ -423,6 +449,8 @@ details.disclosure > summary .sub { font-weight: 400; margin-left: auto; }
   .page-head { margin-bottom: 18px; }
   .page-actions { width: 100%; }
   .page-actions .btn { flex: 1; }
+  .webhook-setup { grid-template-columns: minmax(0, 1fr); }
+  .webhook-actions .btn { flex: 1 1 auto; }
   .vitals { gap: 10px; }
   .vital { padding: 12px 13px 13px; }
   .vital__value { font-size: 19px; }
@@ -447,11 +475,11 @@ details.disclosure > summary .sub { font-weight: 400; margin-left: auto; }
   .check { grid-template-columns: 26px minmax(0, 1fr); padding: 12px 15px; }
   .check__code { grid-column: 2; grid-row: auto; justify-self: start; }
   .tabbar {
-    display: grid; grid-template-columns: repeat(5, 1fr); position: fixed; inset: auto 0 0 0; z-index: 30;
+    display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); position: fixed; inset: auto 0 0 0; z-index: 30;
     padding: 6px 4px calc(6px + env(safe-area-inset-bottom)); background: color-mix(in srgb, var(--surface) 90%, transparent);
     backdrop-filter: saturate(1.4) blur(16px); -webkit-backdrop-filter: saturate(1.4) blur(16px); border-top: 1px solid var(--line);
   }
-  .tabbar a { position: relative; display: grid; justify-items: center; gap: 2px; padding: 6px 2px; min-height: 48px; text-decoration: none; color: var(--sub); font-size: 11px; font-weight: 600; border-radius: 10px; }
+  .tabbar a { position: relative; display: grid; justify-items: center; gap: 2px; padding: 6px 1px; min-height: 48px; text-decoration: none; color: var(--sub); font-size: 10px; font-weight: 600; border-radius: 10px; }
   .tabbar a svg { width: 22px; height: 22px; }
   .tabbar a[aria-current="page"] { color: var(--accent); }
   .tabbar .nav__count { position: absolute; top: 2px; left: calc(50% + 6px); min-width: 17px; height: 17px; font-size: 10.5px; padding: 0 4px; }

@@ -4,12 +4,13 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, test, type TestContext } from 'node:test';
 import { openDataDir } from '../src/dataDir.ts';
-import { migrate, openDatabase, schemaVersion } from '../src/db/database.ts';
+import { migrate, openDatabase, SCHEMA_VERSION, schemaVersion } from '../src/db/database.ts';
 import { MIGRATIONS } from '../src/db/migrations.ts';
 import { JobStore } from '../src/jobs/store.ts';
 import { silentLogger } from '../src/log.ts';
 import { webhooksSchema } from '../src/webhooks/config.ts';
-import { MAX_ATTEMPTS_PER_SUBSCRIPTION, MAX_PAYLOAD_BYTES, MAX_PENDING_PER_SUBSCRIPTION, WebhookStore } from '../src/webhooks/store.ts';
+import { MAX_ATTEMPTS_PER_SUBSCRIPTION, MAX_PAYLOAD_BYTES, MAX_PENDING_PER_SUBSCRIPTION, MAX_SUBSCRIPTIONS,
+  WebhookStore, type DashboardTest } from '../src/webhooks/store.ts';
 import { testClock } from './helpers/clock.ts';
 import { tempDir } from './helpers/tmp.ts';
 
@@ -31,6 +32,12 @@ function fixture(t: TestContext) {
 function createJob(jobs: JobStore, id = 'synthetic01') {
   return jobs.create({ id, clientId: 'synthetic-client', requestId: id, inputHash: id,
     projectAlias: 'pilot', hostId: 'main', task: 'Synthetic private task', title: 'Synthetic safe title', branch: `fleet/${id}`, runtimeMode: 'auto' }).job;
+}
+
+const dashboardRoute = { url: 'https://receiver.example.com/synthetic-private-route?key=synthetic-path-secret',
+  header: 'authorization', value: 'Bearer synthetic-dashboard-key' };
+function successfulTest(at: number, eventId = 'synthetic-test'): DashboardTest {
+  return { eventId, at, result: { outcome: 'delivered', statusCode: 204 } };
 }
 
 describe('webhook migration and durable store boundaries', () => {
@@ -71,7 +78,7 @@ describe('webhook migration and durable store boundaries', () => {
     old.close();
     const db = openDatabase(path);
     t.after(() => db.close());
-    assert.equal(schemaVersion(db), 9);
+    assert.equal(schemaVersion(db), SCHEMA_VERSION);
     assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
     for (const table of ['job_turns', 'webhook_subscriptions', 'webhook_deliveries', 'webhook_attempts']) {
       assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), [], `${table} begins empty`);
@@ -150,6 +157,181 @@ describe('webhook migration and durable store boundaries', () => {
     assert.notEqual(f.db.prepare('SELECT revision FROM webhook_subscriptions').get()!.revision, revision);
     assert.deepEqual(f.webhooks.claim(1, 1000), []);
     assert.deepEqual({ ...f.db.prepare('SELECT state, payload FROM webhook_deliveries').get() }, { state: 'cancelled', payload: null });
+  });
+
+  test('dashboard connections keep fixed event defaults, project and host filters, no excerpts and safe metadata only', (t) => {
+    const f = fixture(t);
+    const prior = createJob(f.jobs, 'priorjob01');
+    f.jobs.transition(prior.id, { from: ['queued'], to: 'cancelled' });
+    const connection = f.webhooks.connectDashboard('dashboard-one', 'pilot', 'main', dashboardRoute, successfulTest(f.clock()));
+    assert.deepEqual(connection, {
+      id: 'dashboard-one', revision: connection.revision, source: 'dashboard', projects: ['pilot'], hosts: ['main'],
+      lastTest: { at: new Date(f.clock()).toISOString(), outcome: 'delivered', statusCode: 204 },
+    });
+    const settings = JSON.parse(f.db.prepare("SELECT settings FROM webhook_subscriptions WHERE id = 'dashboard-one'").get()!.settings as string);
+    assert.deepEqual(settings, { projects: ['pilot'], hosts: ['main'],
+      events: ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended'], excerptChars: 0 });
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE subscription_id = 'dashboard-one'").get()!.n, 0,
+      'connecting does not replay history');
+    for (const [id, projectAlias, hostId] of [['matchjob01', 'pilot', 'main'], ['otherjob01', 'other', 'main'], ['otherjob02', 'pilot', 'other']]) {
+      const job = f.jobs.create({ id: id!, clientId: 'synthetic-client', requestId: id!, inputHash: id!, projectAlias: projectAlias!, hostId: hostId!,
+        task: 'Synthetic private task', title: 'Synthetic safe title', branch: `fleet/${id}`, runtimeMode: 'auto' }).job;
+      f.jobs.update(job.id, { latestMessageExcerpt: 'Synthetic worker secret' });
+      f.jobs.transition(job.id, { from: ['queued'], to: 'running' });
+      f.jobs.transition(job.id, { from: ['running'], to: 'idle' });
+    }
+    const rows = f.db.prepare("SELECT payload FROM webhook_deliveries WHERE subscription_id = 'dashboard-one'").all();
+    assert.equal(rows.length, 1, 'both project and host must match, and running is excluded');
+    assert.equal(JSON.parse(rows[0]!.payload as string).jobId, 'matchjob01');
+    assert.equal('excerpt' in JSON.parse(rows[0]!.payload as string), false);
+    assert.equal(f.webhooks.listConnections().find((row) => row.id === 'synthetic')!.source, 'config');
+    const safe = JSON.stringify([f.webhooks.listConnections(), f.webhooks.diagnostics()]);
+    for (const secret of [dashboardRoute.url, dashboardRoute.header, dashboardRoute.value, 'Synthetic private task', 'Synthetic worker secret']) {
+      assert.equal(safe.includes(secret), false, `safe metadata excludes ${secret}`);
+    }
+    const file = f.webhooks.listConnections().find((row) => row.id === 'synthetic')!;
+    assert.throws(() => f.webhooks.dashboardRoute(file.id, file.revision), { code: 'file_managed' });
+    assert.throws(() => f.webhooks.replaceDashboard(file.id, file.revision, dashboardRoute, successfulTest(f.clock())), { code: 'file_managed' });
+    assert.throws(() => f.webhooks.disconnectDashboard(file.id, file.revision), { code: 'file_managed' });
+    assert.throws(() => f.webhooks.connectDashboard(file.id, 'pilot', 'main', dashboardRoute, successfulTest(f.clock())), { code: 'file_managed' });
+  });
+
+  test('reopening preserves dashboard routes and queues while config removal, disable and re-enable act independently', (t) => {
+    const f = fixture(t);
+    const connection = f.webhooks.connectDashboard('dashboard-one', 'pilot', 'main', dashboardRoute, successfulTest(f.clock()));
+    const job = createJob(f.jobs);
+    f.jobs.transition(job.id, { from: ['queued'], to: 'cancelled' });
+    const before = f.db.prepare("SELECT * FROM webhook_subscriptions WHERE id = 'dashboard-one'").get();
+    const queued = f.db.prepare("SELECT * FROM webhook_deliveries WHERE subscription_id = 'dashboard-one'").all();
+    const restartedDb = openDatabase(join(f.dir, 'gateway.db'));
+    t.after(() => restartedDb.close());
+    const restarted = new WebhookStore(restartedDb, f.clock);
+    const disabled = { subscriptions: [{ ...f.config.subscriptions[0]!, enabled: false }] };
+    restarted.reconcile(disabled, f.dir);
+    assert.deepEqual(restarted.listConnections(), [connection]);
+    assert.deepEqual(restartedDb.prepare("SELECT * FROM webhook_subscriptions WHERE id = 'dashboard-one'").get(), before);
+    assert.deepEqual(restartedDb.prepare("SELECT * FROM webhook_deliveries WHERE subscription_id = 'dashboard-one'").all(), queued);
+    assert.equal(restartedDb.prepare("SELECT state FROM webhook_deliveries WHERE subscription_id = 'synthetic'").get()!.state, 'cancelled');
+    restarted.reconcile({ subscriptions: [] }, f.dir);
+    assert.deepEqual(restarted.listConnections(), [connection]);
+    restarted.reconcile(disabled, f.dir);
+    assert.deepEqual(restarted.listConnections(), [connection], 'disabled config must never auto-enable on restart');
+    restarted.reconcile(f.config, f.dir);
+    assert.equal(restarted.listConnections().length, 2);
+    assert.deepEqual(restarted.listConnections()[0], connection);
+    const claim = restarted.claim(4, 1000);
+    assert.equal(claim.length, 1);
+    assert.equal(claim[0]!.subscriptionId, connection.id);
+    assert.deepEqual(claim[0]!.route, dashboardRoute);
+    assert.equal(claim[0]!.payload, queued[0]!.payload, 'the original immutable payload survives restart');
+  });
+
+  test('config ownership collisions, including disabled entries, fail atomically without changing either owner', (t) => {
+    const f = fixture(t);
+    f.webhooks.connectDashboard('dashboard-one', 'pilot', 'main', dashboardRoute, successfulTest(f.clock()));
+    const job = createJob(f.jobs);
+    f.jobs.transition(job.id, { from: ['queued'], to: 'cancelled' });
+    const snapshot = () => ['webhook_subscriptions', 'webhook_deliveries', 'webhook_attempts']
+      .map((table) => f.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const before = snapshot();
+    for (const enabled of [true, false]) {
+      const config = { subscriptions: [{ ...f.config.subscriptions[0]!, id: 'dashboard-one', enabled }] };
+      assert.throws(() => f.webhooks.reconcile(config, f.dir), { code: 'config_invalid' });
+      assert.deepEqual(snapshot(), before);
+    }
+  });
+
+  test('the shared 32-subscription limit covers both owners and failed reconciliation preserves all rows', (t) => {
+    const f = fixture(t);
+    for (let index = 0; index < MAX_SUBSCRIPTIONS - 1; index++) {
+      f.webhooks.connectDashboard(`dashboard-${index}`, 'pilot', 'main', dashboardRoute, successfulTest(f.clock(), `ping-${index}`));
+    }
+    assert.equal(f.webhooks.listConnections().length, MAX_SUBSCRIPTIONS);
+    assert.throws(() => f.webhooks.connectDashboard('one-too-many', 'pilot', 'main', dashboardRoute, successfulTest(f.clock())),
+      { code: 'connection_limit' });
+    const before = f.webhooks.listConnections();
+    const config = { subscriptions: [...f.config.subscriptions, { ...f.config.subscriptions[0]!, id: 'new-file-route' }] };
+    assert.throws(() => f.webhooks.reconcile(config, f.dir), { code: 'config_invalid' });
+    assert.deepEqual(f.webhooks.listConnections(), before);
+    f.webhooks.reconcile({ subscriptions: [] }, f.dir);
+    f.webhooks.connectDashboard('last-dashboard', 'pilot', 'main', dashboardRoute, successfulTest(f.clock()));
+    assert.equal(f.webhooks.listConnections().length, MAX_SUBSCRIPTIONS);
+    assert.throws(() => f.webhooks.reconcile(f.config, f.dir), { code: 'config_invalid' });
+    assert.equal(f.webhooks.listConnections().length, MAX_SUBSCRIPTIONS);
+  });
+
+  test('failed setup and replacement leave the working route and leases untouched; successful replacement cancels its old queue only', (t) => {
+    const f = fixture(t);
+    const failed: DashboardTest = { eventId: 'failed-test', at: f.clock(), result: { outcome: 'http_error', statusCode: 401 } };
+    assert.throws(() => f.webhooks.connectDashboard('failed-connect', 'pilot', 'main', dashboardRoute, failed), { code: 'test_failed' });
+    assert.equal(f.webhooks.listConnections().length, 1);
+    const connection = f.webhooks.connectDashboard('dashboard-one', 'pilot', 'main', dashboardRoute, successfulTest(f.clock()));
+    for (const id of ['synthetic01', 'synthetic02']) f.jobs.transition(createJob(f.jobs, id).id, { from: ['queued'], to: 'cancelled' });
+    const claims = f.webhooks.claim(4, 1000);
+    const oldClaim = claims.find((claim) => claim.subscriptionId === connection.id)!;
+    const configClaim = claims.find((claim) => claim.subscriptionId === 'synthetic')!;
+    const oldQueue = f.db.prepare('SELECT * FROM webhook_deliveries WHERE subscription_id = ?').all(connection.id);
+    const replacement = { ...dashboardRoute, url: 'https://replacement.example.com/new-synthetic-private-path', value: 'Bearer new-synthetic-key' };
+    assert.throws(() => f.webhooks.replaceDashboard(connection.id, connection.revision, replacement, failed), { code: 'test_failed' });
+    assert.deepEqual(f.webhooks.dashboardRoute(connection.id, connection.revision), dashboardRoute);
+    assert.deepEqual(f.db.prepare('SELECT * FROM webhook_deliveries WHERE subscription_id = ?').all(connection.id), oldQueue);
+    assert.equal(f.webhooks.active(oldClaim), true);
+    const next = f.webhooks.replaceDashboard(connection.id, connection.revision, replacement, successfulTest(f.clock()));
+    assert.notEqual(next.revision, connection.revision);
+    assert.deepEqual(f.webhooks.dashboardRoute(next.id, next.revision), replacement);
+    assert.equal(f.webhooks.active(oldClaim), false);
+    assert.equal(f.webhooks.active(configClaim), true, 'a different subscription is unaffected');
+    const cancelled = f.db.prepare('SELECT state, payload, lease, lease_until FROM webhook_deliveries WHERE subscription_id = ?').all(connection.id);
+    assert.deepEqual(cancelled.map((row) => ({ ...row })), Array.from({ length: 2 }, () =>
+      ({ state: 'cancelled', payload: null, lease: null, lease_until: null })));
+    assert.equal(f.db.prepare('SELECT outcome FROM webhook_attempts WHERE delivery_id = ?').get(oldClaim.id)!.outcome, 'cancelled');
+    f.webhooks.finish(oldClaim, { outcome: 'delivered', statusCode: 204 });
+    assert.equal(f.db.prepare('SELECT state FROM webhook_deliveries WHERE id = ?').get(oldClaim.id)!.state, 'cancelled');
+  });
+
+  test('stale completions from another store cannot overwrite a newer replacement or resurrect a disconnect', (t) => {
+    const f = fixture(t);
+    const original = f.webhooks.connectDashboard('dashboard-one', 'pilot', 'main', dashboardRoute, successfulTest(f.clock()));
+    assert.throws(() => f.webhooks.connectDashboard(original.id, 'pilot', 'main', dashboardRoute, successfulTest(f.clock())),
+      { code: 'connection_conflict' }, 'repeated create cannot reset an existing connection');
+    const otherDb = openDatabase(join(f.dir, 'gateway.db'));
+    t.after(() => otherDb.close());
+    const other = new WebhookStore(otherDb, f.clock);
+    other.dashboardRoute(original.id, original.revision); // The management caller captures this revision before its awaited ping.
+    const newer = f.webhooks.replaceDashboard(original.id, original.revision, { ...dashboardRoute, value: 'Bearer newer-synthetic-key' },
+      successfulTest(f.clock(), 'newer-ping'));
+    assert.throws(() => other.replaceDashboard(original.id, original.revision, dashboardRoute, successfulTest(f.clock(), 'slow-ping')),
+      { code: 'connection_conflict' });
+    assert.throws(() => other.testConnection(original.id, original.revision, successfulTest(f.clock())), { code: 'connection_conflict' });
+    assert.throws(() => other.disconnectDashboard(original.id, original.revision), { code: 'connection_conflict' });
+    assert.equal(f.webhooks.dashboardRoute(newer.id, newer.revision).value, 'Bearer newer-synthetic-key');
+    for (const id of ['synthetic01', 'synthetic02']) f.jobs.transition(createJob(f.jobs, id).id, { from: ['queued'], to: 'cancelled' });
+    const oldClaim = f.webhooks.claim(4, 1000).find((claim) => claim.subscriptionId === newer.id)!;
+    other.dashboardRoute(newer.id, newer.revision);
+    f.webhooks.disconnectDashboard(newer.id, newer.revision);
+    assert.throws(() => other.replaceDashboard(newer.id, newer.revision, dashboardRoute, successfulTest(f.clock())), { code: 'not_found' });
+    assert.throws(() => other.testConnection(newer.id, newer.revision, successfulTest(f.clock())), { code: 'not_found' });
+    assert.throws(() => other.disconnectDashboard(newer.id, newer.revision), { code: 'not_found' });
+    f.webhooks.finish(oldClaim, { outcome: 'delivered', statusCode: 204 });
+    assert.equal(f.webhooks.active(oldClaim), false);
+    assert.equal(other.listConnections().some((row) => row.id === newer.id), false);
+    assert.deepEqual(f.db.prepare('SELECT state, payload FROM webhook_deliveries WHERE subscription_id = ?').all(newer.id).map((row) => ({ ...row })),
+      [{ state: 'cancelled', payload: null }, { state: 'cancelled', payload: null }]);
+  });
+
+  test('saved-route tests work for either source and older completions cannot replace newer safe test diagnostics', (t) => {
+    const f = fixture(t);
+    f.webhooks.connectDashboard('dashboard-one', 'pilot', 'main', dashboardRoute, successfulTest(f.clock()));
+    for (const connection of f.webhooks.listConnections()) {
+      assert.equal(typeof f.webhooks.route(connection.id, connection.revision).value, 'string');
+      const newer = { eventId: `new-${connection.id}`, at: f.clock() + 10, result: { outcome: 'http_error' as const, statusCode: 401 } };
+      const result = f.webhooks.testConnection(connection.id, connection.revision, newer);
+      assert.equal(result.revision, connection.revision, 'testing does not replace the route');
+      assert.deepEqual(result.lastTest, { at: new Date(newer.at).toISOString(), outcome: 'http_error', statusCode: 401 });
+      const older = f.webhooks.testConnection(connection.id, connection.revision, successfulTest(f.clock(), `old-${connection.id}`));
+      assert.deepEqual(older.lastTest, result.lastTest);
+      assert.equal(f.webhooks.diagnostics(connection.id).attempts[0]!.outcome, 'delivered', 'both attempts remain in bounded history');
+    }
   });
 
   test('queued and steered sends never establish a run initiator or replace its existing caller', (t) => {

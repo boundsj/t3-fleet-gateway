@@ -7,6 +7,7 @@
  * Used by scripts/dashboard-demo.ts (screenshots, browser checks) and test/dashboard-demo.test.ts.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
 import { connect as tcpConnect, createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -35,6 +36,7 @@ export interface DemoFleet {
   dashboardUrl: string;
   mcpUrl: string;
   fakes: Record<string, FakeT3>;
+  webhookReceiver: DemoWebhookReceiver | null;
   close(): Promise<void>;
 }
 
@@ -47,6 +49,48 @@ export interface DemoOptions {
   logger?: Logger;
   /** Leave the job engine on its timer afterwards (the interactive demo); tests drive it by hand. */
   runEngine?: boolean;
+  /** A local synthetic receiver, for exercising the setup form without a real bot or key. */
+  webhookReceiver?: boolean;
+}
+
+export interface DemoWebhookReceiver {
+  acceptUrl: string;
+  rejectUrl: string;
+  timeoutUrl: string;
+  authHeader: string;
+  /** Counts only; never retains request headers or payloads. */
+  counts: { accepted: number; rejected: number; stalled: number };
+  close(): Promise<void>;
+}
+
+async function startDemoWebhookReceiver(): Promise<DemoWebhookReceiver> {
+  const counts = { accepted: 0, rejected: 0, stalled: 0 };
+  const server = createHttpServer((request, response) => {
+    request.resume();
+    if (request.method !== 'POST') { response.writeHead(405).end(); return; }
+    if (request.headers.authorization !== 'Bearer demo-only-key' || request.url === '/reject') {
+      counts.rejected += 1;
+      response.writeHead(401).end();
+      return;
+    }
+    if (request.url === '/timeout') { counts.stalled += 1; return; }
+    if (request.url !== '/accept') { response.writeHead(404).end(); return; }
+    counts.accepted += 1;
+    response.writeHead(202).end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => { server.removeListener('error', reject); resolve(); });
+  });
+  const baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  return {
+    acceptUrl: `${baseUrl}/accept`, rejectUrl: `${baseUrl}/reject`, timeoutUrl: `${baseUrl}/timeout`,
+    authHeader: 'Authorization: Bearer demo-only-key', counts,
+    close: () => new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections();
+    }),
+  };
 }
 
 const CALLBACKS = {
@@ -184,13 +228,16 @@ export async function startDemoFleet(options: DemoOptions): Promise<DemoFleet> {
   const gateway = await startGateway({
     config, dataDir, logger, clock, dashboardDemoLabel: options.badge === undefined ? 'Synthetic demo' : options.badge ?? undefined,
     port: 0, dashboardPort: options.dashboardPort ?? 0, jobEngine: { autoStart: false },
+    webhookManagement: { loopbackOnly: true, ...(options.webhookReceiver ? { allowLoopbackHttp: true, attemptTimeoutMs: 1000 } : {}) },
   });
   door.forwardTo(gateway.port);
   const { services, engine } = gateway;
   const agents: Agent[] = [];
+  let webhookReceiver: DemoWebhookReceiver | null = null;
   const close = async () => {
     for (const agent of agents) await agent.close().catch(() => {});
     await gateway.close();
+    await webhookReceiver?.close();
     await door.close();
     for (const fake of Object.values(fakes)) await fake.close();
     rmSync(dataDir, { recursive: true, force: true });
@@ -328,12 +375,13 @@ export async function startDemoFleet(options: DemoOptions): Promise<DemoFleet> {
     offset = 0;
     if (scenario !== 'empty') await gateway.dashboard!.checks.run();
     if (options.runEngine) engine.start();
+    if (options.webhookReceiver) webhookReceiver = await startDemoWebhookReceiver();
   } catch (error) {
     await close();
     throw error;
   }
   const dashboard = gateway.dashboard!;
-  return { gateway, fakes, mcpUrl, dashboardUrl: `http://127.0.0.1:${dashboard.port}${dashboard.path}`, close };
+  return { gateway, fakes, mcpUrl, dashboardUrl: `http://127.0.0.1:${dashboard.port}${dashboard.path}`, webhookReceiver, close };
 }
 
 export function demoLogger(): Logger {

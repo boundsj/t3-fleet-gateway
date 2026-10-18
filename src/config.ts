@@ -118,7 +118,7 @@ const LOOPBACK_LISTEN_HOSTS = ['127.0.0.1', '::1', 'localhost'];
 const HOST_HEADER_PATTERN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*|\[[0-9a-f:.]+\])(?::\d{1,5})?$/;
 
 /**
- * The read-only operator dashboard (docs/design.md, "Operator dashboard"). Off by default. It has a listener of its own,
+ * The private operator dashboard (docs/design.md, "Operator dashboard"). Off by default. It has a listener of its own,
  * never the MCP listener, so the tunnel that carries /mcp to agents never carries the dashboard.
  */
 const dashboardSchema = z.strictObject({

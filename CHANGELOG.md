@@ -1,9 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.1.9 (2026-10-17)
 
+### Added
+
+- **Connect Grok Bot** in the private dashboard: paste a webhook URL and its full authentication header, choose a configured project, and select **Connect & Test**. Generic HTTPS receivers work too. A successful test means the receiver accepted the request; check the bot conversation to confirm its response. Connections send `idle`, `needs_input`, `failed`, `cancelled` and `delegated_work_ended`, with worker excerpts off.
+- A **Webhooks** view lists project, host, management source and safe last-test information. Dashboard connections support **Send test**, **Replace key** (including a replacement URL), and confirmed **Disconnect**, without editing files or restarting. Saved destinations and authentication values are never returned to the browser.
+- Migration 10 adds explicit config/dashboard ownership and safe last-test metadata. Existing subscriptions remain config-owned. Dashboard connections and their queues survive restarts independently of config reconciliation; the CLI can list attempts and ping either source.
+- `dashboard:demo -- --webhook-receiver` provides a local synthetic receiver for accepted, rejected and timed-out setup tests. Demo management refuses destinations outside literal loopback.
 - Opt-in outbound job webhooks with private per-subscription auth headers, project/host/event filters, metadata-only default payloads, bounded optional excerpts, durable atomic snapshots and deliveries, stable event IDs, restart recovery, bounded HTTPS attempts and retries, and safe CLI diagnostics/test ping. Existing feed cursor behavior and polling fallback remain unchanged. Migration 9 adds outbox/attempt tables and durable exact-run gateway attribution; unknown turn origins remain unknown.
 - Watcher same-state events (`turn_finished`, `delegated_work_ended`) commit atomically with their observed job changes. Whole turns between polls generate an idle webhook. Config revisions cancel queued payloads for replaced routes; read-only commands never apply stale config.
+
+### Documentation
+
+- Shorter, prompt-led README with a Grok routine walkthrough, private field-link instructions and an illustrated setup guide. Manual installation and connection commands moved to `docs/setup.md`; release history stays in the changelog and GitHub releases.
+
+### Security and lifecycle
+
+- The dashboard's private network boundary now permits webhook destination management. It remains separate from the MCP/OAuth listener; job, host and client controls are unchanged. Management requests require JSON, the custom API header, an exact request-host Origin and same-origin fetch metadata when present. Errors and audit records contain fixed codes only; no saved URL, header, response body or credential is exposed, and the browser stores no secrets.
+- Connection creation and replacement use the same bounded TLS-validating POST transport as delivery. A failed test preserves the existing route. Successful changes recheck the revision after the awaited test and cancel pending old-route payloads; disconnect cannot be undone by a slow test. Writes are refused before readiness and after shutdown begins; shutdown aborts and drains management pings before closing SQLite.
+- No live Grok receiver or production deployment qualification is claimed by this implementation's synthetic tests.
 
 ## 0.1.8 (2026-10-16)
 

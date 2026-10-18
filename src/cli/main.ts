@@ -14,7 +14,7 @@ import { NEVER_EXPIRES } from '../oauth/tokens.ts';
 import { FATAL_SHUTDOWN_MS, guardProcess } from '../processErrors.ts';
 import { DAY, HOUR, MINUTE, parseDuration, systemClock } from '../time.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
-import { pingWebhook } from '../webhooks/sender.ts';
+import { pingStoredWebhook, pingWebhook } from '../webhooks/sender.ts';
 import { WebhookStore } from '../webhooks/store.ts';
 import { runDoctor } from './doctor.ts';
 import { relative, shortTime, table } from './format.ts';
@@ -33,7 +33,7 @@ const USAGE = `Usage: ${GATEWAY_NAME} <command> [options]
 
 Commands:
   serve                     Run the gateway (HTTP server, job engine, credential renewal,
-                            configured webhooks and optional read-only dashboard)
+                            webhooks and optional private operator dashboard)
   pair [--ttl 15m]          Mint a one-time approval code for connecting an agent
   clients list              List registered agent clients
   clients token --name <name> [--access operate|read] [--hosts all|<id>,<id>] [--ttl 1y|never]
@@ -50,10 +50,10 @@ Commands:
                             Register an existing T3 thread as a standing job agents can drive
   jobs list [--all]         List open jobs (--all: finished ones too)
   jobs release <jobId>      Stop following a standing job; the T3 thread is left as it is
-  webhooks list             Show configured subscriptions and safe delivery counts (offline)
+  webhooks list             Show subscriptions, ownership and safe delivery counts (offline)
   webhooks attempts <id> [--limit 20]
                             Show recent delivery attempts, codes only (offline)
-  webhooks ping <id>         Send a synthetic test with configured URL and authentication
+  webhooks ping <id>         Test a file-managed or dashboard connection with synthetic content
   doctor                    Check config, permissions, database, hosts, public URL and dashboard
 
 Options:
@@ -395,8 +395,11 @@ async function webhooks(paths: Paths, io: CliIo, action: string | undefined, id:
       return 0;
     }
     const subscription = config.webhooks.subscriptions.find((s) => s.id === id);
-    if (!subscription) throw new GatewayError('not_found', 'Webhook subscription is not configured.');
-    const result = await pingWebhook(subscription, paths.dataDir, store, systemClock);
+    const saved = store.listConnections().find((s) => s.id === id && s.source === 'dashboard');
+    if (subscription && saved) throw new GatewayError('config_invalid', 'Webhook subscription ownership conflicts with configuration.');
+    if (!subscription && !saved) throw new GatewayError('not_found', 'Webhook subscription was not found.');
+    const result = saved ? await pingStoredWebhook(saved.id, saved.revision, store, systemClock)
+      : await pingWebhook(subscription!, paths.dataDir, store, systemClock);
     io.out(JSON.stringify(result));
     return result.outcome === 'delivered' ? 0 : 1;
   } finally { storage.db.close(); }
