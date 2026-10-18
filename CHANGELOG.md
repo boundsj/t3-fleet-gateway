@@ -11,6 +11,10 @@
 - Opt-in outbound job webhooks with private per-subscription auth headers, project/host/event filters, metadata-only default payloads, bounded optional excerpts, durable atomic snapshots and deliveries, stable event IDs, restart recovery, bounded HTTPS attempts and retries, and safe CLI diagnostics/test ping. Existing feed cursor behavior and polling fallback remain unchanged. Migration 9 adds outbox/attempt tables and durable exact-run gateway attribution; unknown turn origins remain unknown.
 - Watcher same-state events (`turn_finished`, `delegated_work_ended`) commit atomically with their observed job changes. Whole turns between polls generate an idle webhook. Config revisions cancel queued payloads for replaced routes; read-only commands never apply stale config.
 
+### Documentation
+
+- Shorter, prompt-led README with a Grok routine walkthrough, private field-link instructions and an illustrated setup guide. Manual installation and connection commands moved to `docs/setup.md`; release history stays in the changelog and GitHub releases.
+
 ### Security and lifecycle
 
 - The dashboard's private network boundary now permits webhook destination management. It remains separate from the MCP/OAuth listener; job, host and client controls are unchanged. Management requests require JSON, the custom API header, an exact request-host Origin and same-origin fetch metadata when present. Errors and audit records contain fixed codes only; no saved URL, header, response body or credential is exposed, and the browser stores no secrets.
