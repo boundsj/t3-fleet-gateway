@@ -100,6 +100,8 @@ function subscription(url: string, extra: Record<string, unknown> = {}) {
 
 async function harness(t: TestContext, subscriptions: Record<string, unknown>[], options: {
   fake?: FakeT3; dataDir?: string; door?: FrontDoor; clock?: TestClock; attemptTimeoutMs?: number;
+  /** Extra fields for the host's config entry, and extra projects beside pilot and docs. */
+  host?: Record<string, unknown>; projects?: Record<string, unknown>[];
 } = {}) {
   const fake = options.fake ?? await startFakeT3();
   if (!options.fake) t.after(() => fake.close());
@@ -110,10 +112,11 @@ async function harness(t: TestContext, subscriptions: Record<string, unknown>[],
   }
   const gw = await startTestGateway(t, {
     config: {
-      hosts: [{ id: 'main', t3Url: fake.url, mintPairingCode: fake.mintCommand(), maxConcurrentJobs: 5 }],
+      hosts: [{ id: 'main', t3Url: fake.url, mintPairingCode: fake.mintCommand(), maxConcurrentJobs: 5, ...options.host }],
       projects: [
         { alias: 'pilot', host: 'main', t3ProjectId: 'project-1', runtimeMode: 'auto' },
         { alias: 'docs', host: 'main', t3ProjectId: 'project-2', runtimeMode: 'auto' },
+        ...(options.projects ?? []),
       ],
       webhooks: { subscriptions },
     },
@@ -239,6 +242,66 @@ describe('outbound job webhooks through MCP, watcher and HTTP', () => {
     assert.deepEqual([running.type, running.state, running.previousState], ['cancelled', 'cancelled', 'cancel_requested']);
     await h.deliver();
     assert.equal(sink.received.length, 2);
+  });
+
+  test('a scratch job is captured and delivered like any job: scratch alias, host and project id, no branch, launch attribution', async (t) => {
+    const scratchSink = await receiver(t);
+    const worktreeSink = await receiver(t);
+    const events = ['running', 'idle', 'cancelled'];
+    const h = await harness(t, [
+      subscription(scratchSink.url, { id: 'scratch', projects: ['scratch'], hosts: ['main'], events }),
+      subscription(worktreeSink.url, { id: 'worktrees', projects: ['pilot'], events }),
+    ], {
+      host: { discovery: { enabled: true }, defaultProject: 'scratch' },
+      projects: [{ alias: 'scratch', host: 'main', t3ProjectId: 'project-3', workspaceMode: 'scratch', runtimeMode: 'auto' }],
+    });
+    type Started = { job: { jobId: string; title: string; project: string; projectId: string; branch: string; workspaceMode: string } };
+    const start = (requestId: string, title: string) => h.agent.call<Started>('work_start', {
+      target: { host: 'main' }, task: 'Synthetic scratch task never sent to a webhook', title, requestId,
+    });
+    const { job } = await start('scratch-run', 'Synthetic scratch job');
+    const { job: queued } = await start('scratch-cancelled', 'Synthetic cancelled scratch job');
+    assert.deepEqual([job.project, job.projectId, job.branch, job.workspaceMode], ['scratch', 'project-3', '', 'scratch']);
+    await h.agent.call('work_cancel', { jobId: queued.jobId });
+    await h.tick();
+    const thread = h.fake.threadForJob(job.jobId);
+    assert.deepEqual(thread.launch.workspaceStrategy, { type: 'root' });
+    assert.equal(thread.projectId, 'project-3');
+    // The launch recorded who started the first run, as it does for a worktree launch.
+    const turns = h.gw.services.db.prepare('SELECT run_id, client_id FROM job_turns WHERE job_id = ?').all(job.jobId).map((row) => ({ ...row }));
+    assert.deepEqual(turns, [{ run_id: thread.runs[0]!.runId, client_id: h.agent.clientId }]);
+    h.fake.finishTurn(thread.threadId, 'Synthetic confidential scratch result');
+    await h.tick();
+    assert.equal(scratchSink.received.length, 0, 'job transitions commit without awaiting a receiver');
+    await h.deliver();
+
+    assert.deepEqual(scratchSink.received.map((entry) => [entry.payload.jobId, entry.payload.type]),
+      [[queued.jobId, 'cancelled'], [job.jobId, 'running'], [job.jobId, 'idle']]);
+    const feed = await h.agent.call<FeedPage>('work_feed');
+    const common = { projectAlias: 'scratch', host: 'main', projectId: 'project-3', standing: false, waitingOnDelegatedWork: false };
+    const launched = { threadId: thread.threadId, link: `t3-thread://v1/${thread.threadId}`, turnInitiator: { kind: 'gateway', clientId: h.agent.clientId } };
+    const expected = [
+      { jobId: queued.jobId, title: queued.title, type: 'cancelled', state: 'cancelled', previousState: 'queued', ...common,
+        threadId: null, link: null, turnInitiator: { kind: 'unknown', clientId: null } },
+      { jobId: job.jobId, title: job.title, type: 'running', state: 'running', previousState: 'dispatching', ...common, ...launched },
+      { jobId: job.jobId, title: job.title, type: 'idle', state: 'idle', previousState: 'running', ...common, ...launched },
+    ];
+    scratchSink.received.forEach(({ payload }, index) => {
+      const event = feed.events.find((candidate) => candidate.cursor === payload.feedCursor);
+      assert.ok(event, 'every delivery names a feed event');
+      assert.deepEqual([event.jobId, event.toState], [payload.jobId, payload.state]);
+      assert.deepEqual({
+        jobId: payload.jobId, title: payload.title, type: payload.type, state: payload.state, previousState: payload.previousState,
+        projectAlias: payload.projectAlias, host: payload.host, projectId: payload.projectId, standing: payload.standing,
+        waitingOnDelegatedWork: payload.waitingOnDelegatedWork, threadId: payload.threadId, link: payload.link, turnInitiator: payload.turnInitiator,
+      }, expected[index]);
+      assert.equal(payload.feedSequence, Number(event.cursor));
+      assert.equal('branch' in payload, false, 'a webhook never carries a branch');
+    });
+    assert.equal(worktreeSink.received.length, 0, 'the project filter matches the scratch alias, not the pilot worktree project');
+    const serialized = JSON.stringify(scratchSink.received.map((entry) => entry.payload));
+    for (const secret of ['never sent to a webhook', 'confidential scratch result', HEADER_VALUE]) assert.equal(serialized.includes(secret), false);
+    assertNotLogged(h.gw, [scratchSink.url, HEADER_VALUE, 'confidential scratch result']);
   });
 
   test('delegated_work_ended and an entire unseen turn each produce one snapshot with unknown attribution', async (t) => {

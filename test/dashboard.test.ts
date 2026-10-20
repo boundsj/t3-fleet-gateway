@@ -612,4 +612,49 @@ describe('dashboard: jobs and privacy', () => {
     const after = await snapshot(h.port);
     assert.equal(after.jobs.open.find((job) => job.id === victim.id)!.link, null);
   });
+
+  test('scratch jobs (version 2 launch specs) are listed under their alias and host beside discovered and worktree jobs, with no branch', async (t) => {
+    const h = await startJobHarness(t, {
+      maxConcurrentJobs: 4,
+      dashboard: { enabled: true, allowedHosts: [ALLOWED_HOST] },
+      host: { discovery: { enabled: true, allowWorkStart: true }, defaultProject: 'pilot' },
+      pilot: { workspaceMode: 'scratch' },
+    });
+    const port = dashboardPort(h.gw);
+    const start = async (args: Record<string, unknown>) => (await h.agent.call<{ job: { jobId: string } }>('work_start', { task: TASK, ...args })).job.jobId;
+    const scratch = await start({ target: { host: 'main' }, requestId: 'dash-scratch', title: 'Synthetic scratch job' });
+    const named = await start({ project: 'pilot', requestId: 'dash-scratch-alias' });
+    const discovered = await start({ target: { host: 'main', projectId: 'project-3' }, requestId: 'dash-discovered' });
+    const worktree = await start({ project: 'docs', requestId: 'dash-worktree' });
+    const jobs = [scratch, named, discovered, worktree];
+    const specs = jobs.map((id) => h.gw.services.jobs.store.require(id).launchSpec?.v ?? null);
+    assert.deepEqual(specs, [2, 2, 1, null], 'a version 2 spec, a version 1 spec and no spec all reach the dashboard');
+    await h.tick();
+
+    const snap = await snapshot(port);
+    const job = (id: string) => snap.jobs.open.find((item) => item.id === id)!;
+    for (const id of [scratch, named]) {
+      assert.deepEqual([job(id).project, job(id).projectName, job(id).hostId, job(id).state, job(id).standing], ['pilot', null, 'main', 'running', false]);
+      assert.equal(job(id).link, `t3-thread://v1/${h.fake.threadForJob(id).threadId}`);
+      assert.equal(job(id).startedBy.clientId, h.agent.clientId);
+    }
+    assert.equal(job(scratch).title, 'Synthetic scratch job', 'the caller\'s title, without the thread marker');
+    assert.deepEqual([job(discovered).project, job(discovered).projectName], ['@main/project-3', 'Synthetic project 3']);
+    assert.deepEqual([job(worktree).project, job(worktree).projectName], ['docs', null]);
+    const host = snap.hosts.find((candidate) => candidate.id === 'main')!;
+    assert.equal(host.projects.find((project) => project.alias === 'pilot')!.openJobs, 2);
+    assert.equal(host.discoveredOpenJobs, 1, 'only the job in a project with no alias counts as discovered');
+    const scratchEvents = snap.events.filter((event) => event.jobId === scratch);
+    assert.ok(scratchEvents.length >= 2, 'created and launched');
+    assert.ok(scratchEvents.every((event) => event.project === 'pilot' && event.hostId === 'main'));
+
+    // Nothing about the workspace or a branch: not for the scratch job, and not for the worktree jobs either.
+    const text = JSON.stringify(snap);
+    for (const id of jobs) {
+      assert.equal(Object.keys(job(id)).some((key) => /branch|workspace|launch|baseRef/i.test(key)), false, id);
+      assert.equal(text.includes(`agents/${id}`) || text.includes(`fleet/${id}`), false, `branch of ${id}`);
+    }
+    assert.equal(text.includes('SECRET-TASK-TEXT'), false);
+    assert.equal(snap.attention.some((item) => jobs.includes(item.ref)), false, 'running jobs need nothing from the operator');
+  });
 });
