@@ -735,6 +735,26 @@ describe('resume ownership of a held folder', () => {
     assert.equal(store(h).require(q.jobId).state, 'running');
   });
 
+  test('an unknown sibling survives the other call succeeding and the run finishing, until the bounded sweep', async (t) => {
+    const h = await probed(t, { maxConcurrentJobs: 4 });
+    const a = await idleRoot(h);
+    const q = await waitingJob(h);
+    h.fake.statusOnce.set('t3_thread_send', 502);
+    assert.equal((await call(h, 'work_continue', { jobId: a.jobId, message: 'Unknown', requestId: 'sibling-unknown' })).isError, true);
+    assert.equal(store(h).require(a.jobId).workspaceResumeTokens.length, 1);
+    assert.equal((await call(h, 'work_continue', { jobId: a.jobId, message: 'Known', requestId: 'sibling-known' })).isError, undefined);
+    assert.equal(store(h).require(a.jobId).workspaceResumeTokens.length, 1, 'only the known success settled');
+    h.fake.finishTurn(h.fake.threadForJob(a.jobId).threadId, 'Done');
+    await h.tickAfter(2 * MINUTE);
+    assert.equal(await jobState(h.agent, a.jobId), 'idle');
+    assert.notEqual(holder(h, a.jobId), null, 'the unknown attempt still owns the idle reservation');
+    assert.equal(store(h).require(q.jobId).state, 'queued');
+    await h.tickAfter(11 * MINUTE);
+    assert.equal(holder(h, a.jobId), null, 'given up by the bounded sweep');
+    await h.tick();
+    assert.equal(store(h).require(q.jobId).state, 'running');
+  });
+
   test('a successful answer from stale idle state holds by running state before settling its token', async (t) => {
     const h = await probed(t, { maxConcurrentJobs: 4 });
     const a = await idleRoot(h);
