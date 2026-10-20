@@ -31,6 +31,16 @@ describe('config', () => {
     assert.equal(config.hosts[0]?.mintPairingCodeProbe, undefined, 'no executable probe is inferred for existing configs');
   });
 
+  test('workspaceProbeCommand is opt-in, an exact bounded argv', () => {
+    assert.equal(parseConfig(minimal).hosts[0]?.workspaceProbeCommand, undefined, 'no probe is inferred');
+    const host = (workspaceProbeCommand: unknown) => ({ ...minimal, hosts: [{ ...(minimal.hosts as object[])[0]!, workspaceProbeCommand }] });
+    assert.deepEqual(parseConfig(host(['node', 'probe.js', '--flag'])).hosts[0]?.workspaceProbeCommand, ['node', 'probe.js', '--flag']);
+    invalid(host([]), /workspaceProbeCommand/);
+    invalid(host(['node', '']), /workspaceProbeCommand/);
+    invalid(host('node probe.js'), /workspaceProbeCommand/);
+    invalid(host(Array(33).fill('x')), /workspaceProbeCommand/);
+  });
+
   test('projects allow work_start unless allowWorkStart is false', () => {
     const project = { alias: 'pilot', host: 'main', t3ProjectId: 'project-1' };
     assert.equal(parseConfig({ ...minimal, projects: [project] }).projects[0]?.allowWorkStart, true);

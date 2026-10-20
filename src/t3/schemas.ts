@@ -12,6 +12,8 @@ export const projectSchema = z.looseObject({
   id: z.string(),
   title: z.string(),
   deletedAt: z.string().nullable().optional(),
+  /** The folder the project points at on its host. Only the workspace probe uses it; never shown to agents or logged. */
+  workspaceRoot: z.string().nullish(),
   /** The model T3 uses for a launch that passes no `modelSelection`; without one, such a launch is refused. */
   defaultModelSelection: z.unknown().optional(),
 });
@@ -82,6 +84,11 @@ export const ACTIVE_RUN_STATUSES: readonly string[] = ['preparing', 'queued', 's
 
 export const RUNTIME_MODE_VALUES = ['approval-required', 'auto-accept-edits', 'auto', 'full-access'] as const;
 
+/** The `workspaceStrategy` forms of `t3_thread_launch` the gateway sends: a fresh worktree, or the project's own folder. */
+export type LaunchWorkspaceStrategy =
+  | { type: 'worktree'; baseRef: string; branch: string; startFromOrigin: boolean }
+  | { type: 'root' };
+
 /** Input of `t3_thread_launch` as the gateway sends it (a subset of what T3 accepts). */
 export type LaunchThreadInput = {
   title: string;
@@ -89,7 +96,7 @@ export type LaunchThreadInput = {
   modelSelection?: Record<string, unknown>;
   message: string;
 } & (
-  | { projectId: string; workspaceStrategy: { type: 'worktree'; baseRef: string; branch: string; startFromOrigin: boolean }; scratch?: never }
+  | { projectId: string; workspaceStrategy: LaunchWorkspaceStrategy; scratch?: never }
   // T3's own scratch workspace: T3 files the thread under its scratch project and gives it a folder of its own. T3 refuses
   // `scratch` together with `projectId` or `workspaceStrategy`, so a scratch launch sends neither.
   | { scratch: true; projectId?: never; workspaceStrategy?: never }

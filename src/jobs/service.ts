@@ -14,6 +14,7 @@ import { scanActivity } from './activity.ts';
 import { EXCERPT_CHARS, holdsReadPosition, isActiveStatus, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { newJobId } from './ids.ts';
 import { canonicalSelection, validateSelection, type LaunchSpec, type ModelSelection } from './launchSpec.ts';
+import { workspaceIntent, type WorkspaceSelection } from './workspace.ts';
 import { readWorkerMessages, type MessagePage, type MessageQuery } from './messages.ts';
 import { cancelRequestId } from './interrupt.ts';
 import { isTerminal, OPEN_STATES, type JobState } from './states.ts';
@@ -59,6 +60,11 @@ export interface StartInput {
   target?: { host: string; projectId?: string | undefined } | undefined;
   /** An explicit provider, model and options from fleet_models; without it the configured defaults apply. */
   modelSelection?: ModelSelection | undefined;
+  /**
+   * Where a named project's work runs (workspace.ts). Only a host with a `workspaceProbeCommand` takes one; without it the
+   * job is a worktree from the local base, as before. Not for scratch work.
+   */
+  workspace?: WorkspaceSelection | undefined;
   task: string;
   requestId: string;
   title?: string | undefined;
@@ -150,6 +156,15 @@ export interface JobDetail {
   waitingForApproval: boolean;
 }
 
+/** The refusal of a resume while another job holds the folder this root job works in. */
+function rootBusy(job: Job): GatewayError {
+  return new GatewayError(
+    'workspace_root_busy',
+    `Job ${job.id} works in its project's own folder, which another gateway job on host ${job.hostId} holds right now. ` +
+      'Nothing was sent. Try again when that job is finished or idle (work_list shows the jobs), or start the work in a fresh worktree.',
+  );
+}
+
 /** A stable hash of a tool's meaningful input, for request-id idempotency. */
 export function inputHash(tool: string, input: Record<string, unknown>): string {
   const keys = Object.keys(input).sort();
@@ -163,16 +178,26 @@ export function inputHash(tool: string, input: Record<string, unknown>): string 
  * changed target or selection under the same request id conflicts.
  */
 export function startInputHash(input: StartInput): string {
-  if (input.target === undefined && input.modelSelection === undefined) {
+  if (input.target === undefined && input.modelSelection === undefined && input.workspace === undefined) {
     return inputHash('work_start', { project: input.project, task: input.task, title: input.title });
   }
   return inputHash('work_start', {
     project: input.project ?? null,
     target: input.target === undefined ? null : { host: input.target.host, ...(input.target.projectId === undefined ? {} : { projectId: input.target.projectId }) },
     modelSelection: input.modelSelection === undefined ? null : canonicalSelection(input.modelSelection),
+    // Only a request that names a workspace hashes one: a request without it keeps the hash it always had.
+    ...(input.workspace === undefined ? {} : { workspace: canonicalWorkspace(input.workspace) }),
     task: input.task,
     title: input.title,
   });
+}
+
+function canonicalWorkspace(workspace: WorkspaceSelection): Record<string, unknown> {
+  return workspace.type !== 'worktree' ? { type: workspace.type } : {
+    type: 'worktree',
+    ...(workspace.baseRef === undefined ? {} : { baseRef: workspace.baseRef }),
+    ...(workspace.startFromOrigin === undefined ? {} : { startFromOrigin: workspace.startFromOrigin }),
+  };
 }
 
 /** Why work_start is refused in a project, and where to send the work instead. */
@@ -350,9 +375,24 @@ export class JobService {
         throw new GatewayError('invalid_argument', `Host ${host.id} defaultProject must be a scratch alias on that host.`);
       }
     }
+    if (input.workspace !== undefined) {
+      if (project?.workspaceMode === 'scratch') {
+        throw new GatewayError('invalid_argument', 'Scratch projects run in T3\'s own scratch workspace and take no workspace choice.');
+      }
+      if (host.workspaceProbeCommand === undefined) {
+        throw new GatewayError(
+          'invalid_argument',
+          `Host ${host.id} does not choose workspaces: its operator has not configured a workspaceProbeCommand, so work_start there takes no workspace. ` +
+            'Named projects there run in a fresh worktree from the project\'s local base branch.',
+        );
+      }
+    }
     if (project?.workspaceMode === 'worktree' && input.target === undefined && input.modelSelection === undefined) {
       if (!project.allowWorkStart) throw this.#startDisabled(caller, project);
       const id = newJobId();
+      // A host without a probe keeps the plain record: no launch spec, resolved from the configuration at dispatch. A host with one
+      // records only what was asked for (nothing is read from T3 or the host now); the dispatcher resolves the folder and the workspace.
+      const aliasOnly = host.workspaceProbeCommand === undefined ? undefined : this.#aliasLaunch(project, input);
       const result = this.store.create({
         id,
         clientId: caller.clientId,
@@ -362,8 +402,9 @@ export class JobService {
         hostId: project.host,
         task: input.task,
         title: threadTitle(id, input.task, input.title),
-        branch: `${project.branchPrefix}${id}`,
+        branch: aliasOnly?.workspace.type === 'root' ? '' : `${project.branchPrefix}${id}`,
         runtimeMode: project.runtimeMode,
+        ...(aliasOnly ? { launchSpec: aliasOnly } : {}),
       }, scope);
       if (result.created) this.wake();
       return result;
@@ -377,17 +418,37 @@ export class JobService {
       clientId: caller.clientId,
       requestId: input.requestId,
       inputHash: hash,
-      projectAlias: spec.alias ?? projectRef(host.id, spec.projectId),
+      projectAlias: spec.alias ?? projectRef(host.id, spec.projectId!),
       hostId: host.id,
       task: input.task,
       title: threadTitle(id, input.task, input.title),
-      branch: spec.v === 2 ? '' : `${branchPrefix}${id}`,
+      // A root job runs in the project's own folder, on whatever branch is checked out there: it has none of its own.
+      branch: spec.v === 2 || (spec.v === 3 && spec.workspace.type === 'root') ? '' : `${branchPrefix}${id}`,
       runtimeMode: spec.runtimeMode,
       t3ProjectId: spec.projectId,
       launchSpec: spec,
     }, scope);
     if (result.created) this.wake();
     return result;
+  }
+
+  /**
+   * The record of an alias-only request on a host that chooses workspaces: the intent, with the alias's configured
+   * policy (runtime mode, model, base ref) as it is now. Nothing about the project is read from T3 or the host.
+   */
+  #aliasLaunch(project: ProjectConfig, input: StartInput): Extract<LaunchSpec, { v: 3 }> {
+    const configured = configuredModel(this.#config, project);
+    return {
+      v: 3,
+      projectId: null,
+      projectName: null,
+      source: 'alias',
+      alias: project.alias,
+      runtimeMode: project.runtimeMode,
+      model: configured ? { source: configured.source, selection: configured.selection } : { source: 't3_default', selection: null },
+      hostId: project.host,
+      workspace: workspaceIntent(input.workspace, project.baseRef),
+    };
   }
 
   #startDisabled(caller: Caller, project: ProjectConfig): GatewayError {
@@ -517,6 +578,9 @@ export class JobService {
       );
     }
     const scratch = alias === null ? undefined : this.#config.projects.find((candidate) => candidate.alias === alias && candidate.workspaceMode === 'scratch');
+    if (scratch && input.workspace !== undefined) {
+      throw new GatewayError('invalid_argument', 'Scratch projects run in T3\'s own scratch workspace and take no workspace choice.');
+    }
     const common = {
       projectId: found.id,
       source: alias === null ? 'discovered' : 'alias',
@@ -533,6 +597,13 @@ export class JobService {
         hostId: host.id,
         workspace: { kind: 'scratch' },
         defaultProject: null,
+      } : host.workspaceProbeCommand !== undefined ? {
+        // The host chooses workspaces: the folder and the workspace are decided at dispatch; only the intent is recorded.
+        v: 3,
+        ...common,
+        projectName: found.name,
+        hostId: host.id,
+        workspace: workspaceIntent(input.workspace, policy.baseRef),
       } : {
         v: 1,
         ...common,
@@ -747,6 +818,12 @@ export class JobService {
     }
     const threadId = job.threadId;
     if (threadId === null) throw new GatewayError('job_state_conflict', `Job ${job.id} has no thread.`);
+    // Resuming an idle job that works in the project's own folder takes the folder back first, before anything is sent: while
+    // another job holds it the follow-up waits, and the same requestId may be sent again later.
+    if (job.state === 'idle' && this.store.reserveRoot(job.id) === 'busy') {
+      if (!key) this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
+      throw rootBusy(job);
+    }
     let sent;
     try {
       sent = await this.#registry.client(job.hostId).sendToThread({
@@ -758,6 +835,7 @@ export class JobService {
     } catch (error) {
       if (error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered')) {
         this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
+        this.store.releaseResumeHold(job.id);
         throw error;
       }
       const described = describeError(error);
@@ -788,7 +866,14 @@ export class JobService {
             : 'The job has no pending questions.';
       throw new GatewayError('not_found', `That request is not pending on job ${job.id}. ${hint}`);
     }
-    await client.respondToPendingRequest(job.threadId, input.requestId, input.answers);
+    // An answer starts the worker again: an idle root job takes its folder back first (see continue).
+    if (job.state === 'idle' && this.store.reserveRoot(job.id) === 'busy') throw rootBusy(job);
+    try {
+      await client.respondToPendingRequest(job.threadId, input.requestId, input.answers);
+    } catch (error) {
+      if (error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered')) this.store.releaseResumeHold(job.id);
+      throw error;
+    }
     const remaining = pending.filter((id) => id !== input.requestId);
     this.store.appendEvent(job.id, 'input_answered', job.state, { requestId: input.requestId });
     const moved =

@@ -16,6 +16,7 @@ import {
   type JobService,
 } from '../jobs/service.ts';
 import { JOB_STATES, STATE_MEANINGS } from '../jobs/states.ts';
+import { workspaceSelectionSchema } from '../jobs/workspace.ts';
 import { MAX_SELECTION_CHARS, MAX_SELECTION_ID_CHARS, MAX_SELECTION_OPTIONS } from '../jobs/launchSpec.ts';
 import type { FeedEvent, Job, JobEvent } from '../jobs/store.ts';
 import { parseProjectRef } from '../jobs/targets.ts';
@@ -102,13 +103,15 @@ const jobSchema = z.object({
     .string()
     .describe("The T3 thread title; a launched job's ends with the marker [job:<jobId>], a standing job's is the title the operator gave it"),
   workspaceMode: z
-    .enum(['scratch', 'worktree'])
+    .enum(['scratch', 'worktree', 'root'])
     .nullable()
     .describe(
-      'scratch for T3 internal scratch; worktree for project work; null when unknown: an adopted standing thread, or a job whose stored launch plan ' +
-        'could not be read (a queued one then fails with database_error and is never launched; one with a thread carries on)',
+      'scratch for T3 internal scratch; worktree for a fresh worktree on its own branch; root for the project\'s own folder (one root job per folder ' +
+        'runs at a time); null when unknown: an adopted standing thread, a job on a host that chooses workspaces whose workspace is decided when it ' +
+        'launches (still queued), or a job whose stored launch plan could not be read (a queued one then fails with database_error and is never ' +
+        'launched; one with a thread carries on)',
     ),
-  branch: z.string().describe("The git branch of the job worktree; empty for scratch (a standing job: its thread's branch, or empty)"),
+  branch: z.string().describe("The git branch of the job worktree; empty for scratch or root work (a standing job: its thread's branch, or empty)"),
   standing: z
     .boolean()
     .describe(
@@ -229,6 +232,16 @@ function questionText(request: QuestionRequest): string[] {
 export type JobView = z.infer<typeof jobSchema>;
 export type JobDetailView = z.infer<typeof jobDetailSchema>;
 
+/** Where the job runs: what the dispatcher resolved, else what the spec says outright, else the worktree every other job gets. */
+function workspaceModeOf(job: Job): JobView['workspaceMode'] {
+  if (job.standing || job.launchSpecUnreadable) return null;
+  const spec = job.launchSpec;
+  if (spec?.v === 2) return spec.workspace.kind;
+  if (spec?.v !== 3) return 'worktree';
+  if (job.workspaceKind !== null) return job.workspaceKind;
+  return spec.workspace.type === 'auto' ? null : spec.workspace.type;
+}
+
 export function jobView(job: Job, context: ToolContext): JobView {
   // A launch plan the gateway could not read leaves no spec: what only the spec said (project name, model, workspace) is left out,
   // and the workspace is unknown rather than assumed to be a worktree.
@@ -243,7 +256,7 @@ export function jobView(job: Job, context: ToolContext): JobView {
     source: spec?.source ?? (parseProjectRef(job.projectAlias) ? 'discovered' : 'alias'),
     model: spec ? { source: spec.model.source, selection: spec.model.selection } : null,
     title: job.title,
-    workspaceMode: job.standing || job.launchSpecUnreadable ? null : spec?.v === 2 ? spec.workspace.kind : 'worktree',
+    workspaceMode: workspaceModeOf(job),
     branch: job.branch,
     standing: job.standing,
     waitingOnDelegatedWork: job.delegatedWork.length > 0 || job.delegatedUntracked > 0,
@@ -283,7 +296,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     title: 'Start work',
     description:
       'Start work on a machine. When the user names no project, pass target { host } to use that machine’s configured T3 internal scratch workspace. ' +
-      'When the user names a project, use its configured alias or explicit target { host, projectId }; project work creates a fresh git worktree and branch. ' +
+      'When the user names a project, use its configured alias or explicit target { host, projectId }; project work creates a fresh git worktree and branch, unless the project\'s host chooses workspaces (see workspace below). ' +
       'An unknown named project must be resolved or reported, never treated as scratch. The gateway opens a T3 Code ' +
       'thread there and gives the worker your task. Returns at once with a jobId in state "queued"; the job moves to "running" ' +
       'when its host has a free slot. Follow it with work_feed (recommended: poll with the last cursor) or work_status. ' +
@@ -299,12 +312,18 @@ export function workTools(jobs: JobService): GatewayTool[] {
       '(a wrong model, option or value is invalid_argument and nothing is started), and without it the configured defaults apply ' +
       '(project, then host, then the T3 project default). If fleet_status lists ' +
       'standingJobs for the project (a coordinator thread the operator runs), give the work to that job with work_continue ' +
-      'instead of starting a new one; in a project with allowWorkStart false this tool fails with start_disabled and names them.',
+      'instead of starting a new one; in a project with allowWorkStart false this tool fails with start_disabled and names them. ' +
+      'workspace is optional, for named projects on a host whose operator configured a workspace probe (otherwise it is refused with invalid_argument): ' +
+      'omit it, or pass { type: "auto" }, to get a fresh worktree from the up-to-date remote base for a Git repository, or the project\'s folder itself for any ' +
+      'other folder; { type: "root" } works in the project\'s own folder (its checked-out branch, no new branch), and only one such job per folder runs ' +
+      'at a time (the others wait queued, and a work_continue to an idle one is refused with workspace_root_busy while another holds the folder); ' +
+      '{ type: "worktree", baseRef?, startFromOrigin? } insists on a fresh worktree. The choice is made when the job launches; its workspaceMode then shows it.',
     scope: OPERATE_SCOPE,
     readOnly: false,
     inputSchema: z.object({
       project: z.string().min(1).max(64).optional().describe('Project alias from fleet_status (pass this or target)'),
       target: startTargetInput.optional().describe('Machine only for no named project, or machine and explicit project id (pass this or project)'),
+      workspace: workspaceSelectionSchema.optional().describe('Omit for the host\'s automatic choice. { type: "root" } for the project\'s own folder; { type: "worktree", baseRef?, startFromOrigin? } for a fresh worktree. Only on hosts with a workspace probe'),
       modelSelection: modelSelectionInput.optional().describe('Explicit provider instance, model and options from fleet_models; omit for the configured defaults'),
       task: z.string().min(1).max(MAX_TASK_CHARS).describe('What the worker should do, as a complete instruction'),
       requestId: requestIdInput,

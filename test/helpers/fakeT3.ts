@@ -220,7 +220,8 @@ interface Session {
 export class FakeT3 {
   readonly serverVersion: string;
   tokenLifetimeSeconds: number;
-  readonly projects: { id: string; title: string; deletedAt: string | null; defaultModelSelection: Record<string, unknown> | null }[];
+  /** `workspaceRoot` is the folder T3 reports for the project; the workspace probe reads it (src/jobs/workspace.ts). */
+  readonly projects: { id: string; title: string; deletedAt: string | null; defaultModelSelection: Record<string, unknown> | null; workspaceRoot?: string }[];
   /** The providers, models and options this host advertises in orchestrator_capabilities; tests change it between calls. */
   providers: FakeProvider[] = syntheticProviders();
   /** When set, t3_project_list answers every page with this same nextCursor (a catalog that never converges). */

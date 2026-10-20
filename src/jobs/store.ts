@@ -6,6 +6,7 @@ import { WebhookStore } from '../webhooks/store.ts';
 import type { DelegatedTask } from './derive.ts';
 import { readLaunchSpec, type LaunchSpec } from './launchSpec.ts';
 import { isTerminal, RUNNING_STATES, TERMINAL_STATES, type JobState } from './states.ts';
+import type { ResolvedWorkspace } from './workspace.ts';
 
 export interface Job {
   id: string;
@@ -84,6 +85,31 @@ export interface Job {
    * already has a thread is followed as usual, and views leave out what only the spec said. Reading it never fails.
    */
   launchSpecUnreadable: boolean;
+  /**
+   * Where the dispatcher resolved the job's workspace (migration 12): `root` is the project's own folder, `worktree` a fresh
+   * worktree. Null until a version 3 job is dispatched, and always for other jobs (see `launchSpec`).
+   */
+  workspaceKind: 'root' | 'worktree' | null;
+  /** A hash of the host and the canonical folder of a root job: two jobs with the same key share a folder. Never shown. */
+  workspaceRootKey: string | null;
+  /**
+   * When the job began to hold its folder (the reservation, see `holdsRoot`); null while it does not. At most one job per host
+   * and folder holds it: the ledger refuses a second, atomically.
+   */
+  workspaceRootHeldAt: number | null;
+  /** Probes that could not reach the host for this queued job, and the earliest time of the next try (migration 12). */
+  probeAttempts: number;
+  probeRetryAt: number | null;
+}
+
+/**
+ * Whether a job occupies its folder: it may be changing it. Every state that holds a concurrency slot does (`unknown` and
+ * `cancel_requested` included: a launch may have happened, an interrupt may not have landed), and so does an idle
+ * coordinator whose delegated work still runs, because T3 starts its next turn by itself when that work ends. An idle
+ * job with nothing delegated, a queued job and a finished one do not.
+ */
+export function holdsRoot(state: JobState, delegatedWork: readonly unknown[], delegatedUntracked: number): boolean {
+  return RUNNING_STATES.includes(state) || (state === 'idle' && (delegatedWork.length > 0 || delegatedUntracked > 0));
 }
 
 /** The client id recorded on standing jobs: the operator adopted them, no agent started them. Real client ids are longer. */
@@ -129,6 +155,11 @@ export type JobChanges = Partial<
     | 'delegatedUntracked'
     | 'delegatedUntrackedRunId'
     | 'delegatedEndedAt'
+    | 'branch'
+    | 'workspaceKind'
+    | 'workspaceRootKey'
+    | 'probeAttempts'
+    | 'probeRetryAt'
   >
 >;
 
@@ -152,6 +183,11 @@ const COLUMNS: Record<keyof JobChanges, string> = {
   delegatedUntracked: 'delegated_untracked',
   delegatedUntrackedRunId: 'delegated_untracked_run_id',
   delegatedEndedAt: 'delegated_ended_at',
+  branch: 'branch',
+  workspaceKind: 'workspace_kind',
+  workspaceRootKey: 'workspace_root_key',
+  probeAttempts: 'probe_attempts',
+  probeRetryAt: 'probe_retry_at',
 };
 
 interface JobRow {
@@ -190,6 +226,11 @@ interface JobRow {
   delegated_untracked_run_id: string | null;
   delegated_ended_at: number | null;
   launch_spec: string | null;
+  workspace_kind: 'root' | 'worktree' | null;
+  workspace_root_key: string | null;
+  workspace_root_held_at: number | null;
+  probe_attempts: number;
+  probe_retry_at: number | null;
 }
 
 interface EventRow {
@@ -308,6 +349,11 @@ function toJob(row: JobRow): Job {
     delegatedEndedAt: row.delegated_ended_at,
     launchSpec: stored.kind === 'spec' ? stored.spec : null,
     launchSpecUnreadable: stored.kind === 'unreadable',
+    workspaceKind: row.workspace_kind,
+    workspaceRootKey: row.workspace_root_key,
+    workspaceRootHeldAt: row.workspace_root_held_at,
+    probeAttempts: row.probe_attempts,
+    probeRetryAt: row.probe_retry_at,
   };
 }
 
@@ -390,6 +436,16 @@ export interface NewStandingJob {
   delegatedUntracked: number;
   delegatedUntrackedRunId: string | null;
 }
+
+/** What a write found out beyond what it wrote. */
+interface WriteOutcome {
+  /** The job now occupies a folder that another job on its host holds. */
+  contended: boolean;
+}
+
+/** What an agent sees while its job waits for another job to give up the project's folder. */
+const ROOT_BUSY_MESSAGE =
+  "Waiting: another gateway job is working in this project's own folder (workspace root). It starts when that job is finished or idle.";
 
 export interface TransitionOptions {
   /** An observation must still match its source snapshot, including when the state stayed the same. */
@@ -474,11 +530,22 @@ export class JobStore {
     return rows.map(this.#job);
   }
 
-  /** Queued jobs on a host in FIFO order. */
-  queued(hostId: string, limit: number): Job[] {
+  /**
+   * Queued jobs on a host in FIFO order that the dispatcher may try now. Left out, in SQL and before the limit so they take no place
+   * in the window: a job whose probe asked to wait (`probeRetryAt` after `now`; no `now` leaves that out of the check), and a
+   * job whose folder (found by an earlier attempt) another job on the host holds, which cannot launch before that job releases it.
+   */
+  queued(hostId: string, limit: number, options: { now?: number } = {}): Job[] {
     const rows = this.#db
-      .prepare("SELECT * FROM jobs WHERE host_id = ? AND state = 'queued' ORDER BY created_at, rowid LIMIT ?")
-      .all(hostId, limit) as unknown as JobRow[];
+      .prepare(
+        `SELECT * FROM jobs WHERE host_id = ? AND state = 'queued'
+           AND (probe_retry_at IS NULL OR probe_retry_at <= ?)
+           AND NOT (workspace_root_key IS NOT NULL AND EXISTS (
+             SELECT 1 FROM jobs holder WHERE holder.host_id = jobs.host_id AND holder.workspace_root_key = jobs.workspace_root_key
+               AND holder.workspace_root_held_at IS NOT NULL))
+         ORDER BY created_at, rowid LIMIT ?`,
+      )
+      .all(hostId, options.now ?? Number.MAX_SAFE_INTEGER, limit) as unknown as JobRow[];
     return rows.map(this.#job);
   }
 
@@ -626,32 +693,127 @@ export class JobStore {
    * `to` may equal the current state: then only the changes are applied, guarded by that state.
    */
   transition(id: string, options: TransitionOptions): Job | undefined {
+    return transaction(this.#db, () => this.#transition(id, options));
+  }
+
+  #transition(id: string, options: TransitionOptions): Job | undefined {
+    const current = this.get(id);
+    if (!current || !options.from.includes(current.state)) return undefined;
+    if (options.expected && JSON.stringify(current) !== JSON.stringify(options.expected)) return undefined;
+    if (options.gatewayTurn) this.#recordTurn(id, options.gatewayTurn.runId, options.gatewayTurn.clientId);
+    const now = this.#clock();
+    const outcome: WriteOutcome = { contended: false };
+    if (!this.#write(current, options.changes ?? {}, now, options.to, outcome)) return current;
+    if (current.state !== options.to) {
+      this.#insertEvent(id, 'state_changed', current.state, options.to, options.detail ?? {}, now, options.turnRunId);
+      this.#logger.info('job.state_changed', {
+        jobId: id,
+        from: current.state,
+        to: options.to,
+        reason: options.detail?.reason,
+        errorCode: options.detail?.code,
+      });
+    }
+    for (const event of options.events ?? []) this.#insertEvent(id, event.type, current.state, options.to, event.detail ?? {}, now, options.turnRunId);
+    if (outcome.contended) this.#insertContended(id, options.to, now);
+    return this.get(id);
+  }
+
+  /**
+   * Claim a queued job for launch with the workspace the dispatcher resolved for it, in one transaction. A root job takes the
+   * reservation of its folder here: when another job on the host holds it, the job stays queued with the folder recorded
+   * (and so left out of `queued` until that job lets go) and `busy` is returned. Otherwise the job moves to `dispatching`
+   * with `changes`, holding the folder if it is a root job. `gone`: the job is no longer queued (cancelled meanwhile).
+   */
+  dispatch(id: string, workspace: ResolvedWorkspace, changes: JobChanges): { kind: 'claimed' | 'busy'; job: Job } | { kind: 'gone' } {
     return transaction(this.#db, () => {
       const current = this.get(id);
-      if (!current || !options.from.includes(current.state)) return undefined;
-      if (options.expected && JSON.stringify(current) !== JSON.stringify(options.expected)) return undefined;
-      if (options.gatewayTurn) this.#recordTurn(id, options.gatewayTurn.runId, options.gatewayTurn.clientId);
+      if (!current || current.state !== 'queued') return { kind: 'gone' } as const;
+      const resolved: JobChanges = workspace.kind === 'root'
+        ? { workspaceKind: 'root', workspaceRootKey: workspace.rootKey, branch: '' }
+        : { workspaceKind: 'worktree', workspaceRootKey: null };
       const now = this.#clock();
-      if (!this.#write(current, options.changes ?? {}, now, options.to)) return current;
-      if (current.state !== options.to) {
-        this.#insertEvent(id, 'state_changed', current.state, options.to, options.detail ?? {}, now, options.turnRunId);
-        this.#logger.info('job.state_changed', {
-          jobId: id,
-          from: current.state,
-          to: options.to,
-          reason: options.detail?.reason,
-          errorCode: options.detail?.code,
-        });
+      if (workspace.kind === 'root' && this.#otherHolder(current.hostId, workspace.rootKey, id)) {
+        this.#write(current, {
+          ...resolved,
+          probeAttempts: 0,
+          probeRetryAt: null,
+          lastErrorCode: 'workspace_root_busy',
+          lastErrorMessage: ROOT_BUSY_MESSAGE,
+        }, now);
+        return { kind: 'busy', job: this.require(id) } as const;
       }
-      for (const event of options.events ?? []) this.#insertEvent(id, event.type, current.state, options.to, event.detail ?? {}, now, options.turnRunId);
-      return this.get(id);
+      const claimed = this.#transition(id, {
+        from: ['queued'],
+        to: 'dispatching',
+        changes: { ...changes, ...resolved, probeAttempts: 0, probeRetryAt: null },
+      });
+      return claimed ? ({ kind: 'claimed', job: claimed } as const) : ({ kind: 'gone' } as const);
     });
+  }
+
+  /**
+   * Take the reservation of an idle root job that is about to be resumed (a follow-up or an answer the gateway sends to its
+   * thread), before anything is sent. `busy`: another job on the host holds the folder, so nothing may be sent. A job that is
+   * not a root job, or already holds its folder, needs nothing.
+   */
+  reserveRoot(id: string): 'held' | 'not_needed' | 'busy' {
+    return transaction(this.#db, () => {
+      const job = this.get(id);
+      if (!job || job.workspaceRootKey === null || isTerminal(job.state)) return 'not_needed';
+      if (job.workspaceRootHeldAt !== null) return 'held';
+      if (this.#otherHolder(job.hostId, job.workspaceRootKey, id)) return 'busy';
+      this.#db.prepare('UPDATE jobs SET workspace_root_held_at = ? WHERE id = ?').run(this.#clock(), id);
+      return 'held';
+    });
+  }
+
+  /**
+   * Give back a reservation taken for a resume that definitely did not reach T3, if the job is at rest (idle, nothing
+   * delegated). A job that is running, or waiting on delegated work, keeps its folder.
+   */
+  releaseResumeHold(id: string): void {
+    this.#db
+      .prepare(
+        `UPDATE jobs SET workspace_root_held_at = NULL WHERE id = ? AND workspace_root_held_at IS NOT NULL AND state = 'idle'
+           AND delegated_work = '[]' AND delegated_untracked = 0`,
+      )
+      .run(id);
+  }
+
+  /**
+   * Release the reservations of idle jobs on a host that nothing runs behind any more and that have held for longer than
+   * `maxAgeMs`: a resume whose outcome stayed unknown and was never followed up. One bounded statement; a run that did
+   * start is seen by the watcher, which moves the job out of idle, and holds again by state. Returns how many were released.
+   */
+  releaseStaleHolds(hostId: string, now: number, maxAgeMs: number): number {
+    const result = this.#db
+      .prepare(
+        `UPDATE jobs SET workspace_root_held_at = NULL WHERE host_id = ? AND workspace_root_held_at IS NOT NULL AND workspace_root_held_at < ?
+           AND state = 'idle' AND delegated_work = '[]' AND delegated_untracked = 0`,
+      )
+      .run(hostId, now - maxAgeMs);
+    return Number(result.changes);
+  }
+
+  #otherHolder(hostId: string, key: string, exceptJobId: string): boolean {
+    return this.#db
+      .prepare('SELECT 1 AS held FROM jobs WHERE host_id = ? AND workspace_root_key = ? AND workspace_root_held_at IS NOT NULL AND id <> ? LIMIT 1')
+      .get(hostId, key, exceptJobId) !== undefined;
+  }
+
+  #insertContended(jobId: string, state: JobState, now: number): void {
+    this.#insertEvent(jobId, 'workspace_root_contended', state, state, { reason: 'workspace_root_busy', code: 'workspace_root_busy' }, now);
+    this.#logger.warn('job.workspace_root_contended', { jobId });
   }
 
   /** Change fields without changing state and without an event. */
   update(id: string, changes: JobChanges): void {
     const current = this.get(id);
-    if (current) this.#write(current, changes, this.#clock());
+    if (!current) return;
+    const outcome: WriteOutcome = { contended: false };
+    this.#write(current, changes, this.#clock(), undefined, outcome);
+    if (outcome.contended) transaction(this.#db, () => this.#insertContended(id, current.state, this.#clock()));
   }
 
   /** Record an event that is not a state change (for example a follow-up sent to a running job). */
@@ -669,9 +831,11 @@ export class JobStore {
       if (sent.delivery === 'started') this.#recordTurn(id, sent.runId, clientId);
       const next = job.state === 'idle' ? 'running' : job.state;
       // Queued/steered sends may return the run they joined; they never replace its recorded initiator.
-      this.#write(job, { lastRunId: sent.runId, ...(next !== job.state ? { lastErrorCode: null, lastErrorMessage: null } : {}) }, now, next);
+      const outcome: WriteOutcome = { contended: false };
+      this.#write(job, { lastRunId: sent.runId, ...(next !== job.state ? { lastErrorCode: null, lastErrorMessage: null } : {}) }, now, next, outcome);
       this.#insertEvent(id, next !== job.state ? 'state_changed' : 'followup_sent', job.state, next,
         { reason: next !== job.state ? 'followup' : sent.delivery }, now);
+      if (outcome.contended) this.#insertContended(id, next, now);
       if (next !== job.state) this.#logger.info('job.state_changed', { jobId: id, from: job.state, to: next, reason: 'followup' });
     });
   }
@@ -784,8 +948,15 @@ export class JobStore {
   /**
    * Write what differs from `current`. Returns false, writing nothing, when nothing differs. A state
    * change clears `delegatedEndedAt`; a finished job follows no delegated work.
+   *
+   * It also keeps the folder reservation of a root job in step with what the write leaves it doing (`holdsRoot`), in the same
+   * statement. A job that now occupies its folder and holds no reservation takes it when no other job on the host holds it;
+   * when one does (work T3 itself started in a folder the gateway handed to someone else, which no gateway can prevent) the job
+   * is recorded as it is and `outcome.contended` is set. A reservation is given back when the write changes the job's state or its
+   * delegated work and leaves it not occupying the folder. A write that changes neither (a poll of an idle job) never
+   * releases: a resume takes the reservation before it sends (`reserveRoot`).
    */
-  #write(current: Job, changes: JobChanges, now: number, state?: JobState): boolean {
+  #write(current: Job, changes: JobChanges, now: number, state?: JobState, outcome?: WriteOutcome): boolean {
     const sets: string[] = [];
     const params: (string | number | null)[] = [];
     let effective = changes;
@@ -801,6 +972,23 @@ export class JobStore {
       if (next === columnValue(key, current[key])) continue;
       sets.push(`${COLUMNS[key]} = ?`);
       params.push(next);
+    }
+    const nextState = state ?? current.state;
+    const nextWork = effective.delegatedWork ?? current.delegatedWork;
+    const nextUntracked = effective.delegatedUntracked ?? current.delegatedUntracked;
+    const rootKey = effective.workspaceRootKey === undefined ? current.workspaceRootKey : effective.workspaceRootKey;
+    const holds = rootKey !== null && holdsRoot(nextState, nextWork, nextUntracked);
+    const occupiedBefore = holdsRoot(current.state, current.delegatedWork, current.delegatedUntracked);
+    const moved = nextState !== current.state || JSON.stringify(nextWork) !== JSON.stringify(current.delegatedWork) || nextUntracked !== current.delegatedUntracked;
+    if (holds && current.workspaceRootHeldAt === null) {
+      if (this.#otherHolder(current.hostId, rootKey, current.id)) {
+        if (outcome && !occupiedBefore) outcome.contended = true;
+      } else {
+        sets.push('workspace_root_held_at = ?');
+        params.push(now);
+      }
+    } else if (!holds && current.workspaceRootHeldAt !== null && (moved || rootKey === null)) {
+      sets.push('workspace_root_held_at = NULL');
     }
     if (sets.length === 0) return false;
     sets.push('updated_at = ?');

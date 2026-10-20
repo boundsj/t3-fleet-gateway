@@ -16,6 +16,7 @@ const hostSchema = z.object({
   id: z.string(),
   label: z.string().nullable(),
   defaultProject: z.string().nullable().describe('Configured scratch alias for work_start { target: { host } }; null when no machine default is configured'),
+  choosesWorkspace: z.boolean().describe('true when the operator configured a workspace probe for this host: work_start then accepts a workspace for named projects and picks one automatically'),
   reachable: z.boolean().nullable().describe('null when the gateway has no credential to ask with; true when T3 answered, even if it refused the credential'),
   t3Version: z.string().nullable(),
   checkedAt: z.string(),
@@ -97,10 +98,11 @@ function describeHost(host: HostStatus): string {
   const scratch = host.defaultProject === null
     ? ''
     : `; no named project: work_start { target: { host: ${JSON.stringify(host.id)} } } uses scratch alias ${host.defaultProject}`;
+  const workspace = host.choosesWorkspace ? '; picks workspaces for named projects (work_start workspace)' : '';
   const discovery = host.discovery.enabled
     ? `; discovery on (fleet_projects, fleet_models${host.discovery.allowWorkStart ? '; work_start accepts target' : '; launches need a configured alias'})`
     : '';
-  return `${host.id}: ${reach}; ${credential}${renewal}; ${host.runningJobs} running, ${host.queuedJobs} queued (max ${host.maxConcurrentJobs})${discovery}${scratch}`;
+  return `${host.id}: ${reach}; ${credential}${renewal}; ${host.runningJobs} running, ${host.queuedJobs} queued (max ${host.maxConcurrentJobs})${discovery}${scratch}${workspace}`;
 }
 
 export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostRegistry; db: Database; jobs: JobService }) {
@@ -139,6 +141,7 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
             id: host.id,
             label: host.label ?? null,
             defaultProject: host.defaultProject ?? null,
+            choosesWorkspace: host.workspaceProbeCommand !== undefined,
             reachable: health.reachable,
             t3Version: health.t3Version,
             checkedAt: isoTime(health.checkedAt),

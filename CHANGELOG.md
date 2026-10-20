@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.11 (2026-10-20)
+
+### Added
+
+- Optional automatic workspace selection for named projects, per host: `hosts[].workspaceProbeCommand` is an exact argv (no shell) that inspects a project's folder, given one JSON object on stdin ([Workspace probe](docs/configuration.md#workspace-probe), reference script `scripts/workspace-probe.js`). On such a host a repository root gets a fresh worktree from the freshly fetched remote base (`startFromOrigin: true`, on the alias's or discovery policy's `baseRef`), and any other folder runs in the folder itself (T3's `root` strategy, no branch). `work_start` takes an optional `workspace` (`{ "type": "auto" }`, `{ "type": "root" }`, `{ "type": "worktree", "baseRef"?, "startFromOrigin"? }`); on a host without a probe, or for a scratch alias, it is refused with `invalid_argument` and nothing is created. The choice is made when the job launches: acceptance reads nothing from T3 or the host, so alias-only starts keep their request-id hash and queue while the host is down. Contributor work from PR 16, reworked.
+- Root reservations: jobs in a project's own folder (`workspaceMode: "root"`) are serialized per host and canonical folder, whatever aliases or T3 projects name it. The ledger holds the reservation (migration 12, partial unique index), so it survives restarts and races between dispatch, `work_continue` and `work_respond`. It is held while the job is `dispatching`, `running`, `needs_input`, `cancel_requested` or `unknown` and while an idle coordinator's delegated work still runs; released when the job is idle with nothing delegated, or finished. Waiting jobs stay `queued` with `lastError.code` `workspace_root_busy` and take neither a slot nor the places of jobs behind them; resuming an idle job while another holds the folder is `workspace_root_busy` and sends nothing. Work started in T3 itself and standing jobs are outside it (recorded as a `workspace_root_contended` event).
+- `workspaceMode: "root"` in job views, `choosesWorkspace` on `fleet_status` hosts, a root and a `startFromOrigin` sample in the compatibility check.
+- Version 3 launch specs, and migration 12: the workspace, root reservation and probe retry columns on `jobs`. Migration 12 is also the schema-version barrier for version 3 specs: older builds refuse the ledger. Stop older processes and back up the data directory before the first start of this build.
+
+### Fixed
+
+- A probe that fails, times out or returns bad output fails or delays only its own job. Jobs behind it dispatch in the same tick (also with one free slot); a probe that cannot reach its host (timeout, exit 255) gets three attempts for that job; a T3 host failure still backs the host off. Stopping the gateway kills a running probe.
+
+### Compatibility
+
+- Existing configurations are valid unchanged. Without `workspaceProbeCommand` nothing changes: worktrees from the local `baseRef`, legacy request-id hashes, no downstream call before dispatch. Queued jobs with version 1 or 2 specs keep their meaning on any host.
+- Covered by `test/workspace.test.ts` (public MCP and engine, synthetic probe, a reference-script check with real Git), a populated 11 to 12 migration in `test/storage.test.ts` and a config case. The field `workspaceRoot` in T3's project list is not confirmed against a live T3, and no live root launch is claimed.
+
 ## 0.1.10 (2026-10-20)
 
 ### Added
