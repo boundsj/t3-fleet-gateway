@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
+import { displayPullRequests } from '../jobs/pullRequests.ts';
 import type { Job, JobEvent } from '../jobs/store.ts';
 import type { Clock } from '../time.ts';
 import { DEFAULT_WEBHOOK_EVENTS, loadRoute, type SubscriptionConfig, type WebhookEventType, type WebhookRoute, type WebhooksConfig } from './config.ts';
@@ -51,6 +52,7 @@ export interface WebhookPayload {
   standing: boolean;
   waitingOnDelegatedWork: boolean;
   turnInitiator: { kind: 'gateway' | 'unknown'; clientId: string | null };
+  /** At most MAX_PULL_REQUESTS of the PRs the job follows (`displayPullRequests`), so ordinary links keep the payload inside MAX_PAYLOAD_BYTES. */
   pullRequests?: { number: number; state: 'open' | 'closed' | 'merged' | null; url: string }[];
   excerpt?: string | null;
   excerptTruncated?: boolean;
@@ -219,7 +221,7 @@ export class WebhookStore {
       turnInitiator: turn ? { kind: 'gateway', clientId: turn.client_id } : { kind: 'unknown', clientId: null },
     };
     if (type === 'pull_request_opened' || type === 'pull_request_merged') {
-      payload.pullRequests = (job.pullRequests ?? []).map(({ number, state, url }) => ({ number, state, url }));
+      payload.pullRequests = displayPullRequests(job.pullRequests ?? []).map(({ number, state, url }) => ({ number, state, url }));
     }
     for (const row of matches) {
       const s = JSON.parse(row.settings) as SubscriptionSettings;

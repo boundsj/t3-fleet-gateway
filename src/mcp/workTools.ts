@@ -1,5 +1,5 @@
 import * as z from 'zod';
-import { MAX_PULL_REQUESTS, pullRequestsSchema } from '../jobs/pullRequests.ts';
+import { displayPullRequests, MAX_PULL_REQUESTS, MAX_TRACKED_PULL_REQUESTS, pullRequestsSchema } from '../jobs/pullRequests.ts';
 import { MAX_DELEGATED_TASKS } from '../jobs/derive.ts';
 import { MAX_MESSAGE_TEXT_CHARS, MAX_MESSAGES } from '../jobs/messages.ts';
 import {
@@ -79,7 +79,8 @@ const jobSchema = z.object({
   pullRequests: pullRequestsSchema
     .nullable()
     .describe(
-      `Cached T3-linked PRs, at most ${MAX_PULL_REQUESTS}: open ones first, then the newest, so older ones may be left out. ` +
+      `Cached T3-linked PRs, at most ${MAX_PULL_REQUESTS} shown: open ones first, then the newest. The gateway follows up to ` +
+        `${MAX_TRACKED_PULL_REQUESTS} per job, so older ones may be left out; the text summary says how many are followed. ` +
         'null means unknown, [] means none. PR states can lag T3/GitHub.',
     ),
   pullRequestsCheckedAt: nullableTime,
@@ -255,7 +256,8 @@ export function jobView(job: Job, context: ToolContext): JobView {
   // and the workspace is unknown rather than assumed to be a worktree.
   const spec = job.launchSpec;
   return {
-    pullRequests: job.pullRequests,
+    // The tracked list is longer than a view may be: show the most relevant MAX_PULL_REQUESTS (describeJob says how many are followed).
+    pullRequests: job.pullRequests === null ? null : displayPullRequests(job.pullRequests),
     pullRequestsCheckedAt: job.pullRequestsCheckedAt === null ? null : isoTime(job.pullRequestsCheckedAt),
     jobId: job.id,
     state: job.state,
@@ -295,13 +297,16 @@ export function eventView(event: JobEvent): z.infer<typeof eventSchema> {
   };
 }
 
-function describeJob(job: JobView): string {
-  // A full list is the bound: open PRs first, then the newest, so a thread with more links shows only part of them.
-  const prs = job.pullRequests === null ? 'PRs: unknown' : job.pullRequests.length === 0 ? 'PRs: none'
-    : `PRs${job.pullRequests.length >= MAX_PULL_REQUESTS ? ` (${MAX_PULL_REQUESTS} shown; older ones may be left out)` : ''}: ` +
-      job.pullRequests.map((pr) => `${pr.repository}#${pr.number} ${pr.state ?? 'unknown'} ${pr.url}`).join(', ');
-  const waiting = job.waitingOnDelegatedWork ? ', waiting on delegated work' : '';
-  return `${job.jobId} [${job.state}${job.standing ? ', standing' : ''}${waiting}] ${job.project}: ${job.title} | ${prs} (checked ${job.pullRequestsCheckedAt ?? 'never'})`;
+/** One line about a job. The view lists at most MAX_PULL_REQUESTS PRs; the job knows how many the gateway follows, and the line says so. */
+function describeJob(job: Job, view: JobView): string {
+  const followed = job.pullRequests?.length ?? 0;
+  // At the tracking bound the count is a floor: the thread may link more than the gateway follows.
+  const count = `${followed}${followed >= MAX_TRACKED_PULL_REQUESTS ? '+' : ''}`;
+  const prs = view.pullRequests === null ? 'PRs: unknown' : view.pullRequests.length === 0 ? 'PRs: none'
+    : `PRs${followed > MAX_PULL_REQUESTS ? ` (${MAX_PULL_REQUESTS} of ${count} shown; open ones first, then the newest)` : ''}: ` +
+      view.pullRequests.map((pr) => `${pr.repository}#${pr.number} ${pr.state ?? 'unknown'} ${pr.url}`).join(', ');
+  const waiting = view.waitingOnDelegatedWork ? ', waiting on delegated work' : '';
+  return `${view.jobId} [${view.state}${view.standing ? ', standing' : ''}${waiting}] ${view.project}: ${view.title} | ${prs} (checked ${view.pullRequestsCheckedAt ?? 'never'})`;
 }
 
 export function workTools(jobs: JobService): GatewayTool[] {
@@ -348,7 +353,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       const { job, created } = await jobs.start(context, input);
       const view = jobView(job, context);
       const prefix = created ? 'Started job' : 'Already started (same requestId):';
-      return { structured: { job: view, created }, summary: `${prefix} ${describeJob(view)}. Poll work_feed or work_status for progress.` };
+      return { structured: { job: view, created }, summary: `${prefix} ${describeJob(job, view)}. Poll work_feed or work_status for progress.` };
     },
   });
 
@@ -372,7 +377,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     async run(input, context) {
       const found = jobs.list({ project: input.project, target: input.target, states: input.states, mine: input.mine, limit: input.limit ?? 20 }, context);
       const views = found.map((job) => jobView(job, context));
-      const summary = views.length === 0 ? 'No matching jobs.' : views.map(describeJob).join('\n');
+      const summary = views.length === 0 ? 'No matching jobs.' : found.map((job, i) => describeJob(job, views[i]!)).join('\n');
       return { structured: { jobs: views }, summary };
     },
   });
@@ -413,7 +418,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
         lastError: job.lastErrorCode === null ? null : { code: job.lastErrorCode, message: job.lastErrorMessage ?? '' },
         recentEvents: detail.recentEvents.map(eventView),
       };
-      const lines = [describeJob(view), STATE_MEANINGS[job.state]];
+      const lines = [describeJob(job, view), STATE_MEANINGS[job.state]];
       if (view.link) lines.push(`Open in T3: ${view.link}`);
       if (view.pendingRequests.length > 0) {
         lines.push(`Answer with work_respond using jobId ${JSON.stringify(view.jobId)}, the requestId and answers keyed by question id. ` +
@@ -481,7 +486,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       const view = jobView(job, context);
       const messages = page.messages.map(({ itemId: _itemId, ...message }) => message);
       const lines = [
-        `${describeJob(view)}: ${messages.length} worker message(s), oldest first; earlier ${page.earlier ?? 'none'}, later ${page.later ?? 'none'}` +
+        `${describeJob(job, view)}: ${messages.length} worker message(s), oldest first; earlier ${page.earlier ?? 'none'}, later ${page.later ?? 'none'}` +
           `${page.hasMore ? ', more waiting' : ''}.`,
         ...messages.map((message) => {
           const size = message.length === null ? `cut at ${message.text.length} characters` : `${message.length} characters`;
@@ -582,7 +587,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     async run(input, context) {
       const result = await jobs.continue(context, input);
       const view = jobView(result.job, context);
-      const summary = `${result.replayed ? 'Already sent (same requestId)' : 'Sent'}: ${result.delivery}. ${describeJob(view)}`;
+      const summary = `${result.replayed ? 'Already sent (same requestId)' : 'Sent'}: ${result.delivery}. ${describeJob(result.job, view)}`;
       return { structured: { job: view, delivery: result.delivery, replayed: result.replayed }, summary };
     },
   });
@@ -615,7 +620,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     async run(input, context) {
       const job = await jobs.respond(context, input);
       const view = jobView(job, context);
-      return { structured: { job: view }, summary: `Answered ${input.requestId}. ${describeJob(view)}` };
+      return { structured: { job: view }, summary: `Answered ${input.requestId}. ${describeJob(job, view)}` };
     },
   });
 
@@ -662,7 +667,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
           ? ` The worker's question is still pending (${pendingQuestions.join(', ')}): read it with work_status and answer with work_respond; ` +
             'the job stays needs_input until then.'
           : '';
-      const summary = `${summaries[result.outcome]}${pending} ${describeJob(view)}`;
+      const summary = `${summaries[result.outcome]}${pending} ${describeJob(result.job, view)}`;
       return { structured: { job: view, outcome: result.outcome, confirmed, delivered: result.delivered, pendingQuestions }, summary };
     },
   });
