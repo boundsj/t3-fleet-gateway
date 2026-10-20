@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.13 (2026-10-20)
+
+### Fixed
+
+- Job pull requests were missing for repositories with capital letters and for threads that linked more than 20 PRs, with nothing logged. T3 lists `repository` in lower case while the PR URL keeps GitHub's casing, so the URL check rejected every PR of such a repository, and one rejected entry (or a 21st) discarded the whole list, leaving the job without a snapshot or frozen at its last one. The URL's path and host are now matched without regard to case, and the URL is stored and shown exactly as T3 gave it; every other check (https only, matching host, no port, credentials, query or fragment) is unchanged. T3's list is read entry by entry: an invalid entry is skipped, a repeat of a PR counts once, a list with entries but none valid is unknown (the last snapshot stays), and an empty list is none. The `list_thread_pull_requests` call itself no longer fails on a long list or an odd entry.
+- A snapshot holds at most 20 PRs: every open PR first, then the newest (highest number). `work_status` and `work_list` say so when they show 20 and older ones may be left out. A PR that leaves or re-enters a full snapshot raises no `pull_request_opened` or `pull_request_merged` event by itself.
+
+### Compatibility
+
+- No migration, configuration or tool-shape change, and stored snapshots read back unchanged. Jobs whose snapshot was never readable and is still unknown (existing and adopted jobs) get a silent baseline on their first good read; a job launched on 0.1.12 whose lists were always rejected still holds its initial empty snapshot and reports its PRs once then (at most one `pull_request_opened` and one `pull_request_merged`).
+
 ## 0.1.12 (2026-10-20)
 
 - Follow T3-linked pull requests through cached `work_status`/`work_list` responses, with links, states and freshness for text-only clients.

@@ -1,5 +1,5 @@
 import * as z from 'zod';
-import { pullRequestsSchema } from '../jobs/pullRequests.ts';
+import { MAX_PULL_REQUESTS, pullRequestsSchema } from '../jobs/pullRequests.ts';
 import { MAX_DELEGATED_TASKS } from '../jobs/derive.ts';
 import { MAX_MESSAGE_TEXT_CHARS, MAX_MESSAGES } from '../jobs/messages.ts';
 import {
@@ -76,7 +76,12 @@ const modelSelectionInput = z
 const modelSourceSchema = z.enum(['explicit', 'project', 'host', 't3_default']);
 
 const jobSchema = z.object({
-  pullRequests: pullRequestsSchema.nullable().describe('Cached T3-linked PRs; null means unknown, [] means none. PR states can lag T3/GitHub.'),
+  pullRequests: pullRequestsSchema
+    .nullable()
+    .describe(
+      `Cached T3-linked PRs, at most ${MAX_PULL_REQUESTS}: open ones first, then the newest, so older ones may be left out. ` +
+        'null means unknown, [] means none. PR states can lag T3/GitHub.',
+    ),
   pullRequestsCheckedAt: nullableTime,
   jobId: z.string(),
   state: z.enum(JOB_STATES),
@@ -291,8 +296,10 @@ export function eventView(event: JobEvent): z.infer<typeof eventSchema> {
 }
 
 function describeJob(job: JobView): string {
+  // A full list is the bound: open PRs first, then the newest, so a thread with more links shows only part of them.
   const prs = job.pullRequests === null ? 'PRs: unknown' : job.pullRequests.length === 0 ? 'PRs: none'
-    : `PRs: ${job.pullRequests.map((pr) => `${pr.repository}#${pr.number} ${pr.state ?? 'unknown'} ${pr.url}`).join(', ')}`;
+    : `PRs${job.pullRequests.length >= MAX_PULL_REQUESTS ? ` (${MAX_PULL_REQUESTS} shown; older ones may be left out)` : ''}: ` +
+      job.pullRequests.map((pr) => `${pr.repository}#${pr.number} ${pr.state ?? 'unknown'} ${pr.url}`).join(', ');
   const waiting = job.waitingOnDelegatedWork ? ', waiting on delegated work' : '';
   return `${job.jobId} [${job.state}${job.standing ? ', standing' : ''}${waiting}] ${job.project}: ${job.title} | ${prs} (checked ${job.pullRequestsCheckedAt ?? 'never'})`;
 }
