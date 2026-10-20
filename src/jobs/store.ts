@@ -12,6 +12,10 @@ import { isTerminal, RUNNING_STATES, TERMINAL_STATES, type JobState } from './st
 import type { ResolvedWorkspace } from './workspace.ts';
 
 export interface Job {
+  /**
+   * The tracked PRs (up to MAX_TRACKED_PULL_REQUESTS, in key order), null when unknown. This is what events compare, not what
+   * anyone sees: show or send it only through `displayPullRequests` (at most MAX_PULL_REQUESTS).
+   */
   pullRequests: PullRequest[] | null;
   pullRequestsCheckedAt: number | null;
   id: string;

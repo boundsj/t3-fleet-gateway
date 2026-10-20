@@ -745,7 +745,7 @@ export class JobEngine {
       try {
         const value = Object.hasOwn(read.thread, 'pullRequests') ? read.thread.pullRequests
           : (await client.listThreadPullRequests(threadId)).pullRequests;
-        // A bounded snapshot, or null when the answer holds nothing readable: unknown, so the last snapshot and its freshness stay.
+        // The tracked list (bounded), or null when the answer holds nothing readable: unknown, so the last snapshot and its freshness stay.
         const prs = readPullRequests(value);
         if (prs !== null) {
           prChanges.pullRequests = prs;

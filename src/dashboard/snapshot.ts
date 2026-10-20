@@ -2,6 +2,7 @@ import { configuredModel, isLoopbackHostname, mcpResource, type GatewayConfig, t
 import { SCHEMA_VERSION, schemaVersion, type Database } from '../db/database.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import type { EngineStatus } from '../jobs/engine.ts';
+import { displayPullRequests } from '../jobs/pullRequests.ts';
 import { JOB_STATES, OPEN_STATES, RUNNING_STATES, TERMINAL_STATES, type JobState } from '../jobs/states.ts';
 import { OPERATOR_CLIENT_ID, type Job, type JobStore } from '../jobs/store.ts';
 import { ClientStore, isTokenClient, type ClientSummary } from '../oauth/clients.ts';
@@ -346,6 +347,7 @@ function replacementCommand(client: ClientView): string | null {
 // Jobs and events
 
 export interface JobView {
+  /** At most MAX_PULL_REQUESTS of the PRs the job follows (`displayPullRequests`): number and state only. */
   pullRequests: { number: number; state: string | null }[] | null;
   id: string;
   title: string;
@@ -374,7 +376,7 @@ function jobView(job: Job, clientLabels: Map<string, string>): JobView {
   const isOperator = job.clientId === OPERATOR_CLIENT_ID;
   return {
     id: job.id,
-    pullRequests: job.pullRequests?.map(({ number, state }) => ({ number, state })) ?? null,
+    pullRequests: job.pullRequests === null ? null : displayPullRequests(job.pullRequests).map(({ number, state }) => ({ number, state })),
     // Launched jobs' titles end with their thread marker; the id is shown on its own.
     title: clip(job.title.replace(/\s*\[job:[^\]]*\]\s*$/i, '') || job.title),
     project: job.projectAlias,

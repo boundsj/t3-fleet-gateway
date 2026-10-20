@@ -10,6 +10,7 @@ import { parseConfig } from '../src/config.ts';
 import { openServices } from '../src/gateway.ts';
 import { silentLogger } from '../src/log.ts';
 import { HOUR, MINUTE } from '../src/time.ts';
+import { MAX_PAYLOAD_BYTES } from '../src/webhooks/store.ts';
 import { testClock, type TestClock } from './helpers/clock.ts';
 import { startFakeT3, type FakeT3 } from './helpers/fakeT3.ts';
 import type { FrontDoor } from './helpers/frontDoor.ts';
@@ -900,4 +901,34 @@ test('opt-in PR webhooks deliver bounded references once, with feed sequences an
     assert.equal(event?.type, body.type);
   }
   assertNotLogged(h.gw, ['PRIVATE-PR-TITLE', 'PRIVATE-BRANCH', pr.url]);
+});
+
+test('PR webhooks carry at most twenty PRs, open ones first, from a job that follows two hundred, and stay inside the payload bound', async (t) => {
+  const sink = await receiver(t);
+  const h = await harness(t, [subscription(sink.url, { events: ['pull_request_opened', 'pull_request_merged'] })]);
+  const job = await startJob(h.agent);
+  await h.tick();
+  const { threadId } = h.fake.threadForJob(job.jobId);
+  // 205 linked PRs in a repository with a long name, #3 and #205 open and the rest merged: the job follows 200, the payload shows 20.
+  const repository = `sample/${'w'.repeat(60)}`;
+  h.fake.pullRequests.set(threadId, Array.from({ length: 205 }, (_, i) => ({
+    host: 'github.com', repository, number: i + 1, url: `https://github.com/${repository}/pull/${i + 1}`,
+    state: i + 1 === 3 || i + 1 === 205 ? 'open' : 'merged',
+  })));
+  h.gw.clock.advance(MINUTE + 1);
+  await h.tick();
+  await h.deliver();
+  const followed = h.gw.services.jobs.store.require(job.jobId).pullRequests!;
+  assert.equal(followed.length, 200);
+  const everything = JSON.stringify(followed.map(({ number, state, url }) => ({ number, state, url })));
+  assert.ok(Buffer.byteLength(everything) > MAX_PAYLOAD_BYTES, 'sending every PR the job follows would overflow the payload bound');
+  // Both events arrive: neither was dropped for size.
+  assert.deepEqual(sink.received.map((r) => r.payload.type).sort(), ['pull_request_merged', 'pull_request_opened']);
+  for (const entry of sink.received) {
+    assert.ok(Buffer.byteLength(entry.body) <= MAX_PAYLOAD_BYTES, 'inside the bound');
+    const body = JSON.parse(entry.body) as { pullRequests: { number: number; state: string; url: string }[] };
+    const newest = Array.from({ length: 18 }, (_, i) => 204 - i);
+    assert.deepEqual(body.pullRequests.map((p) => p.number), [205, 3, ...newest], 'twenty: the open ones, then the newest');
+    assert.deepEqual(Object.keys(body.pullRequests[0]!).sort(), ['number', 'state', 'url']);
+  }
 });

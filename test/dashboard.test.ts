@@ -613,6 +613,25 @@ describe('dashboard: jobs and privacy', () => {
     assert.equal(after.jobs.open.find((job) => job.id === victim.id)!.link, null);
   });
 
+  test('job PR badges show at most twenty of the PRs a job follows: open ones first, then the newest, as number and state only', async (t) => {
+    const h = await harness(t);
+    const job = await startJob(h.agent, TASK);
+    await h.tick();
+    const { threadId } = h.fake.threadForJob(job.jobId);
+    // 205 linked PRs, #3 open and the rest merged: the job follows 200, the page is given 20.
+    h.fake.pullRequests.set(threadId, Array.from({ length: 205 }, (_, i) => ({
+      host: 'github.com', repository: 'sample/widgets', number: i + 1, url: `https://github.com/sample/widgets/pull/${i + 1}`,
+      state: i === 2 ? 'open' : 'merged',
+    })));
+    h.gw.clock.advance(MINUTE + 1);
+    await h.tick();
+    assert.equal(h.gw.services.jobs.store.require(job.jobId).pullRequests?.length, 200);
+    const snap = await snapshot(h.port);
+    const view = snap.jobs.open.find((item) => item.id === job.jobId)!;
+    assert.deepEqual(view.pullRequests, [{ number: 3, state: 'open' }, ...Array.from({ length: 19 }, (_, i) => ({ number: 205 - i, state: 'merged' }))]);
+    assert.equal(JSON.stringify(snap).includes('sample/widgets'), false, 'numbers and states only');
+  });
+
   test('scratch jobs (version 2 launch specs) are listed under their alias and host beside discovered and worktree jobs, with no branch', async (t) => {
     const h = await startJobHarness(t, {
       maxConcurrentJobs: 4,

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.14 (2026-10-20)
+
+### Fixed
+
+- A merged pull request could raise no `pull_request_merged` event, and later polls never reported it. 0.1.13 kept at most 20 PRs per job and treated a snapshot of 20 as a window. A PR that opened and merged between two polls could not outrank a window of open PRs and was ignored, and a followed PR that merged on a thread with 21 or more open PRs was cut from the snapshot before it was compared. A job now follows up to 200 PRs (beyond that, open ones first, then the newest) and compares the lists in full: a PR whose state became open or merged raises its event, and so does a PR the previous list did not hold. Only a list at the 200-PR bound is treated as a window, where a PR that merely re-enters because another left still raises nothing.
+- Everything shown or sent still carries at most 20 PRs, open ones first and then the newest, listed in that order: `work_status`, `work_list`, `work_feed` and the other job views, their text summaries, PR webhook payloads (which stay inside the 16 KiB bound for ordinary links, however many PRs the job follows) and the dashboard. When a job follows more, the text says `20 of 35 shown` (`20 of 200+ shown` at the bound), and the PR an event is about may not be among those shown.
+- A PR URL must have the lowercase `/pull/` segment and a number without leading zeros. 0.1.13 compared the whole path without regard to case and accepted `https://github.com/owner/repo/PULL/23`, which GitHub answers with 404. Owner, repository and host are still compared without regard to case, and the URL is stored and shown exactly as T3 gave it.
+
+### Compatibility
+
+- No migration, configuration or tool-shape change. `jobs.pull_requests` is the same column and now holds up to 200 PRs (about 26 KB for 200 typical links); the job views keep their fields and their 20-PR bound. Rolling back to 0.1.13 reads a longer stored list back as its 20-PR window.
+- Snapshots stored by 0.1.13 held at most 20 PRs. On the first read after the upgrade, a thread that links more than 20 PRs shows its extra PRs as new to the job, so that job may raise one `pull_request_opened` and one `pull_request_merged` once. Threads with 20 or fewer PRs raise nothing.
+
 ## 0.1.13 (2026-10-20)
 
 ### Fixed
