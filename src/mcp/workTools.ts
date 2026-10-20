@@ -84,7 +84,7 @@ const jobSchema = z.object({
   projectName: z
     .string()
     .nullable()
-    .describe('The T3 project title, recorded for scratch jobs and jobs started with a target or a modelSelection; null when the stored launch plan could not be read'),
+    .describe('The T3 project title, recorded for jobs started with a discovered target or a modelSelection on a worktree alias; null for scratch jobs and when the stored launch plan could not be read'),
   source: z
     .enum(['alias', 'discovered'])
     .describe("alias: launched with a configured project's settings; discovered: into a T3 project no alias names, with the host's discovery policy"),
