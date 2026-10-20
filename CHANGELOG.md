@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.12
+## 0.1.12 (2026-10-20)
 
 - Follow T3-linked pull requests through cached `work_status`/`work_list` responses, with links, states and freshness for text-only clients.
 - Show PR number/state badges on dashboard jobs.
