@@ -154,6 +154,12 @@ describe('T3 advertised input checks', () => {
     }
   });
 
+  test('a launch schema without the root workspace strategy fails, because scratch aliases launch with it', () => {
+    const strategy = (types: string[]) => ({ type: 'object', properties: { workspaceStrategy: { type: 'object', properties: { type: { enum: types } } } } });
+    assert.deepEqual(inputCheck('t3_thread_launch', strategy(['worktree'])), { tool: 't3_thread_launch', status: 'fail', code: 'sample_input_rejected' });
+    assert.equal(inputCheck('t3_thread_launch', strategy(['worktree', 'root'])).status, 'pass');
+  });
+
   test('warns on unsupported schemas and formats without printing validator errors', (t) => {
     const warnings: unknown[] = [];
     t.mock.method(console, 'warn', (...args: unknown[]) => warnings.push(args));

@@ -207,6 +207,8 @@ const INPUT_SAMPLES: Record<(typeof REQUIRED_TOOLS)[number], Record<string, unkn
   t3_thread_launch: RUNTIME_MODE_VALUES.flatMap((runtimeMode) => [
     { ...LAUNCH, runtimeMode },
     { ...LAUNCH, runtimeMode, modelSelection: { instanceId: 'codex', model: 'synthetic-model' } },
+    // A scratch alias (`workspaceMode: "scratch"`) launches in its T3 project's own root, with no worktree or branch.
+    { ...LAUNCH, runtimeMode, workspaceStrategy: { type: 'root' } },
   ]),
   t3_thread_read: ['messages', 'activity'].flatMap((view) => [
     { threadId: THREAD_ID, view },
