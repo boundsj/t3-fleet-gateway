@@ -1,6 +1,6 @@
 # Webhook connection setup verification
 
-Verified on 2026-10-17 against implementation `30571cda98da0ee292906a17052d5741d6cb3004` (v0.1.9). All receivers, projects, credentials and jobs used here were synthetic. No production configuration or hosted bot was used.
+Verified on 2026-10-17 against implementation `30571cda98da0ee292906a17052d5741d6cb3004` (v0.1.9). All receivers, projects, credentials and jobs used here were synthetic. No real gateway configuration or hosted bot was used.
 
 ## Automated checks
 

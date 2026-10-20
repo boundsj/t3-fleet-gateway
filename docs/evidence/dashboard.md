@@ -13,11 +13,11 @@ The independent review found and the implementation corrected:
 - Failed gateway checks must remain visible on Overview, including a public ingress mistakenly routed to the dashboard.
 - Host checks need an absolute deadline even when joining another caller's MCP initialization; timing out the dashboard must leave the shared operation intact.
 
-Regression tests reproduce these cases. No production token was minted, rotated or revoked to exercise them.
+Regression tests reproduce these cases. No real token was minted, rotated or revoked to exercise them.
 
 ## Browser checks
 
-The orchestrator drove the running `mixed` demo through the T3 collaborative browser, including **Run checks**, view navigation and light/dark appearances. A phone layout defect found in the first implementation was corrected with reflow rather than clipping.
+The running `mixed` demo was driven in a browser, including **Run checks**, view navigation and light/dark appearances. A phone layout defect found in the first implementation was corrected with reflow rather than clipping.
 
 | View | Before, 375 px | After, 320 / 375 / 728 / 1280 px |
 | --- | --- | --- |
@@ -31,13 +31,13 @@ The corrected implementation also checked long unbroken labels and all three job
 
 ## Private-proxy smoke
 
-A separate synthetic fleet was briefly mounted under its own tailnet HTTPS path. From a browser, the page loaded, the same-origin snapshot returned 200, and the manual check POST returned 200 with all 13 checks passing. The proxy's Host/Origin behavior worked with an explicit allowed host. That temporary route and fleet were removed afterward. Existing proxy paths and the production MCP ingress were retained.
+A separate synthetic fleet was briefly mounted under its own tailnet HTTPS path. From a browser, the page loaded, the same-origin snapshot returned 200, and the manual check POST returned 200 with all 13 checks passing. The proxy's Host/Origin behavior worked with an explicit allowed host. That temporary route and fleet were removed afterward.
 
 This smoke used fake T3 hosts and synthetic credentials. It does not claim a new hosted Grok, Muse or Notion connector qualification.
 
 ## README image
 
-[The showcase](../images/dashboard.png) contains real desktop-light and phone-dark screenshots of the working dashboard demo, composed by the requested Opus design pass. Hosts, projects and activity are fictional; Grok Bot, Muse and Notion are demo clients. The image is 2080 × 1760 pixels, contains no text/EXIF metadata, and includes a visible sample-data label. It is not a screenshot of the production fleet.
+[The showcase](../images/dashboard.png) contains real desktop-light and phone-dark screenshots of the working dashboard demo, composed into one image. Hosts, projects and activity are fictional; Grok Bot, Muse and Notion are demo clients. The image is 2080 × 1760 pixels, contains no text/EXIF metadata, and includes a visible sample-data label. It is not a screenshot of a real fleet.
 
 ## Operational limits
 

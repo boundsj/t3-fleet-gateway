@@ -30,7 +30,7 @@
 - Follow T3-linked pull requests through cached `work_status`/`work_list` responses, with links, states and freshness for text-only clients.
 - Show PR number/state badges on dashboard jobs.
 - Add opt-in PR opened/merged feed and webhook events, atomically captured with snapshots and preserved across restart. Existing webhook defaults stay unchanged.
-- Keep optional PR lookup failures separate from host health; bound reads and retain last good data. Migration 13 adds nullable PR cache columns. No production deployment or live hosted-client qualification is claimed.
+- Keep optional PR lookup failures separate from host health; bound reads and retain last good data. Migration 13 adds nullable PR cache columns. No live hosted-client qualification is claimed.
 
 
 ## 0.1.11 (2026-10-20)
@@ -92,7 +92,7 @@
 
 - The dashboard's private network boundary now permits webhook destination management. It remains separate from the MCP/OAuth listener; job, host and client controls are unchanged. Management requests require JSON, the custom API header, an exact request-host Origin and same-origin fetch metadata when present. Errors and audit records contain fixed codes only; no saved URL, header, response body or credential is exposed, and the browser stores no secrets.
 - Connection creation and replacement use the same bounded TLS-validating POST transport as delivery. A failed test preserves the existing route. Successful changes recheck the revision after the awaited test and cancel pending old-route payloads; disconnect cannot be undone by a slow test. Writes are refused before readiness and after shutdown begins; shutdown aborts and drains management pings before closing SQLite.
-- No live Grok receiver or production deployment qualification is claimed by this implementation's synthetic tests.
+- No live Grok receiver or deployment qualification is claimed by this implementation's synthetic tests.
 
 ## 0.1.8 (2026-10-16)
 
@@ -118,7 +118,7 @@
 
 ### Fixed
 
-- The configured non-mutating `mintPairingCodeProbe` has a ten-second deadline instead of two. The deployed macOS service runs as a launchd agent with `ProcessType` Background, which schedules its children at a lower priority: the configured T3 version probe, which answers in about half a second in the foreground, was measured at just over two seconds there, so startup logged `probe_timeout` while foreground `doctor` passed ([evidence](docs/evidence/startup-probe.md)). Output budgets, the exact configured argv, executable resolution, startup independence, abort on shutdown and the non-mutating-only rule are unchanged; a hung probe can now hold the first renewal pass or a `doctor` host check for up to ten seconds. No launchd template or configuration change.
+- The configured non-mutating `mintPairingCodeProbe` has a ten-second deadline instead of two. A macOS service run as a launchd agent with `ProcessType` Background has its children scheduled at a lower priority: the configured T3 version probe, which answers in well under a second in the foreground, took over two seconds there on a test machine, so startup logged `probe_timeout` while foreground `doctor` passed ([evidence](docs/evidence/startup-probe.md)). Output budgets, the exact configured argv, executable resolution, startup independence, abort on shutdown and the non-mutating-only rule are unchanged; a hung probe can now hold the first renewal pass or a `doctor` host check for up to ten seconds. No launchd template or configuration change.
 
 ### Added
 
@@ -130,7 +130,7 @@
 ### Compatibility
 
 - No change for existing configurations: discovery is off unless `hosts[].discovery.enabled` is set, and the host must separately set `discovery.allowWorkStart` before any launch into an unconfigured project. Existing grants, aliases, defaults, request ids and queued jobs behave as before. Migration 8 adds one nullable column.
-- Covered by synthetic two-host tests (`test/discovery.test.ts`): opt-out, same-named projects on two hosts, restricted and read-only grants, an unavailable host, browse-only hosts, alias bypass attempts, selections and defaults, idempotency, restart, pre-dispatch failures, lost launches, paging, cache, cursor identity across a restart, strict selection input, title renames after browsing and privacy. A bounded isolated smoke against one fresh QA-only T3 instance passed 28 of 28 checks at both the initial head and the implementation with review fixes ([docs/evidence/discovery.md](docs/evidence/discovery.md)). That is not a live fleet, production or hosted-connector (Grok, Notion) qualification.
+- Covered by synthetic two-host tests (`test/discovery.test.ts`): opt-out, same-named projects on two hosts, restricted and read-only grants, an unavailable host, browse-only hosts, alias bypass attempts, selections and defaults, idempotency, restart, pre-dispatch failures, lost launches, paging, cache, cursor identity across a restart, strict selection input, title renames after browsing and privacy. A bounded isolated smoke against one fresh QA-only T3 instance passed 28 of 28 checks at both the initial head and the implementation with review fixes ([docs/evidence/discovery.md](docs/evidence/discovery.md)). That is not a live fleet or hosted-connector (Grok, Notion) qualification.
 
 ## 0.1.6 (2026-10-15)
 
@@ -145,7 +145,7 @@ No database migration or configuration change.
 
 ### Added
 
-- Per-machine authorization. The approval page offers All machines (the fleet scopes: every host, including hosts added later) or Selected machines (`host:<id>:read` / `host:<id>:operate` for the ticked hosts only), and `clients token --hosts mini,macbook` (or `--hosts all`, the default) does the same for bearer tokens. Every tool enforces the hosts: `fleet_status`, `work_list`, `work_feed` events and attention show only permitted hosts (filtered before limits); direct job tools answer a job elsewhere as an unknown id, and `work_start` checks both the project's host and the host of a replayed request's job. Empty, malformed or unknown selections are refused before an approval code is spent or a token is stored. A refused approval page, including after a wrong approval code, is shown again with the machines and access the operator chose, never the request's defaults.
+- Per-machine authorization. The approval page offers All machines (the fleet scopes: every host, including hosts added later) or Selected machines (`host:<id>:read` / `host:<id>:operate` for the ticked hosts only), and `clients token --hosts main,studio` (or `--hosts all`, the default) does the same for bearer tokens. Every tool enforces the hosts: `fleet_status`, `work_list`, `work_feed` events and attention show only permitted hosts (filtered before limits); direct job tools answer a job elsewhere as an unknown id, and `work_start` checks both the project's host and the host of a replayed request's job. Empty, malformed or unknown selections are refused before an approval code is spent or a token is stored. A refused approval page, including after a wrong approval code, is shown again with the machines and access the operator chose, never the request's defaults.
 - `clients list` and `clients diagnose` show granted access per host.
 
 ### Compatibility
@@ -159,14 +159,14 @@ Covered by synthetic two-host tests through the public OAuth, MCP and CLI interf
 
 ### Fixed
 
-- T3FG-11, found during T3FG-3 supervised live QA: accept T3-owned opaque pending request IDs unchanged in `work_respond` and targeted `work_status`. Real Codex IDs exceed the previous 200-character limit. Job/request membership, non-empty validation and the separate question-id, answer-size and idempotency-key limits remain enforced. Public text-only regressions reproduce both failures before the fix; the original real question resumes successfully after it.
+- Found in live testing: accept T3-owned opaque pending request IDs unchanged in `work_respond` and targeted `work_status`. Real Codex IDs exceed the previous 200-character limit. Job/request membership, non-empty validation and the separate question-id, answer-size and idempotency-key limits remain enforced. Public text-only regressions reproduce both failures before the fix; the original real question resumes successfully after it.
 
-- T3FG-12: a transient T3 `waiting` status with zero pending requests no longer invents a permission approval. Actual questions and positive pending counts still produce `needs_input`. The native sample predates this state-rule fix; its synthetic regression fails before the fix and passes after it, and real v0.1.4 question resumption after the fix showed no false approval. Subsequent operator approval retests completed on both isolated and production v0.1.4 gateways, with exact scratch markers and cleared approval flags.
+- A transient T3 `waiting` status with zero pending requests no longer invents a permission approval. Actual questions and positive pending counts still produce `needs_input`. The native sample predates this state-rule fix; its synthetic regression fails before the fix and passes after it, and real v0.1.4 question resumption after the fix showed no false approval. Operator permission-approval retests completed afterward, with exact scratch markers and cleared approval flags.
 
 ### Changed
 
 - Restore the prepared expanded opt-in lifecycle script: tool discovery, `work_list`, full `work_messages` reads and explicit successful-tool coverage. An explicit scratch project alias is required.
-- Document the supervised run from the v0.1.3 baseline through the fix builds and the authorized v0.1.4 deployment: lifecycle, isolated runtime failure, standing-job reuse, delegated child/parent resumption, SDK outage recovery and a lost start response. v0.1.4 question, lifecycle and operator approval retests passed; a direct HTTP client using only content text passed the isolated question/messages/feed check, and Grok Bot confirmed reading the production question/options as plain text and answering with the full 228-character request ID through its connector registered as Cursor. Owned QA jobs and temporary runtime/access were cleaned up; original production settings were restored and doctor passed. An actual Notion Custom Agent's existing MCP connection passed a production v0.1.3 fleet check; T3FG-3 is complete under the agreed shared-contract/connectivity scope. A separate Notion job workflow and hosted-client recovery remain optional, unrun coverage.
+- Document the verified behavior from live testing (lifecycle, isolated runtime failure, standing-job reuse, delegated child/parent resumption, SDK outage recovery and a lost start response) in docs/operations.md, "Verified behavior". v0.1.4 question, lifecycle and permission-approval retests passed; a direct HTTP client using only content text passed the isolated question/messages/feed check, and Grok Bot read a real question and its options as plain text and answered with the full request ID (over 200 characters). A separate Notion job workflow and hosted-client recovery remain unrun.
 
 All notable changes are recorded here. The project follows [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
@@ -174,7 +174,7 @@ All notable changes are recorded here. The project follows [Semantic Versioning]
 
 ### Added
 
-- T3FG-5: offline `clients diagnose <id>` reports OAuth versus static bearer clients, usable access/refresh grants, expiry ranges, rotation/grace/supersession/replay states, and each family's revocation reason. Aggregate usability considers every family, while explicitly leaving operator/cloud route reachability and the connector's saved token unknown.
+- Offline `clients diagnose <id>` reports OAuth versus static bearer clients, usable access/refresh grants, expiry ranges, rotation/grace/supersession/replay states, and each family's revocation reason. Aggregate usability considers every family, while explicitly leaving operator/cloud route reachability and the connector's saved token unknown.
 - Separate successful MCP and refresh timestamps (append-only migration 7). Old mixed last-use data remains intact; new times start unknown. Completed authorized MCP HTTP 2xx exchanges are sampled once per minute; successful refresh pair issuance, including grace retries, is recorded transactionally on every success.
 - Synthetic SDK outage recovery regression: saved credentials and feed cursor survive ingress loss across access expiry, automatically refresh on reconnection, and resume without duplicate events or work. This recovery already passed on the pinned v0.1.2 implementation; the new diagnostic CLI was missing there.
 - Recovery instructions distinguish ingress, gateway authentication, downstream T3 credentials, and disabled connector routines. Installed SDK retry limits are documented; real Grok and Notion retry behavior remains unverified.
@@ -183,25 +183,25 @@ All notable changes are recorded here. The project follows [Semantic Versioning]
 
 - `clients list` labels OAuth families as `unrevoked` rather than inferring active authentication from their count; use `diagnose` for grant usability.
 
-T3FG-1 remains blocked on the monitoring decision. T3FG-3/full live QA remains deferred; no new live verification, deployment, or publishing is claimed.
+No new live verification, deployment, or publishing is claimed.
 
 ## 0.1.2 (2026-10-12)
 
 ### Fixed
 
-- T3FG-2: `work_status` text now includes pending request and question ids, headers, question text, every option label/description/value, selection rules and answer constraints. Clients that consume only MCP text can answer with `work_respond`. `allowCustomAnswer`, `required` and `multiSelect` preserve true/false, with null for null or absent T3 flags. Unreadable questions remain explicitly temporarily unreadable.
+- `work_status` text now includes pending request and question ids, headers, question text, every option label/description/value, selection rules and answer constraints. Clients that consume only MCP text can answer with `work_respond`. `allowCustomAnswer`, `required` and `multiSelect` preserve true/false, with null for null or absent T3 flags. Unreadable questions remain explicitly temporarily unreadable.
 - Pending questions are bounded without partial actionable data: at most five requests read by default; `pendingRequestId` selects another. A request exceeding 50 questions, 100 options per question or 64,000 JSON characters returns `questions: null` and `questionsUnavailable: "too_large"`, directing the operator to T3. `read_limit` and `temporarily_unreadable` explain other null results. `work_cancel` text points to `work_status` before answering a still-pending question.
 - Unspecified question flags retain honest nulls while text provides an answer path: follow explicit wording, and without instructions to select several try a single listed value as a conservative attempt. T3 validation remains authoritative; omitted/null flags alone do not require escalation.
 - Automatic renewal starts after all startup preflight checks settle, including an unexpected rejection, unless shutdown has begun. Rejections produce fixed diagnostics; logger errors still propagate and known executable failures still gate each host's renewal.
 - Probe cancellation explicitly force-kills the direct child, including probes that ignore SIGTERM on Node 26.0. Startup preflight never initiates or awaits health reads, so stalled MCP initialization cannot delay shutdown through preflight; doctor still compares fresh health.
-- T3FG-4: `doctor` and `serve` startup preflight the mint executable in their own process environment, diagnose missing/non-executable commands and version-pinned paths, and distinguish known failure from unverified checks. Known executable failures stop automatic renewal before pairing registration while retaining the old credential.
+- `doctor` and `serve` startup preflight the mint executable in their own process environment, diagnose missing/non-executable commands and version-pinned paths, and distinguish known failure from unverified checks. Known executable failures stop automatic renewal before pairing registration while retaining the old credential.
 
 ### Added
 
 - Optional `hosts[].mintPairingCodeProbe`: exact argv for an explicitly operator-configured non-mutating probe. No mint command or guessed `--version` is executed as preflight. Probes time out after two seconds, cap stdout/stderr at 4,096 bytes each, and are aborted on shutdown without being awaited. A bare version, exact native `t3 v<semver>` output or JSON `{"version":"x.y.z"}` enables comparison with the T3 server; disagreement is a warning, not an incompatibility verdict.
 - Synthetic public MCP and CLI regressions, question-limit/nullable-flag coverage, PATH/probe/startup/shutdown checks and logging/event leakage checks. Command diagnostics contain no raw stdout/stderr, argv or executable paths; enrollment no longer echoes command argv.
 
-No database migration. This release covers T3FG-2 and T3FG-4 only. T3FG-1 remains blocked on the monitoring decision; T3FG-3/full live QA remains deferred until the operator is available. No new live QA is claimed.
+No database migration. No new live QA is claimed.
 
 ## 0.1.1 (2026-10-09)
 
@@ -249,7 +249,7 @@ No database migration. This release covers T3FG-2 and T3FG-4 only. T3FG-1 remain
 - Delegated work (`waitingOnDelegatedWork`, `delegatedTasks`) was never detected against a real T3: the watcher looked for `subagent` items in thread reads that named no view, and T3's default `messages` view returns only user and assistant messages and plans. The watcher now reads T3's `activity` view for delegated work, with a read position of its own (schema migration 4 adds `jobs.activity_position`) and one character per item, while replies, the excerpt and the job's state still come from the messages view, so a coordinator's reasoning and tool activity never delays them. Adoption starts the activity position at the thread's current end and finds delegated work still running with a bounded scan back from the last message; a standing job adopted before this update is scanned the same way on its first check. Every job, launched ones too, is checked for delegated work. Every thread read now names its view, and the test fake models both views.
 - A pending item in a thread's timeline (a command still running, or a coordinator's delegated work, which stays pending for as long as the child works) held the watcher's read position back and hid every later message from the excerpt. Only a worker message still being written holds the position now, and the excerpt is the newest settled worker message read.
 - Migration 2 failed on a version 1 database created by an early build of migration 1 (no `state_changed_at` or `t3_thread_link`, or a text `read_position`). It now copies the columns the table actually has, fills `state_changed_at` from `updated_at`, leaves `t3_thread_link` empty and converts `read_position` to an integer (empty when it is not a number). A failed migration, including a database locked by another process (`SQLITE_BUSY`), is now reported as `database_error` naming the migration, instead of a raw SQLite error.
-- Approving in Chrome could leave the operator on the approval page: the form answered with a redirect to the client's callback, and Chrome applies the page's `form-action` to every redirect after a submission, so a callback that redirected on to another origin (as Cursor's does for Grok Bot) was blocked silently. Pressing Approve again then failed with "approval code was not accepted". The form now answers with a small page that navigates to the callback (meta refresh, plus a Continue link), for approvals, denials and request errors alike; `form-action` is `'self'` only. Submitting an approved form again shows the same authorization response while its code is unused and unexpired (no new code, no approval code spent, no failed attempt counted), and afterwards says the request was already approved.
+- Approving in Chrome could leave the operator on the approval page: the form answered with a redirect to the client's callback, and Chrome applies the page's `form-action` to every redirect after a submission, so a callback that redirected on to another origin (as hosted clients' callbacks can) was blocked silently. Pressing Approve again then failed with "approval code was not accepted". The form now answers with a small page that navigates to the callback (meta refresh, plus a Continue link), for approvals, denials and request errors alike; `form-action` is `'self'` only. Submitting an approved form again shows the same authorization response while its code is unused and unexpired (no new code, no approval code spent, no failed attempt counted), and afterwards says the request was already approved.
 - The CLI crashed with an unhandled `EPIPE` when its reader closed early (`t3-fleet-gateway pair | head -1`). Output to a closed pipe is now dropped and the command finishes with its own exit code; other stdout and stderr errors still fail it.
 - `deploy/launchd/install.sh` could leave the service unloaded when reinstalling: `launchctl bootout` returns before launchd has removed the agent, and the immediate `bootstrap` failed with `Bootstrap failed: 5: Input/output error`. The installer now waits (up to 10 seconds) until the agent is gone and retries the bootstrap once; `--uninstall` waits too.
 - The CLI silently ignored `--title`, `--all` and `--ttl` on commands that do not take them; they are now usage errors (exit 2) outside `jobs adopt`, `jobs list` and `pair` respectively.

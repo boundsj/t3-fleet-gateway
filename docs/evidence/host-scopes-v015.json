@@ -1,38 +1,38 @@
 {
   "sourceHead": "62b36b4c2a117f0cf69c23573f06b49943d011c2",
   "gatewayVersion": "0.1.5",
-  "fixture": "two synthetic T3 hosts; not the real M3",
+  "fixture": "two synthetic T3 hosts (host A and host B); no real machine",
   "results": [
     {
-      "check": "Selected client sees only mini",
+      "check": "Selected client sees only host A",
       "passed": true
     },
     {
-      "check": "Selected job list excludes MacBook",
+      "check": "Selected job list excludes host B",
       "passed": true
     },
     {
-      "check": "work_status blocks MacBook access",
+      "check": "work_status blocks host B access",
       "passed": true
     },
     {
-      "check": "work_messages blocks MacBook access",
+      "check": "work_messages blocks host B access",
       "passed": true
     },
     {
-      "check": "work_continue blocks MacBook access",
+      "check": "work_continue blocks host B access",
       "passed": true
     },
     {
-      "check": "work_respond blocks MacBook access",
+      "check": "work_respond blocks host B access",
       "passed": true
     },
     {
-      "check": "work_cancel blocks MacBook access",
+      "check": "work_cancel blocks host B access",
       "passed": true
     },
     {
-      "check": "work_start blocks MacBook access",
+      "check": "work_start blocks host B access",
       "passed": true
     },
     {
@@ -55,7 +55,7 @@
       "passed": true
     },
     {
-      "check": "Feed and attention exclude MacBook",
+      "check": "Feed and attention exclude host B",
       "passed": true
     },
     {
@@ -79,7 +79,7 @@
       "passed": true
     },
     {
-      "check": "Refreshed client remains mini-only",
+      "check": "Refreshed client remains host-A-only",
       "passed": true
     },
     {
@@ -96,7 +96,7 @@
     "access": "read",
     "hostsMode": "selected",
     "selectedHosts": [
-      "mini"
+      "host-a"
     ],
     "noHorizontalOverflow": true
   },
@@ -106,7 +106,7 @@
     "access": "read",
     "hostsMode": "selected",
     "selectedHosts": [
-      "mini"
+      "host-a"
     ]
   }
 }
