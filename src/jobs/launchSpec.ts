@@ -51,12 +51,25 @@ const launchSpecSchema = z.union([
 
 export type LaunchSpec = z.infer<typeof launchSpecSchema>;
 
-export function parseLaunchSpec(text: string | null): LaunchSpec | null {
-  if (text === null) return null;
+/**
+ * What `jobs.launch_spec` holds, as this build reads it: nothing (an alias job, launched from the configuration), a spec it
+ * understands, or a record it cannot read (damaged, or written by a build that knows more).
+ */
+export type StoredLaunchSpec = { kind: 'none' } | { kind: 'spec'; spec: LaunchSpec } | { kind: 'unreadable' };
+
+/**
+ * Read the stored text of one job's launch spec. Never throws, and never reports an unreadable record as nothing:
+ * "nothing" dispatches the job from the configuration as a worktree job, which for a scratch job (or one started with a
+ * model selection) is the wrong launch. Nor does an unreadable record fail the read: one bad row must not stop the
+ * reads of every other job. The text, and what is wrong with it, are not kept: they may hold anything.
+ */
+export function readLaunchSpec(text: string | null): StoredLaunchSpec {
+  if (text === null) return { kind: 'none' };
   try {
-    return launchSpecSchema.parse(JSON.parse(text));
+    const parsed = launchSpecSchema.safeParse(JSON.parse(text));
+    return parsed.success ? { kind: 'spec', spec: parsed.data } : { kind: 'unreadable' };
   } catch {
-    throw new GatewayError('database_error', 'The job has an unsupported or malformed launch spec. Upgrade or repair the ledger before dispatching.');
+    return { kind: 'unreadable' };
   }
 }
 

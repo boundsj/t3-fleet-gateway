@@ -18,6 +18,7 @@ import {
 import { JOB_STATES, STATE_MEANINGS } from '../jobs/states.ts';
 import { MAX_SELECTION_CHARS, MAX_SELECTION_ID_CHARS, MAX_SELECTION_OPTIONS } from '../jobs/launchSpec.ts';
 import type { FeedEvent, Job, JobEvent } from '../jobs/store.ts';
+import { parseProjectRef } from '../jobs/targets.ts';
 import { OPERATE_SCOPE, READ_SCOPE } from '../oauth/scopes.ts';
 import { HOUR, isoTime } from '../time.ts';
 import { defineTool, type GatewayTool, type ToolContext } from './tools.ts';
@@ -80,7 +81,10 @@ const jobSchema = z.object({
     .describe('The configured project alias, or for a job targeted by T3 project id without one, the internal ref @<host>/<projectId>'),
   host: z.string(),
   projectId: z.string().nullable().describe('The T3 project id: known from the start for targeted jobs, from dispatch for alias jobs'),
-  projectName: z.string().nullable().describe('The T3 project title, recorded for scratch jobs and jobs started with a target or a modelSelection'),
+  projectName: z
+    .string()
+    .nullable()
+    .describe('The T3 project title, recorded for scratch jobs and jobs started with a target or a modelSelection; null when the stored launch plan could not be read'),
   source: z
     .enum(['alias', 'discovered'])
     .describe("alias: launched with a configured project's settings; discovered: into a T3 project no alias names, with the host's discovery policy"),
@@ -90,11 +94,20 @@ const jobSchema = z.object({
       selection: z.record(z.string(), z.unknown()).nullable().describe('The exact modelSelection sent to T3; null when T3 chose'),
     })
     .nullable()
-    .describe('Recorded for scratch, targeted or explicitly selected jobs; null for alias-only worktree jobs, whose model comes from the config at dispatch'),
+    .describe(
+      'Recorded for scratch, targeted or explicitly selected jobs; null for alias-only worktree jobs, whose model comes from the config at dispatch, ' +
+        'and when the stored launch plan could not be read',
+    ),
   title: z
     .string()
     .describe("The T3 thread title; a launched job's ends with the marker [job:<jobId>], a standing job's is the title the operator gave it"),
-  workspaceMode: z.enum(['scratch', 'worktree']).nullable().describe('scratch for T3 internal scratch; worktree for project work; null for adopted standing threads'),
+  workspaceMode: z
+    .enum(['scratch', 'worktree'])
+    .nullable()
+    .describe(
+      'scratch for T3 internal scratch; worktree for project work; null when unknown: an adopted standing thread, or a job whose stored launch plan ' +
+        'could not be read (a queued one then fails with database_error and is never launched; one with a thread carries on)',
+    ),
   branch: z.string().describe("The git branch of the job worktree; empty for scratch (a standing job: its thread's branch, or empty)"),
   standing: z
     .boolean()
@@ -217,6 +230,8 @@ export type JobView = z.infer<typeof jobSchema>;
 export type JobDetailView = z.infer<typeof jobDetailSchema>;
 
 export function jobView(job: Job, context: ToolContext): JobView {
+  // A launch plan the gateway could not read leaves no spec: what only the spec said (project name, model, workspace) is left out,
+  // and the workspace is unknown rather than assumed to be a worktree.
   const spec = job.launchSpec;
   return {
     jobId: job.id,
@@ -225,10 +240,10 @@ export function jobView(job: Job, context: ToolContext): JobView {
     host: job.hostId,
     projectId: job.t3ProjectId,
     projectName: spec?.projectName ?? null,
-    source: spec?.source ?? 'alias',
+    source: spec?.source ?? (parseProjectRef(job.projectAlias) ? 'discovered' : 'alias'),
     model: spec ? { source: spec.model.source, selection: spec.model.selection } : null,
     title: job.title,
-    workspaceMode: job.standing ? null : spec?.v === 2 ? spec.workspace.kind : 'worktree',
+    workspaceMode: job.standing || job.launchSpecUnreadable ? null : spec?.v === 2 ? spec.workspace.kind : 'worktree',
     branch: job.branch,
     standing: job.standing,
     waitingOnDelegatedWork: job.delegatedWork.length > 0 || job.delegatedUntracked > 0,

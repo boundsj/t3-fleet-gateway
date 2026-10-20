@@ -406,7 +406,9 @@ describe('host grants: work tools on two hosts', () => {
       for (const [tool, args] of denied) {
         assert.equal((await agent.callError(tool, args)).text, unknownJob(hidden.jobId), tool);
       }
-      assert.equal((await trusted.callError('work_status', { jobId: hidden.jobId })).code, 'database_error');
+      // A caller who may see the job reads it: a bad launch plan costs it what only the plan said, not the read.
+      const seen = await trusted.call<{ jobId: string; host: string; workspaceMode: string | null }>('work_status', { jobId: hidden.jobId });
+      assert.deepEqual([seen.jobId, seen.host, seen.workspaceMode], [hidden.jobId, 'macbook', null]);
     }
     assert.deepEqual([mini.calls.length, macbook.calls.length], calls);
   });

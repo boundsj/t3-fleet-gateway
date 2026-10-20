@@ -4,7 +4,7 @@ import type { Logger } from '../log.ts';
 import type { Clock } from '../time.ts';
 import { WebhookStore } from '../webhooks/store.ts';
 import type { DelegatedTask } from './derive.ts';
-import { parseLaunchSpec, type LaunchSpec } from './launchSpec.ts';
+import { readLaunchSpec, type LaunchSpec } from './launchSpec.ts';
 import { isTerminal, RUNNING_STATES, TERMINAL_STATES, type JobState } from './states.ts';
 
 export interface Job {
@@ -74,11 +74,16 @@ export interface Job {
    * was created (migration 8; `src/jobs/launchSpec.ts`): the dispatcher launches from it. Version 1 is a worktree
    * launch (project id, base ref, runtime mode, model); version 2 adds the host id, the host default binding and
    * a discriminated workspace, `scratch` (T3's internal scratch project, no branch) or `worktree`, and is why
-   * migration 11 exists. Null for alias-only worktree jobs, which dispatch from the config as before. A stored
-   * spec that is malformed or of a version this build does not know is a `database_error` when the job is read,
-   * never null: a scratch job read as "no spec" would be launched in a worktree.
+   * migration 11 exists. Null for alias-only worktree jobs, which dispatch from the config as before, and also
+   * when the stored record cannot be read: check `launchSpecUnreadable` before taking null to mean "alias job".
    */
   launchSpec: LaunchSpec | null;
+  /**
+   * The stored launch spec could not be read (damaged, or written by a build that knows more), so `launchSpec` is
+   * null without the job being an alias job. Such a job is never launched: the dispatcher fails it. One that
+   * already has a thread is followed as usual, and views leave out what only the spec said. Reading it never fails.
+   */
+  launchSpecUnreadable: boolean;
 }
 
 /** The client id recorded on standing jobs: the operator adopted them, no agent started them. Real client ids are longer. */
@@ -265,6 +270,7 @@ function parseDelegated(text: string): DelegatedTask[] {
 }
 
 function toJob(row: JobRow): Job {
+  const stored = readLaunchSpec(row.launch_spec);
   return {
     id: row.id,
     clientId: row.client_id,
@@ -300,7 +306,8 @@ function toJob(row: JobRow): Job {
     delegatedUntracked: row.delegated_untracked,
     delegatedUntrackedRunId: row.delegated_untracked_run_id,
     delegatedEndedAt: row.delegated_ended_at,
-    launchSpec: parseLaunchSpec(row.launch_spec),
+    launchSpec: stored.kind === 'spec' ? stored.spec : null,
+    launchSpecUnreadable: stored.kind === 'unreadable',
   };
 }
 
@@ -408,6 +415,8 @@ export class JobStore {
   readonly #clock: Clock;
   readonly #logger: Logger;
   readonly #webhooks: WebhookStore;
+  /** Jobs whose unreadable launch spec this process has already reported: once per job, not once per read. */
+  readonly #reportedUnreadable = new Set<string>();
 
   constructor(db: Database, clock: Clock, logger: Logger) {
     this.#db = db;
@@ -416,10 +425,20 @@ export class JobStore {
     this.#webhooks = new WebhookStore(db, clock);
   }
 
+  /** A job from its row. A launch spec that cannot be read is flagged on the job and reported (ids and state only, never the text). */
+  readonly #job = (row: JobRow): Job => {
+    const job = toJob(row);
+    if (job.launchSpecUnreadable && !this.#reportedUnreadable.has(job.id)) {
+      this.#reportedUnreadable.add(job.id);
+      this.#logger.warn('job.launch_spec_unreadable', { jobId: job.id, hostId: job.hostId, state: job.state });
+    }
+    return job;
+  };
+
   get(id: string, scope: JobScope = {}): Job | undefined {
     const filter = scopeClause(scope);
     const row = this.#db.prepare(`SELECT * FROM jobs WHERE id = ? ${filter.sql}`).get(id, ...filter.params) as JobRow | undefined;
-    return row && toJob(row);
+    return row && this.#job(row);
   }
 
   require(id: string): Job {
@@ -444,7 +463,7 @@ export class JobStore {
     const rows = this.#db
       .prepare(`SELECT * FROM jobs WHERE ${where.join(' AND ')} ${scope.sql} ORDER BY created_at DESC, rowid DESC LIMIT ?`)
       .all(...params, ...scope.params, filter.limit) as unknown as JobRow[];
-    return rows.map(toJob);
+    return rows.map(this.#job);
   }
 
   /** Jobs on a host in the given states, oldest first. */
@@ -452,7 +471,7 @@ export class JobStore {
     const rows = this.#db
       .prepare(`SELECT * FROM jobs WHERE host_id = ? AND state IN (${states.map(() => '?').join(', ')}) ORDER BY created_at, rowid`)
       .all(hostId, ...states) as unknown as JobRow[];
-    return rows.map(toJob);
+    return rows.map(this.#job);
   }
 
   /** Queued jobs on a host in FIFO order. */
@@ -460,7 +479,7 @@ export class JobStore {
     const rows = this.#db
       .prepare("SELECT * FROM jobs WHERE host_id = ? AND state = 'queued' ORDER BY created_at, rowid LIMIT ?")
       .all(hostId, limit) as unknown as JobRow[];
-    return rows.map(toJob);
+    return rows.map(this.#job);
   }
 
   /** Jobs holding one of the host's concurrency slots. Standing jobs never do. */
@@ -487,7 +506,7 @@ export class JobStore {
     const row = this.#db
       .prepare(`SELECT * FROM jobs WHERE t3_thread_id = ? AND state NOT IN (${NOT_OPEN}) ORDER BY created_at, rowid LIMIT 1`)
       .get(threadId, ...TERMINAL_STATES) as JobRow | undefined;
-    return row && toJob(row);
+    return row && this.#job(row);
   }
 
   /** Open standing jobs, oldest first; all of them, or one project's. */
@@ -496,7 +515,7 @@ export class JobStore {
     const rows = this.#db
       .prepare(`SELECT * FROM jobs WHERE standing = 1 AND state NOT IN (${NOT_OPEN}) ${project} ORDER BY created_at, rowid`)
       .all(...TERMINAL_STATES, ...(projectAlias === undefined ? [] : [projectAlias])) as unknown as JobRow[];
-    return rows.map(toJob);
+    return rows.map(this.#job);
   }
 
   /**
@@ -732,7 +751,7 @@ export class JobStore {
           ORDER BY MAX(state_changed_at, COALESCE(delegated_ended_at, 0)) DESC, rowid DESC LIMIT ?`,
       )
       .all(since, since, ...filter.params, limit) as unknown as JobRow[];
-    return rows.map(toJob);
+    return rows.map(this.#job);
   }
 
   idempotencyKey(clientId: string, tool: IdempotentTool, requestId: string): IdempotencyKey | undefined {

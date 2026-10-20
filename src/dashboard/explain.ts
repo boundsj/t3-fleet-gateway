@@ -46,6 +46,7 @@ const JOB_ERRORS: Record<string, string> = {
   launch_policy_changed: 'The project\'s launch policy changed while the job was queued, so it was not launched.',
   project_not_configured: 'The job\'s project alias is no longer in the configuration.',
   project_not_found: 'The job\'s T3 project no longer exists.',
+  database_error: 'The job\'s stored launch plan could not be read, so it was not launched. Start the work again.',
   host_unreachable: 'The host could not be reached while following this job; it keeps its state.',
   t3_invalid_response: 'T3 answered in an unexpected shape while following this job.',
 };

@@ -25,6 +25,10 @@ const IDLE_POLL_MS = MINUTE;
 const MAX_READ_PAGES = 5;
 const READ_PAGE_SIZE = 100;
 const RECENT_RUNS = 5;
+/** What a queued job fails with when the launch plan stored with it cannot be read. Fixed text: the stored text is never repeated. */
+const UNREADABLE_PLAN = "This job's stored launch plan could not be read. Start the work again.";
+/** Times one tick fails unreadable queued jobs and looks again; a ledger with more of them is cleared over the next ticks. */
+const MAX_UNREADABLE_ROUNDS = 10;
 
 /** Error codes that mean the host as a whole cannot be used right now. */
 const HOST_FAILURES = new Set(['host_unreachable', 't3_timeout', 't3_response_lost', 't3_unauthorized', 'host_not_enrolled']);
@@ -258,7 +262,7 @@ export class JobEngine {
     const { store, clock } = this.#options;
     const free = host.maxConcurrentJobs - store.slotHolders(host.id);
     if (free <= 0) return;
-    const queued = store.queued(host.id, free);
+    const queued = this.#queuedWithReadablePlans(host, free);
     if (queued.length === 0) return;
     // A cheap read first: a dead connection (for example after T3 restarted) fails here, where a
     // retry is safe, instead of making the launch itself ambiguous.
@@ -273,6 +277,24 @@ export class JobEngine {
       });
       if (dispatching && !(await this.#launch(dispatching, plan))) return;
     }
+  }
+
+  /**
+   * The oldest queued jobs, up to `limit`, that can be launched. A job whose stored launch plan cannot be read fails here,
+   * from the ledger alone (a host that is down does not hold it): it is never launched, not even from the configuration as
+   * an alias job, which is what having no plan means. It takes no place in the window, so the jobs behind it still dispatch
+   * in this tick.
+   */
+  #queuedWithReadablePlans(host: HostConfig, limit: number): Job[] {
+    const { store } = this.#options;
+    let queued: Job[] = [];
+    for (let round = 0; round < MAX_UNREADABLE_ROUNDS; round++) {
+      queued = store.queued(host.id, limit);
+      const unreadable = queued.filter((job) => job.launchSpecUnreadable);
+      if (unreadable.length === 0) break;
+      for (const job of unreadable) this.#failQueued(job, 'database_error', UNREADABLE_PLAN);
+    }
+    return queued.filter((job) => !job.launchSpecUnreadable);
   }
 
   /** The launch of an alias-only job: its project resolved on the host now. Undefined when the job failed instead. */

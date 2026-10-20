@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { parseConfig } from '../src/config.ts';
-import { parseLaunchSpec } from '../src/jobs/launchSpec.ts';
+import { readLaunchSpec } from '../src/jobs/launchSpec.ts';
 import { startInputHash } from '../src/jobs/service.ts';
 import { MINUTE } from '../src/time.ts';
 import { assertNotLogged, jobState, startJobHarness, type StartedJob } from './helpers/jobs.ts';
@@ -273,15 +273,20 @@ describe('projectless work', () => {
   });
 
   test('malformed and unsupported persisted specs cannot fall back to legacy worktree dispatch', async (t) => {
-    const { fake, gw, agent, tick } = await startJobHarness(t, scratch);
-    const { job } = await agent.call<{ job: ScratchJob }>('work_start', input('corrupt'));
-    for (const text of ['{', '{"v":3,"projectId":"project-1"}', '{"v":2,"projectId":"project-1"}', '{"v":1,"projectId":"project-1"}']) {
+    const { fake, gw, agent, tick } = await startJobHarness(t, { ...scratch, maxConcurrentJobs: 4 });
+    const texts = ['{', '{"v":3,"projectId":"project-1"}', '{"v":2,"projectId":"project-1"}', '{"v":1,"projectId":"project-1"}'];
+    for (const [index, text] of texts.entries()) {
+      const { job } = await agent.call<{ job: ScratchJob }>('work_start', input(`corrupt-${index}`));
       gw.services.db.prepare('UPDATE jobs SET launch_spec = ? WHERE id = ?').run(text, job.jobId);
-      assert.throws(() => gw.services.jobs.store.require(job.jobId), { code: 'database_error' });
+      const stored = gw.services.jobs.store.require(job.jobId);
+      assert.deepEqual([stored.launchSpec, stored.launchSpecUnreadable], [null, true], 'reading does not throw, and does not call it an alias job');
       await tick();
-      assert.equal(fake.launches.length, 0);
+      const status = await agent.call<{ state: string; lastError: { code: string } | null }>('work_status', { jobId: job.jobId });
+      // A job read as having no spec would fail as launch_policy_changed here, because its alias is now a scratch alias.
+      assert.deepEqual([status.state, status.lastError?.code], ['failed', 'database_error']);
     }
-    assert.equal(parseLaunchSpec(null), null);
+    assert.equal(fake.launches.length, 0);
+    assert.deepEqual(readLaunchSpec(null), { kind: 'none' });
   });
 });
 
