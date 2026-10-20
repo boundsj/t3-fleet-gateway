@@ -515,7 +515,7 @@ describe('dashboard: jobs and privacy', () => {
     const approvalThread = h.fake.threadForJob(approval.jobId);
     const questionThread = h.fake.threadForJob(question.jobId);
     h.fake.requestApproval(approvalThread.threadId);
-    h.fake.askQuestion(questionThread.threadId, [{ id: 'q1', header: 'Synthetic', question: QUESTION, options: [{ label: OPTION, description: OPTION }] }]);
+    h.fake.askQuestion(questionThread.threadId, [{ id: 'SECRET-QUESTION-ID', header: 'Synthetic', question: QUESTION, options: [{ label: OPTION, description: OPTION }] }]);
     await h.tick();
     const failing = await startJob(h.agent, TASK);
     await h.tick();
@@ -531,7 +531,7 @@ describe('dashboard: jobs and privacy', () => {
 
     const snap = await snapshot(h.port);
     const text = JSON.stringify(snap);
-    for (const secret of ['SECRET-TASK-TEXT', 'SECRET-WORKER-REPLY', 'SECRET-QUESTION', OPTION, DELEGATED, 'q1']) {
+    for (const secret of ['SECRET-TASK-TEXT', 'SECRET-WORKER-REPLY', 'SECRET-QUESTION', OPTION, DELEGATED, 'SECRET-QUESTION-ID']) {
       assert.equal(text.includes(secret), false, `${secret} leaked into the snapshot`);
     }
     const job = (id: string) => [...snap.jobs.open, ...snap.jobs.recent].find((item) => item.id === id)!;
