@@ -6,7 +6,7 @@ import { resolveProjectId } from '../hosts/projects.ts';
 import type { Logger } from '../log.ts';
 import { T3TransportError } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
-import type { LaunchResult, ThreadRead } from '../t3/schemas.ts';
+import type { LaunchResult, LaunchWorkspaceStrategy, ThreadRead } from '../t3/schemas.ts';
 import { MINUTE, SECOND, type Clock } from '../time.ts';
 import { readActivity, refreshDelegated, scanActivity } from './activity.ts';
 import { EXCERPT_CHARS, isActiveStatus, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
@@ -15,6 +15,7 @@ import { validateSelection, type LaunchSpec, type ModelSelection } from './launc
 import { jobMarker } from './service.ts';
 import type { Job, JobChanges, JobStore } from './store.ts';
 import { launchPolicy, mapProjects } from './targets.ts';
+import { probeRequest, resolveWorkspace, runWorkspaceProbe, type ResolvedWorkspace, type WorkspaceIntent } from './workspace.ts';
 
 /** Launches can take a while: T3 prepares the worktree before answering. */
 const LAUNCH_TIMEOUT_MS = 60 * SECOND;
@@ -29,6 +30,18 @@ const RECENT_RUNS = 5;
 const UNREADABLE_PLAN = "This job's stored launch plan could not be read. Start the work again.";
 /** Times one tick fails unreadable queued jobs and looks again; a ledger with more of them is cleared over the next ticks. */
 const MAX_UNREADABLE_ROUNDS = 10;
+
+/**
+ * Queued jobs the dispatcher looks at beyond the free slots, so a job that cannot launch now (its probe failed, its folder is
+ * busy) does not hide the ones behind it; rounds and probes bound the work one tick does for a host.
+ */
+const DISPATCH_SLACK = 4;
+const DISPATCH_ROUNDS = 4;
+const MAX_PROBES_PER_TICK = 8;
+/** Probe attempts a job gets when the probe cannot reach its host (timeout, ssh exit 255), spaced by the tick interval, doubling. */
+const MAX_PROBE_ATTEMPTS = 3;
+/** An idle job holding its folder for a resume that never showed itself gives it up after this long. */
+const RESUME_GRACE_MS = 10 * MINUTE;
 
 /** Error codes that mean the host as a whole cannot be used right now. */
 const HOST_FAILURES = new Set(['host_unreachable', 't3_timeout', 't3_response_lost', 't3_unauthorized', 'host_not_enrolled']);
@@ -63,12 +76,23 @@ function isHostFailure(error: unknown): error is GatewayError {
 export function launchMessage(job: Job): string {
   const workspace = job.launchSpec?.v === 2 && job.launchSpec.workspace.kind === 'scratch'
     ? 'in T3’s internal scratch workspace'
-    : `in a fresh worktree on branch ${job.branch}`;
+    : job.workspaceKind === 'root'
+      ? 'in the project’s own folder'
+      : `in a fresh worktree on branch ${job.branch}`;
   return `${job.task}\n\n---\nStarted through t3-fleet-gateway as job ${job.id}, ${workspace}.`;
 }
 
-/** Where a launch puts the thread: a fresh worktree on a branch of the project, or T3's own scratch workspace. */
-type Workspace = { kind: 'scratch' } | { kind: 'worktree'; baseRef: string; branch: string };
+/**
+ * Where a launch puts the thread: a fresh worktree on a branch of the project (from the local base, or from the freshly
+ * fetched remote base), the project's own folder, or T3's own scratch workspace.
+ */
+type Workspace = { kind: 'scratch' } | { kind: 'root' } | { kind: 'worktree'; baseRef: string; branch: string; startFromOrigin: boolean };
+
+function workspaceStrategy(workspace: Exclude<Workspace, { kind: 'scratch' }>): LaunchWorkspaceStrategy {
+  return workspace.kind === 'root'
+    ? { type: 'root' }
+    : { type: 'worktree', baseRef: workspace.baseRef, branch: workspace.branch, startFromOrigin: workspace.startFromOrigin };
+}
 
 /**
  * What one launch sends: from the project config (alias-only jobs) or from the job's recorded launch spec. For a scratch
@@ -81,6 +105,8 @@ interface LaunchPlan {
   modelSelection: Record<string, unknown> | undefined;
   /** The configured alias whose cached project id a project error should drop, if any. */
   alias: string | null;
+  /** What the dispatcher resolved for a version 3 job (see workspace.ts); the ledger claims the job with it. */
+  resolved?: ResolvedWorkspace;
   /** Added to T3's refusal when it asks for a model this launch did not send. */
   missingModelHint: string;
 }
@@ -89,7 +115,7 @@ function planFromConfig(config: GatewayConfig, project: ProjectConfig, projectId
   const model = configuredModel(config, project);
   return {
     projectId,
-    workspace: { kind: 'worktree', baseRef: project.baseRef, branch },
+    workspace: { kind: 'worktree', baseRef: project.baseRef, branch, startFromOrigin: false },
     modelSelection: model?.selection,
     alias: project.alias,
     missingModelHint: model
@@ -98,10 +124,10 @@ function planFromConfig(config: GatewayConfig, project: ProjectConfig, projectId
   };
 }
 
-function planFromSpec(spec: LaunchSpec, hostId: string, branch: string): LaunchPlan {
+function planFromSpec(spec: LaunchSpec, hostId: string, projectId: string, workspace: Workspace): LaunchPlan {
   return {
-    projectId: spec.projectId,
-    workspace: spec.v === 1 ? { kind: 'worktree', baseRef: spec.baseRef, branch } : { kind: 'scratch' },
+    projectId,
+    workspace,
     modelSelection: spec.model.selection ?? undefined,
     alias: spec.alias,
     missingModelHint: spec.model.selection
@@ -160,6 +186,8 @@ export class JobEngine {
   /** When reconciliation first failed to find a job's thread while its host was reachable. */
   readonly #unconfirmedSince = new Map<string, { hostId: string; since: number }>();
   readonly #lastPolled = new Map<string, number>();
+  /** Aborted when the engine stops: kills a workspace probe that is still running. */
+  readonly #shutdown = new AbortController();
   #timer: NodeJS.Timeout | undefined;
   #current: Promise<void> = Promise.resolve();
   #next: Promise<void> | undefined;
@@ -187,6 +215,7 @@ export class JobEngine {
   /** Stop ticking and wait for the tick in progress. All job state is already in the database. */
   async stop(): Promise<void> {
     this.#stopped = true;
+    this.#shutdown.abort();
     clearInterval(this.#timer);
     this.#timer = undefined;
     await this.#current;
@@ -235,6 +264,7 @@ export class JobEngine {
       const steps = [
         ['reconcile', () => this.#reconcile(host)],
         ['watch', () => this.#watch(host)],
+        ['release', () => this.#releaseStaleHolds(host)],
         ['dispatch', () => this.#dispatch(host)],
       ] as const;
       for (const [step, run] of steps) {
@@ -264,25 +294,43 @@ export class JobEngine {
     this.#options.logger.warn(event, { jobId: job.id, hostId: job.hostId, errorCode: code });
   }
 
-  /** Fill free slots with queued jobs, oldest first. */
+  /**
+   * Fill free slots with queued jobs, oldest first. A job that cannot launch now takes no slot and does not hold up the ones
+   * behind it: it failed, it waits for its probe's next attempt, or it waits for the job that holds its folder (the ledger
+   * leaves such jobs out of the window). One tick looks at a bounded number of jobs and runs a bounded number of probes.
+   */
   async #dispatch(host: HostConfig): Promise<void> {
     const { store, clock } = this.#options;
     const free = host.maxConcurrentJobs - store.slotHolders(host.id);
     if (free <= 0) return;
-    const queued = this.#queuedWithReadablePlans(host, free);
-    if (queued.length === 0) return;
-    // A cheap read first: a dead connection (for example after T3 restarted) fails here, where a
-    // retry is safe, instead of making the launch itself ambiguous.
-    await this.#options.registry.client(host.id).environmentRead();
-    for (const job of queued) {
-      const plan = job.launchSpec ? await this.#planFromSpec(host, job, job.launchSpec) : await this.#planFromConfig(job);
-      if (!plan) continue;
-      const dispatching = store.transition(job.id, {
-        from: ['queued'],
-        to: 'dispatching',
-        changes: { t3ProjectId: plan.projectId, dispatchStartedAt: clock() },
-      });
-      if (dispatching && !(await this.#launch(dispatching, plan))) return;
+    const budget = { probes: MAX_PROBES_PER_TICK };
+    const tried = new Set<string>();
+    let launched = 0;
+    let checked = false;
+    for (let round = 0; round < DISPATCH_ROUNDS && launched < free && budget.probes > 0; round++) {
+      const queued = this.#queuedWithReadablePlans(host, free - launched + DISPATCH_SLACK).filter((job) => !tried.has(job.id));
+      if (queued.length === 0) return;
+      // A cheap read first: a dead connection (for example after T3 restarted) fails here, where a
+      // retry is safe, instead of making the launch itself ambiguous.
+      if (!checked) await this.#options.registry.client(host.id).environmentRead();
+      checked = true;
+      for (const job of queued) {
+        if (launched >= free || budget.probes <= 0 || this.#shutdown.signal.aborted) return;
+        tried.add(job.id);
+        const plan = job.launchSpec ? await this.#planFromSpec(host, job, job.launchSpec, budget) : await this.#planFromConfig(job);
+        if (!plan) continue;
+        const changes = { t3ProjectId: plan.projectId, dispatchStartedAt: clock() };
+        // A resolved workspace is claimed with the ledger (which also takes a root job's folder, or refuses it); the rest transition as before.
+        const claim = plan.resolved
+          ? store.dispatch(job.id, plan.resolved, changes)
+          : (() => {
+              const dispatching = store.transition(job.id, { from: ['queued'], to: 'dispatching', changes });
+              return dispatching ? { kind: 'claimed' as const, job: dispatching } : { kind: 'gone' as const };
+            })();
+        if (claim.kind !== 'claimed') continue;
+        launched++;
+        if (!(await this.#launch(claim.job, plan))) return;
+      }
     }
   }
 
@@ -293,10 +341,10 @@ export class JobEngine {
    * in this tick.
    */
   #queuedWithReadablePlans(host: HostConfig, limit: number): Job[] {
-    const { store } = this.#options;
+    const { store, clock } = this.#options;
     let queued: Job[] = [];
     for (let round = 0; round < MAX_UNREADABLE_ROUNDS; round++) {
-      queued = store.queued(host.id, limit);
+      queued = store.queued(host.id, limit, { now: clock() });
       const unreadable = queued.filter((job) => job.launchSpecUnreadable);
       if (unreadable.length === 0) break;
       for (const job of unreadable) this.#failQueued(job, 'database_error', UNREADABLE_PLAN);
@@ -330,12 +378,13 @@ export class JobEngine {
    * selection, its capabilities are read now (never from the browse cache): a host that cannot answer
    * leaves the job queued (the host failure propagates); a project that is gone, that a configured alias
    * other than the recorded one now governs (a title renamed since), that no longer accepts work, or a
-   * selection the host no longer advertises fails the job before anything is launched.
+   * selection the host no longer advertises fails the job before anything is launched. A version 3 spec, last, has its
+   * workspace resolved by the host's probe (`#resolveWorkspace`), which may leave the job queued for another try.
    */
-  async #planFromSpec(host: HostConfig, job: Job, spec: LaunchSpec): Promise<LaunchPlan | undefined> {
+  async #planFromSpec(host: HostConfig, job: Job, spec: LaunchSpec, budget: { probes: number }): Promise<LaunchPlan | undefined> {
     const { config, catalog } = this.#options;
     // A host default needs no discovery: only the binding the job was started under must still hold.
-    if (spec.v === 2 && (spec.hostId !== job.hostId || (spec.defaultProject !== null && host.defaultProject !== spec.defaultProject))) {
+    if (spec.v !== 1 && (spec.hostId !== job.hostId || (spec.v === 2 && spec.defaultProject !== null && host.defaultProject !== spec.defaultProject))) {
       this.#failQueued(job, 'launch_policy_changed', 'The recorded host or default scratch binding changed. Start the work again under the current policy.');
       return undefined;
     }
@@ -347,26 +396,30 @@ export class JobEngine {
       this.#failQueued(job, 'project_not_configured', `Project "${spec.alias}" is no longer configured.`);
       return undefined;
     }
+    let projectId = spec.projectId;
     try {
       const projects = (await catalog.projects(job.hostId, { refresh: true })).value;
-      const mapping = mapProjects(config, job.hostId, projects).get(spec.projectId);
-      if (!mapping) {
-        this.#failQueued(job, 'project_not_found', `Host ${job.hostId} no longer has T3 project ${spec.projectId}.`);
+      const mappings = mapProjects(config, job.hostId, projects);
+      const alias = spec.alias === null ? undefined : config.projects.find((candidate) => candidate.alias === spec.alias);
+      // An alias-only request was recorded without reading T3: its project is found now, through the alias.
+      if (projectId === null) projectId = [...mappings.values()].find((candidate) => alias && candidate.aliases.includes(alias))?.project.id ?? null;
+      const mapping = projectId === null ? undefined : mappings.get(projectId);
+      if (projectId === null || !mapping) {
+        this.#failQueued(job, 'project_not_found', projectId === null ? `Project "${spec.alias}": host ${job.hostId} has no matching T3 project.` : `Host ${job.hostId} no longer has T3 project ${projectId}.`);
         return undefined;
       }
-      const alias = spec.alias === null ? undefined : config.projects.find((candidate) => candidate.alias === spec.alias);
       let changed: string | undefined;
       if (alias) {
         // The agent named the alias: it must still resolve to the recorded project (a title may have moved) and accept work.
-        if (!mapping.aliases.includes(alias)) changed = `project "${alias.alias}" no longer resolves to T3 project ${spec.projectId} on host ${job.hostId}`;
-        else if (alias.workspaceMode !== (spec.v === 1 ? 'worktree' : 'scratch')) changed = `project "${alias.alias}" changed workspace mode`;
-        else if (spec.v === 2 && alias.runtimeMode !== spec.runtimeMode) changed = `project "${alias.alias}" changed runtime mode`;
+        if (!mapping.aliases.includes(alias)) changed = `project "${alias.alias}" no longer resolves to T3 project ${projectId} on host ${job.hostId}`;
+        else if (alias.workspaceMode !== (spec.v === 2 ? 'scratch' : 'worktree')) changed = `project "${alias.alias}" changed workspace mode`;
+        else if (spec.v !== 1 && alias.runtimeMode !== spec.runtimeMode) changed = `project "${alias.alias}" changed runtime mode`;
         else if (!alias.allowWorkStart) changed = `project "${alias.alias}" no longer accepts work_start`;
       } else {
         const policy = launchPolicy(host, mapping);
         if (policy.kind !== 'discovered') {
           const aliases = policy.kind === 'alias' ? [policy.project.alias] : policy.aliases;
-          changed = `T3 project ${spec.projectId} on host ${job.hostId} is now configured under ${aliases.length === 1 ? 'alias' : 'aliases'} ${aliases.join(', ')}`;
+          changed = `T3 project ${projectId} on host ${job.hostId} is now configured under ${aliases.length === 1 ? 'alias' : 'aliases'} ${aliases.join(', ')}`;
         } else if (!host.discovery.enabled || !host.discovery.allowWorkStart) {
           changed = `host ${job.hostId} no longer accepts work_start into T3 projects without a configured alias`;
         }
@@ -392,7 +445,72 @@ export class JobEngine {
         return undefined;
       }
     }
-    return planFromSpec(spec, job.hostId, job.branch);
+    if (spec.v === 1) return planFromSpec(spec, job.hostId, projectId, { kind: 'worktree', baseRef: spec.baseRef, branch: job.branch, startFromOrigin: false });
+    if (spec.v === 2) return planFromSpec(spec, job.hostId, projectId, { kind: 'scratch' });
+    const resolved = await this.#resolveWorkspace(host, job, projectId, spec.workspace, budget);
+    if (!resolved) return undefined;
+    const workspace: Workspace = resolved.kind === 'root' ? { kind: 'root' } : { kind: 'worktree', baseRef: resolved.baseRef, branch: job.branch, startFromOrigin: resolved.startFromOrigin };
+    return { ...planFromSpec(spec, job.hostId, projectId, workspace), resolved };
+  }
+
+  /**
+   * Decide a version 3 job's workspace now, from the folder the project has on its host: the project's `workspaceRoot` is read
+   * from T3 (never stored) and the host's probe inspects it. Undefined means the job did not get one: it failed, it waits for
+   * the probe's next attempt, or the gateway is stopping. A T3 host failure propagates (the job stays queued and the host backs off);
+   * a probe that cannot reach its host costs that job one of a few attempts and nothing else.
+   */
+  async #resolveWorkspace(
+    host: HostConfig,
+    job: Job,
+    projectId: string,
+    intent: WorkspaceIntent,
+    budget: { probes: number },
+  ): Promise<ResolvedWorkspace | undefined> {
+    const { registry, store, clock } = this.#options;
+    const command = host.workspaceProbeCommand;
+    if (!command) {
+      this.#failQueued(job, 'launch_policy_changed', `Host ${host.id} no longer configures a workspaceProbeCommand. Start the work again under the current policy.`);
+      return undefined;
+    }
+    let root: string | null | undefined;
+    try {
+      root = (await registry.client(host.id).listProjects()).find((candidate) => candidate.id === projectId)?.workspaceRoot;
+    } catch (error) {
+      if (isHostFailure(error)) throw error;
+      this.#failQueued(job, 'workspace_probe_failed', `The project list of host ${host.id} could not be read to find the project's folder.`);
+      return undefined;
+    }
+    if (typeof root !== 'string' || !root.startsWith('/')) {
+      this.#failQueued(job, 'workspace_probe_failed', `T3 reports no usable folder for project ${projectId}, so its workspace cannot be chosen.`);
+      return undefined;
+    }
+    budget.probes--;
+    try {
+      const inspection = await runWorkspaceProbe(command, probeRequest(intent, root), { signal: this.#shutdown.signal });
+      return resolveWorkspace(host.id, intent, inspection);
+    } catch (error) {
+      if (this.#shutdown.signal.aborted) return undefined;
+      const described = describeError(error);
+      if (described.code === 'workspace_probe_unavailable' && job.probeAttempts + 1 < MAX_PROBE_ATTEMPTS) {
+        const attempts = job.probeAttempts + 1;
+        store.update(job.id, {
+          probeAttempts: attempts,
+          probeRetryAt: clock() + this.#intervalMs * 2 ** (attempts - 1),
+          lastErrorCode: described.code,
+          lastErrorMessage: described.message,
+        });
+        return undefined;
+      }
+      this.#failQueued(job, described.code === 'workspace_probe_unavailable' ? described.code : 'workspace_probe_failed', described.message);
+      return undefined;
+    }
+  }
+
+  /** Give up the folders of idle jobs whose resume was never seen to start anything (see `JobStore.releaseStaleHolds`). */
+  #releaseStaleHolds(host: HostConfig): void {
+    const { store, clock, logger } = this.#options;
+    const released = store.releaseStaleHolds(host.id, clock(), RESUME_GRACE_MS);
+    if (released > 0) logger.info('jobs.workspace_root_released', { hostId: host.id, count: released });
   }
 
   #failQueued(job: Job, code: string, message: string): void {
@@ -419,10 +537,7 @@ export class JobEngine {
             message: launchMessage(job),
             ...(plan.workspace.kind === 'scratch'
               ? { scratch: true as const }
-              : {
-                  projectId: plan.projectId,
-                  workspaceStrategy: { type: 'worktree' as const, baseRef: plan.workspace.baseRef, branch: plan.workspace.branch, startFromOrigin: false },
-                }),
+              : { projectId: plan.projectId, workspaceStrategy: workspaceStrategy(plan.workspace) }),
           },
           { timeoutMs: this.#launchTimeoutMs },
         );

@@ -220,7 +220,8 @@ interface Session {
 export class FakeT3 {
   readonly serverVersion: string;
   tokenLifetimeSeconds: number;
-  readonly projects: { id: string; title: string; deletedAt: string | null; defaultModelSelection: Record<string, unknown> | null }[];
+  /** `workspaceRoot` is the folder T3 reports for the project; the workspace probe reads it (src/jobs/workspace.ts). */
+  readonly projects: { id: string; title: string; deletedAt: string | null; defaultModelSelection: Record<string, unknown> | null; workspaceRoot?: string }[];
   /** The providers, models and options this host advertises in orchestrator_capabilities; tests change it between calls. */
   providers: FakeProvider[] = syntheticProviders();
   /** When set, t3_project_list answers every page with this same nextCursor (a catalog that never converges). */
@@ -475,9 +476,10 @@ export class FakeT3 {
     return new Promise((resolve) => this.#holdWaiters.push({ tool, resolve }));
   }
 
-  /** Send every held answer. */
-  releaseHeld(): void {
-    for (const held of this.#held.splice(0)) held.release();
+  /** Send every held answer, or only the `first` or `last` one to be held (callers in flight finish in the order the test chooses). */
+  releaseHeld(which: 'all' | 'first' | 'last' = 'all'): void {
+    const released = which === 'all' ? this.#held.splice(0) : this.#held.splice(which === 'first' ? 0 : this.#held.length - 1, 1);
+    for (const held of released) held.release();
   }
 
   /** Apply interrupts accepted while deferInterrupts was set. */

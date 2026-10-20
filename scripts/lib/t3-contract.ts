@@ -207,6 +207,9 @@ const INPUT_SAMPLES: Record<(typeof REQUIRED_TOOLS)[number], Record<string, unkn
   t3_thread_launch: RUNTIME_MODE_VALUES.flatMap((runtimeMode) => [
     { ...LAUNCH, runtimeMode },
     { ...LAUNCH, runtimeMode, modelSelection: { instanceId: 'codex', model: 'synthetic-model' } },
+    // A host with a workspace probe launches a project's own folder with the root strategy, or a worktree from the fresh remote base.
+    { ...LAUNCH, runtimeMode, workspaceStrategy: { type: 'root' } },
+    { ...LAUNCH, runtimeMode, workspaceStrategy: { ...LAUNCH.workspaceStrategy, startFromOrigin: true } },
     // A scratch alias (`workspaceMode: "scratch"`) launches with `scratch: true` alone: no project, worktree or branch is sent.
     { title: LAUNCH.title, message: LAUNCH.message, runtimeMode, scratch: true },
   ]),

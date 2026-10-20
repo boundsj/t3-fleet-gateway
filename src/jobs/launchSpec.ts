@@ -1,6 +1,7 @@
 import * as z from 'zod';
 import { GatewayError } from '../errors.ts';
 import type { CatalogModel, CatalogProvider } from '../hosts/catalog.ts';
+import { workspaceIntentSchema } from './workspace.ts';
 
 /** Bounds on an agent's model selection. */
 export const MAX_SELECTION_OPTIONS = 32;
@@ -17,7 +18,11 @@ export interface ModelSelection {
 /** Where a job's model comes from: the agent's selection, the gateway config, or T3's own project default (nothing sent). */
 export type ModelSource = 'explicit' | 'project' | 'host' | 't3_default';
 
-/** Version 2 records scratch launches only (T3's own scratch project, no worktree or branch); worktree launches are version 1. */
+/**
+ * Version 2 records scratch launches only (T3's own scratch project, no worktree or branch). Version 1 is a worktree launch
+ * from the project's configured base ref, from the local branch; version 3 is a launch whose workspace the host's probe
+ * decides at dispatch (see workspace.ts), so it records the intent only.
+ */
 const scratchWorkspaceSchema = z.strictObject({ kind: z.literal('scratch') });
 
 const modelSchema = z.strictObject({
@@ -34,6 +39,18 @@ const sharedSpec = {
 };
 const launchSpecSchema = z.union([
   z.strictObject({ v: z.literal(1), ...sharedSpec, baseRef: z.string().min(1) }),
+  z.strictObject({
+    v: z.literal(3), ...sharedSpec,
+    // An alias-only request is recorded without reading T3: no project id or name until the dispatcher resolves them.
+    projectId: z.string().min(1).nullable(),
+    projectName: z.string().nullable(),
+    hostId: z.string().min(1),
+    workspace: workspaceIntentSchema,
+  }).refine((spec) => (spec.projectId === null) === (spec.projectName === null), {
+    message: 'a project id and its name are recorded together',
+  }).refine((spec) => spec.projectId !== null || (spec.source === 'alias' && spec.alias !== null), {
+    message: 'a launch without a project id needs a configured alias',
+  }),
   z.strictObject({
     v: z.literal(2), ...sharedSpec,
     // A scratch launch never reads the project's name from T3: nothing of T3's metadata is recorded.
@@ -53,7 +70,8 @@ const launchSpecSchema = z.union([
  * (`jobs.launch_spec`): the dispatcher launches from this record, so a later config change, catalog change or alias ambiguity
  * cannot move the job. Alias-only worktree jobs have none and dispatch from the configuration. `source` is `alias` when a
  * configured project's policy governs and `discovered` when the host's discovery policy does; `model.selection` is the exact
- * `modelSelection` sent to T3 (null leaves the choice to the T3 project's default). Version 2 is a scratch launch. Never holds task text.
+ * `modelSelection` sent to T3 (null leaves the choice to the T3 project's default). Version 2 is a scratch launch; version 3
+ * a project launch whose workspace is decided at dispatch. Never holds task text.
  */
 export type LaunchSpec = z.infer<typeof launchSpecSchema>;
 

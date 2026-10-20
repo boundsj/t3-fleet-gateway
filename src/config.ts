@@ -84,6 +84,12 @@ const hostSchema = z.strictObject({
   mintPairingCode: z.array(z.string().min(1)).min(1).default(DEFAULT_MINT_COMMAND),
   /** Operator asserts this exact argv is non-mutating; never inferred from the mint command. */
   mintPairingCodeProbe: z.array(z.string().min(1).max(4096)).min(1).max(32).optional(),
+  /**
+   * Opts the host into automatic workspace selection for named projects: this exact argv is run (no shell) with one JSON
+   * object on stdin and prints one JSON object (docs/configuration.md, "Workspace probe"). Without it, named projects
+   * launch exactly as before: a fresh worktree on the project's baseRef, from the local branch.
+   */
+  workspaceProbeCommand: z.array(z.string().min(1).max(4096)).min(1).max(32).optional(),
   access: z.enum(T3_ACCESS_LEVELS).default('auto'),
   maxConcurrentJobs: z.int().min(1).max(32).default(2),
   defaultModelSelection: modelSelectionSchema.nullable().default(null),

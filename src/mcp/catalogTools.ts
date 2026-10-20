@@ -209,7 +209,15 @@ function disabled(host: HostConfig) {
   };
 }
 
-function guidance(project: CatalogProject, host: string, policy: EffectivePolicy): string {
+/** How a launch into a named project gets its workspace, for the guidance text. */
+function workspaceText(policy: EffectivePolicy, choosesWorkspace: boolean): string {
+  if (policy.workspaceMode === 'scratch') return 'T3 internal scratch';
+  return choosesWorkspace
+    ? `the host picks the workspace: a repository gets a fresh worktree from the up-to-date remote ${policy.baseRef}, any other folder is used as it is; work_start workspace overrides`
+    : `base ${policy.baseRef}`;
+}
+
+function guidance(project: CatalogProject, host: string, policy: EffectivePolicy, choosesWorkspace: boolean): string {
   if (policy.source === 'ambiguous') {
     return `Configured under aliases ${policy.aliases.join(', ')}: start work with work_start { project: <one of them> }, not with target.`;
   }
@@ -220,13 +228,12 @@ function guidance(project: CatalogProject, host: string, policy: EffectivePolicy
     if (!policy.allowWorkStart) {
       return `Configured as project "${policy.alias}", which does not accept work_start: send work to its standing jobs with work_continue (fleet_status lists them).`;
     }
-    const workspace = policy.workspaceMode === 'scratch' ? 'T3 internal scratch' : `base ${policy.baseRef}`;
-    return `Start work with work_start { project: ${JSON.stringify(policy.alias)} } (${policy.runtimeMode}, ${workspace}).${model}`;
+    return `Start work with work_start { project: ${JSON.stringify(policy.alias)} } (${policy.runtimeMode}, ${workspaceText(policy, choosesWorkspace)}).${model}`;
   }
   if (!policy.allowWorkStart) {
     return `No configured alias, and host ${host} does not accept work_start into unconfigured projects. Ask the operator to configure it or to enable discovery launches.`;
   }
-  return `Start work with work_start { target: { host: ${JSON.stringify(host)}, projectId: ${JSON.stringify(project.id)} } } (${policy.runtimeMode}, base ${policy.baseRef}).${model}`;
+  return `Start work with work_start { target: { host: ${JSON.stringify(host)}, projectId: ${JSON.stringify(project.id)} } } (${policy.runtimeMode}, ${workspaceText(policy, choosesWorkspace)}).${model}`;
 }
 
 function projectViews(deps: CatalogToolDeps, host: HostConfig, projects: readonly CatalogProject[], all: readonly CatalogProject[]): ProjectView[] {
@@ -250,7 +257,7 @@ function projectViews(deps: CatalogToolDeps, host: HostConfig, projects: readonl
         branchPrefix: policy.branchPrefix,
         defaultModelSource: policy.defaultModelSource,
       },
-      guidance: guidance(project, host.id, policy),
+      guidance: guidance(project, host.id, policy, host.workspaceProbeCommand !== undefined),
     };
   });
 }

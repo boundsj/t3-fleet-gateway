@@ -12,6 +12,7 @@ import { webhooksSchema } from '../src/webhooks/config.ts';
 import { MAX_ATTEMPTS_PER_SUBSCRIPTION, MAX_PAYLOAD_BYTES, MAX_PENDING_PER_SUBSCRIPTION, MAX_SUBSCRIPTIONS,
   WebhookStore, type DashboardTest } from '../src/webhooks/store.ts';
 import { testClock } from './helpers/clock.ts';
+import { rowsWithoutV12 } from './helpers/migrations.ts';
 import { tempDir } from './helpers/tmp.ts';
 
 function fixture(t: TestContext) {
@@ -79,7 +80,7 @@ describe('webhook migration and durable store boundaries', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
+    assert.deepEqual(tables.map((table) => rowsWithoutV12(db, table)), before);
     for (const table of ['job_turns', 'webhook_subscriptions', 'webhook_deliveries', 'webhook_attempts']) {
       assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), [], `${table} begins empty`);
     }
