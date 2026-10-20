@@ -12,6 +12,7 @@
 
 - No migration, configuration or tool-shape change. `jobs.pull_requests` is the same column and now holds up to 200 PRs (about 26 KB for 200 typical links); the job views keep their fields and their 20-PR bound. Rolling back to 0.1.13 reads a longer stored list back as its 20-PR window.
 - Snapshots stored by 0.1.13 held at most 20 PRs. On the first read after the upgrade, a thread that links more than 20 PRs shows its extra PRs as new to the job, so that job may raise one `pull_request_opened` and one `pull_request_merged` once. Threads with 20 or fewer PRs raise nothing.
+- Known limit: a job whose list holds exactly 200 PRs is treated as having more, so a PR that opens and merges between two polls while older PRs are unlinked can go unreported there ([design](docs/design.md#job-pull-request-snapshots)).
 
 ## 0.1.13 (2026-10-20)
 
