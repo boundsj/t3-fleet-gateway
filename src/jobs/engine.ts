@@ -8,6 +8,7 @@ import { T3TransportError } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
 import type { LaunchResult, LaunchWorkspaceStrategy, ThreadRead } from '../t3/schemas.ts';
 import { MINUTE, SECOND, type Clock } from '../time.ts';
+import { readPullRequests, pullRequestEvents } from './pullRequests.ts';
 import { readActivity, refreshDelegated, scanActivity } from './activity.ts';
 import { EXCERPT_CHARS, isActiveStatus, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { deliverInterrupt } from './interrupt.ts';
@@ -185,6 +186,7 @@ export class JobEngine {
   readonly #inFlight = new Set<string>();
   /** When reconciliation first failed to find a job's thread while its host was reachable. */
   readonly #unconfirmedSince = new Map<string, { hostId: string; since: number }>();
+  readonly #prAttempted = new Map<string, number>();
   readonly #lastPolled = new Map<string, number>();
   /** Aborted when the engine stops: kills a workspace probe that is still running. */
   readonly #shutdown = new AbortController();
@@ -246,8 +248,9 @@ export class JobEngine {
 
   /** Drop the in-memory poll times and reconciliation windows of jobs that have finished. */
   #forgetFinished(): void {
-    if (this.#lastPolled.size === 0 && this.#unconfirmedSince.size === 0) return;
+    if (this.#prAttempted.size === 0 && this.#lastPolled.size === 0 && this.#unconfirmedSince.size === 0) return;
     const open = this.#options.store.openJobIds();
+    for (const jobId of this.#prAttempted.keys()) if (!open.has(jobId)) this.#prAttempted.delete(jobId);
     for (const jobId of this.#lastPolled.keys()) if (!open.has(jobId)) this.#lastPolled.delete(jobId);
     for (const jobId of this.#unconfirmedSince.keys()) if (!open.has(jobId)) this.#unconfirmedSince.delete(jobId);
   }
@@ -687,12 +690,17 @@ export class JobEngine {
 
   /** Observe every job that has a thread and is not finished; idle jobs less often. */
   async #watch(host: HostConfig): Promise<void> {
+    const prBudget = { remaining: 4 };
     const { store, clock } = this.#options;
-    for (const job of store.onHost(host.id, ['running', 'needs_input', 'cancel_requested', 'idle'])) {
+    // Oldest optional lookup first: the per-tick budget must not starve later idle jobs.
+    const jobs = store.onHost(host.id, ['running', 'needs_input', 'cancel_requested', 'idle']);
+    jobs.sort((a, b) => (this.#prAttempted.get(a.id) ?? a.pullRequestsCheckedAt ?? -Infinity) -
+      (this.#prAttempted.get(b.id) ?? b.pullRequestsCheckedAt ?? -Infinity));
+    for (const job of jobs) {
       if (job.threadId === null) continue;
       if (job.state === 'idle' && clock() - (this.#lastPolled.get(job.id) ?? 0) < IDLE_POLL_MS) continue;
       try {
-        await this.#observeJob(job, job.threadId);
+        await this.#observeJob(job, job.threadId, prBudget);
       } catch (error) {
         this.#jobFailed(job, error, 'jobs.watch_failed');
       }
@@ -700,7 +708,7 @@ export class JobEngine {
     }
   }
 
-  async #observeJob(job: Job, threadId: string): Promise<void> {
+  async #observeJob(job: Job, threadId: string, prBudget: { remaining: number }): Promise<void> {
     const { store, registry, logger, clock } = this.#options;
     const client = registry.client(job.hostId);
     let read: ThreadRead;
@@ -727,6 +735,24 @@ export class JobEngine {
       }
       return;
     }
+    // Optional metadata must never change host health or suppress normal state observation.
+    const prChanges: JobChanges = {};
+    let prEvents: ReturnType<typeof pullRequestEvents> = [];
+    const attempted = this.#prAttempted.get(job.id) ?? job.pullRequestsCheckedAt;
+    if (prBudget.remaining > 0 && (attempted === null || clock() - attempted >= MINUTE)) {
+      this.#prAttempted.set(job.id, clock());
+      prBudget.remaining--;
+      try {
+        const value = Object.hasOwn(read.thread, 'pullRequests') ? read.thread.pullRequests
+          : (await client.listThreadPullRequests(threadId)).pullRequests;
+        const prs = readPullRequests(value);
+        if (prs !== null) {
+          prChanges.pullRequests = prs;
+          prChanges.pullRequestsCheckedAt = clock();
+          prEvents = pullRequestEvents(job.pullRequests, prs);
+        }
+      } catch { /* Missing tool, malformed output or transport error: retain the last known snapshot. */ }
+    }
     const seen = observe(job, read, questions, activity);
     // An idle job's delegated work ended (finished, failed or cancelled) and no turn followed: T3 starts
     // one by itself when a child finishes, but not always (a failed or cancelled child, say), and the job
@@ -735,6 +761,7 @@ export class JobEngine {
     const hasDelegated = seen.delegatedWork.length > 0 || seen.delegatedUntracked > 0;
     const delegatedEnded = job.state === 'idle' && seen.state === 'idle' && hadDelegated && !hasDelegated && !seen.anotherTurnFinished;
     const changes: JobChanges = {
+      ...prChanges,
       pendingRequestIds: seen.pendingRequestIds,
       delegatedWork: seen.delegatedWork,
       delegatedUntracked: seen.delegatedUntracked,
@@ -760,6 +787,7 @@ export class JobEngine {
         from: [job.state], to: job.state, expected: job, changes,
         turnRunId: read.thread.activeRunId ?? read.thread.latestRunId,
         events: [
+          ...prEvents,
           ...(seen.anotherTurnFinished ? [{ type: 'turn_finished', detail: { reason: seen.reason } }] : []),
           ...(delegatedEnded ? [{ type: 'delegated_work_ended', detail: { reason: 'no_turn_started' } }] : []),
         ],
@@ -777,6 +805,7 @@ export class JobEngine {
       expected: job,
       turnRunId: read.thread.activeRunId ?? read.thread.latestRunId,
       changes,
+      events: prEvents,
       detail: { reason: seen.reason, ...(seen.errorCode ? { code: seen.errorCode } : {}) },
     });
   }
@@ -842,7 +871,7 @@ export class JobEngine {
       store.transition(jobId, { from: ['cancel_requested'], to: 'cancelled', changes, detail });
       return;
     }
-    const changes = { ...rest, ...(threadLink ? { threadLink } : {}), lastErrorCode: null, lastErrorMessage: null };
+    const changes = { pullRequests: [], ...rest, ...(threadLink ? { threadLink } : {}), lastErrorCode: null, lastErrorMessage: null };
     const gatewayTurn = via === 'launched' && thread.lastRunId !== null
       ? { runId: thread.lastRunId, clientId: store.require(jobId).clientId } : undefined;
     if (store.transition(jobId, { from: ['dispatching', 'unknown'], to: 'running', changes, gatewayTurn, detail: { reason: via } })) return;

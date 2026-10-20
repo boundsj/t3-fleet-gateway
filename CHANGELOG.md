@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.12
+
+- Follow T3-linked pull requests through cached `work_status`/`work_list` responses, with links, states and freshness for text-only clients.
+- Show PR number/state badges on dashboard jobs.
+- Add opt-in PR opened/merged feed and webhook events, atomically captured with snapshots and preserved across restart. Existing webhook defaults stay unchanged.
+- Keep optional PR lookup failures separate from host health; bound reads and retain last good data. Migration 13 adds nullable PR cache columns. No production deployment or live hosted-client qualification is claimed.
+
+
 ## 0.1.11 (2026-10-20)
 
 ### Added

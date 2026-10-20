@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import * as z from 'zod';
 import { GatewayError } from '../errors.ts';
 
-export const WEBHOOK_EVENTS = ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended', 'running'] as const;
+export const WEBHOOK_EVENTS = ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended', 'running', 'pull_request_opened', 'pull_request_merged'] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENTS)[number];
-export const DEFAULT_WEBHOOK_EVENTS = WEBHOOK_EVENTS.filter((event) => event !== 'running');
+export const DEFAULT_WEBHOOK_EVENTS: WebhookEventType[] = ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended'];
 const BLOCKED_HEADERS = new Set([
   'host', 'connection', 'content-length', 'content-type', 'transfer-encoding', 'te', 'trailer', 'upgrade', 'expect',
   'content-encoding', 'content-range', 'http2-settings', 'accept', 'accept-encoding', 'origin', 'referer', 'user-agent', 'via', 'forwarded', 'keep-alive',

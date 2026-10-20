@@ -870,3 +870,34 @@ describe('webhook transport safety and operator checks', () => {
     assert.equal(sink.received.length, 1, 'an invalid credential never results in an unauthenticated test request');
   });
 });
+
+test('opt-in PR webhooks deliver bounded references once, with feed sequences and no worker metadata', async (t) => {
+  const sink = await receiver(t);
+  const h = await harness(t, [subscription(sink.url, { events: ['pull_request_opened', 'pull_request_merged'] })]);
+  const job = await startJob(h.agent);
+  await h.tick();
+  const { threadId } = h.fake.threadForJob(job.jobId);
+  const pr = { host: 'github.com', repository: 'sample/widgets', number: 21,
+    url: 'https://github.com/sample/widgets/pull/21', state: 'open', title: 'PRIVATE-PR-TITLE', headBranch: 'PRIVATE-BRANCH' };
+  h.fake.pullRequests.set(threadId, [pr]);
+  h.gw.clock.advance(MINUTE + 1);
+  await h.tick();
+  await h.deliver();
+  h.gw.clock.advance(MINUTE + 1);
+  await h.tick();
+  await h.deliver();
+  h.fake.pullRequests.set(threadId, [{ ...pr, state: 'merged' }]);
+  h.gw.clock.advance(MINUTE + 1);
+  await h.tick();
+  await h.deliver();
+  assert.deepEqual(sink.received.map((r) => r.payload.type), ['pull_request_opened', 'pull_request_merged']);
+  assert.equal(new Set(sink.received.map((r) => r.payload.eventId)).size, 2);
+  for (const entry of sink.received) {
+    const body = JSON.parse(entry.body);
+    assert.deepEqual(body.pullRequests, [{ number: 21, state: body.type === 'pull_request_opened' ? 'open' : 'merged', url: pr.url }]);
+    assert.equal(entry.body.includes('PRIVATE-'), false);
+    const event = h.gw.services.jobs.store.recentEvents(job.jobId, 100).find((e) => e.id === body.feedSequence);
+    assert.equal(event?.type, body.type);
+  }
+  assertNotLogged(h.gw, ['PRIVATE-PR-TITLE', 'PRIVATE-BRANCH', pr.url]);
+});

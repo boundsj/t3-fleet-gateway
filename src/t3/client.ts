@@ -7,6 +7,7 @@ import {
   UnauthorizedError,
 } from '@modelcontextprotocol/client';
 import type * as z from 'zod';
+import { pullRequestListSchema } from '../jobs/pullRequests.ts';
 import { GatewayError, type ErrorCode } from '../errors.ts';
 import { isTypeOfServiceRace } from '../processErrors.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
@@ -161,6 +162,11 @@ export class T3Client {
         throw translated;
       }
     }
+  }
+
+  /** Optional on older T3 builds. The watcher isolates all errors from this read. */
+  listThreadPullRequests(threadId: string) {
+    return this.callTool('list_thread_pull_requests', { threadId }, pullRequestListSchema, { readOnly: true, timeoutMs: 3000 });
   }
 
   environmentRead(options: { timeoutMs?: number } = {}): Promise<T3Environment> {

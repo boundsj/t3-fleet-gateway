@@ -5,12 +5,15 @@ import { GatewayError } from '../errors.ts';
 import type { Logger } from '../log.ts';
 import type { Clock } from '../time.ts';
 import { WebhookStore } from '../webhooks/store.ts';
+import { readPullRequests, type PullRequest } from './pullRequests.ts';
 import type { DelegatedTask } from './derive.ts';
 import { readLaunchSpec, type LaunchSpec } from './launchSpec.ts';
 import { isTerminal, RUNNING_STATES, TERMINAL_STATES, type JobState } from './states.ts';
 import type { ResolvedWorkspace } from './workspace.ts';
 
 export interface Job {
+  pullRequests: PullRequest[] | null;
+  pullRequestsCheckedAt: number | null;
   id: string;
   clientId: string;
   requestId: string;
@@ -43,7 +46,7 @@ export interface Job {
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
   createdAt: number;
-  /** When any field last changed. Writes that change nothing (an unchanged thread polled again) leave it. */
+  /** When substantive job data last changed. A freshness-only PR check leaves it unchanged. */
   updatedAt: number;
   /** When the job entered its current state. */
   stateChangedAt: number;
@@ -167,6 +170,8 @@ export type JobChanges = Partial<
     | 'workspaceRootKey'
     | 'probeAttempts'
     | 'probeRetryAt'
+    | 'pullRequests'
+    | 'pullRequestsCheckedAt'
   >
 >;
 
@@ -195,9 +200,13 @@ const COLUMNS: Record<keyof JobChanges, string> = {
   workspaceRootKey: 'workspace_root_key',
   probeAttempts: 'probe_attempts',
   probeRetryAt: 'probe_retry_at',
+  pullRequests: 'pull_requests',
+  pullRequestsCheckedAt: 'pull_requests_checked_at',
 };
 
 interface JobRow {
+  pull_requests: string | null;
+  pull_requests_checked_at: number | null;
   id: string;
   client_id: string;
   request_id: string;
@@ -318,9 +327,15 @@ function parseDelegated(text: string): DelegatedTask[] {
   }
 }
 
+function parseStoredPullRequests(text: string | null): PullRequest[] | null {
+  try { return text === null ? null : readPullRequests(JSON.parse(text)); } catch { return null; }
+}
+
 function toJob(row: JobRow): Job {
   const stored = readLaunchSpec(row.launch_spec);
   return {
+    pullRequests: parseStoredPullRequests(row.pull_requests),
+    pullRequestsCheckedAt: row.pull_requests_checked_at,
     id: row.id,
     clientId: row.client_id,
     requestId: row.request_id,
@@ -379,6 +394,7 @@ function toEvent(row: EventRow): JobEvent {
 }
 
 function columnValue(key: keyof JobChanges, value: JobChanges[keyof JobChanges]): string | number | null {
+  if (key === 'pullRequests') return value === null ? null : JSON.stringify(value);
   if (key === 'pendingRequestIds' || key === 'delegatedWork') return JSON.stringify(value ?? []);
   if (typeof value === 'boolean') return value ? 1 : 0;
   // T3 positions are integers; the STRICT INTEGER column refuses anything else.
@@ -1031,8 +1047,11 @@ export class JobStore {
       sets.push('workspace_root_held_at = NULL');
     }
     if (sets.length === 0) return false;
-    sets.push('updated_at = ?');
-    params.push(now);
+    // A successful poll of unchanged PRs is freshness, not new job activity.
+    if (sets.some((set) => set !== 'pull_requests_checked_at = ?')) {
+      sets.push('updated_at = ?');
+      params.push(now);
+    }
     this.#db.prepare(`UPDATE jobs SET ${sets.join(', ')} WHERE id = ?`).run(...params, current.id);
     return true;
   }

@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { pullRequestsSchema } from '../jobs/pullRequests.ts';
 import { MAX_DELEGATED_TASKS } from '../jobs/derive.ts';
 import { MAX_MESSAGE_TEXT_CHARS, MAX_MESSAGES } from '../jobs/messages.ts';
 import {
@@ -75,6 +76,8 @@ const modelSelectionInput = z
 const modelSourceSchema = z.enum(['explicit', 'project', 'host', 't3_default']);
 
 const jobSchema = z.object({
+  pullRequests: pullRequestsSchema.nullable().describe('Cached T3-linked PRs; null means unknown, [] means none. PR states can lag T3/GitHub.'),
+  pullRequestsCheckedAt: nullableTime,
   jobId: z.string(),
   state: z.enum(JOB_STATES),
   project: z
@@ -139,7 +142,7 @@ const jobSchema = z.object({
     .nullable()
     .describe('Opens the job thread in the T3 app: give it to the person when you mention the job. null until the thread exists'),
   createdAt: time,
-  updatedAt: time.describe('When anything about the job last changed'),
+  updatedAt: time.describe('When substantive job data last changed; freshness-only PR checks do not bump this'),
   stateChangedAt: time.describe('When the job entered its current state'),
   finishedAt: nullableTime,
   startedByYou: z.boolean(),
@@ -148,7 +151,7 @@ const jobSchema = z.object({
 const eventSchema = z.object({
   cursor: z.string().describe('Feed position of this event'),
   jobId: z.string(),
-  type: z.string().describe('created, state_changed, followup_sent, input_answered, turn_finished, delegated_work_ended or interrupt_requested'),
+  type: z.string().describe('created, state_changed, followup_sent, input_answered, turn_finished, delegated_work_ended, pull_request_opened, pull_request_merged or interrupt_requested'),
   fromState: z.enum(JOB_STATES).nullable(),
   toState: z.enum(JOB_STATES).nullable(),
   reason: z.string().nullable(),
@@ -247,6 +250,8 @@ export function jobView(job: Job, context: ToolContext): JobView {
   // and the workspace is unknown rather than assumed to be a worktree.
   const spec = job.launchSpec;
   return {
+    pullRequests: job.pullRequests,
+    pullRequestsCheckedAt: job.pullRequestsCheckedAt === null ? null : isoTime(job.pullRequestsCheckedAt),
     jobId: job.id,
     state: job.state,
     project: job.projectAlias,
@@ -286,8 +291,10 @@ export function eventView(event: JobEvent): z.infer<typeof eventSchema> {
 }
 
 function describeJob(job: JobView): string {
+  const prs = job.pullRequests === null ? 'PRs: unknown' : job.pullRequests.length === 0 ? 'PRs: none'
+    : `PRs: ${job.pullRequests.map((pr) => `${pr.repository}#${pr.number} ${pr.state ?? 'unknown'} ${pr.url}`).join(', ')}`;
   const waiting = job.waitingOnDelegatedWork ? ', waiting on delegated work' : '';
-  return `${job.jobId} [${job.state}${job.standing ? ', standing' : ''}${waiting}] ${job.project}: ${job.title}`;
+  return `${job.jobId} [${job.state}${job.standing ? ', standing' : ''}${waiting}] ${job.project}: ${job.title} | ${prs} (checked ${job.pullRequestsCheckedAt ?? 'never'})`;
 }
 
 export function workTools(jobs: JobService): GatewayTool[] {
@@ -488,6 +495,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'created, state_changed (fromState to toState, with a reason), followup_sent, input_answered, turn_finished (an idle ' +
       'job ran a whole turn you did not start, between two checks), delegated_work_ended (an idle job\'s delegated work ' +
       'finished, failed or was cancelled and it did not resume: send work_continue asking it to check on that work), ' +
+      'pull_request_opened or pull_request_merged (cached linked PR changes: read work_status for references), ' +
       'interrupt_requested (work_cancel on a standing job). A ' +
       'turn you did not start shows as state_changed idle to running with reason turn_started (or as turn_finished): a person ' +
       'typed in T3, or a coordinator resumed after work it delegated finished. Standing jobs (long-lived threads the operator ' +

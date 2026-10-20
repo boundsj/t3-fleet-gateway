@@ -444,3 +444,15 @@ describe('dashboard webhook connections: running browser handlers', () => {
     restarted.assertNoSecrets();
   });
 });
+
+test('job PR badges show number and state without adding arbitrary links', async () => {
+  const app = await loadApp();
+  const doc = new FakeDocument();
+  const root = doc.createElement('div');
+  const snap = hostileSnapshot();
+  snap.jobs.open[0]!.pullRequests = [{ number: 21, state: 'open' }, { number: 22, state: 'merged' }];
+  app.render(doc, root, { snapshot: snap, route: { view: 'jobs', id: null }, jobFilter: 'open' }, actions().handlers, Date.parse(NOW));
+  assert.match(root.textContent, /PR #21 open/);
+  assert.match(root.textContent, /PR #22 merged/);
+  assertSafeTree(root);
+});

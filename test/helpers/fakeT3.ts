@@ -639,6 +639,9 @@ export class FakeT3 {
     await sendWebResponse(res, response);
   }
 
+  readonly pullRequests = new Map<string, Record<string, unknown>[]>();
+  inlinePullRequests = false;
+
   #buildServer(): McpServer {
     const server = new McpServer({ name: 'T3 Code', version: this.serverVersion });
     const run = async (tool: string, produce: () => Record<string, unknown>) => {
@@ -673,6 +676,9 @@ export class FakeT3 {
         preferences: { backgroundActivity: { profile: 'balanced' } },
       })),
     );
+    tool('list_thread_pull_requests', z.strictObject({ threadId: z.string() }), ({ threadId }) => ({
+      pullRequests: this.pullRequests.get(threadId) ?? [],
+    }));
     tool('t3_project_list', projectListInput, ({ cursor, limit }) => {
       const start = cursor ?? 0;
       const size = limit ?? 50;
@@ -945,6 +951,7 @@ export class FakeT3 {
       runtimeMode: thread.runtimeMode,
       interactionMode: 'default',
       linkedPullRequest: null,
+      ...(this.inlinePullRequests ? { pullRequests: this.pullRequests.get(thread.threadId) ?? [] } : {}),
       settled: thread.settled,
       settledAt: thread.settled ? thread.updatedAt : null,
       snoozed: false,
