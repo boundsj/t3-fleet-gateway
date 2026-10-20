@@ -16,7 +16,6 @@ import { jobMarker } from './service.ts';
 import type { Job, JobChanges, JobStore } from './store.ts';
 import { launchPolicy, mapProjects } from './targets.ts';
 import { probeRequest, resolveWorkspace, runWorkspaceProbe, type ResolvedWorkspace, type WorkspaceIntent } from './workspace.ts';
-import { sanitizeProjects } from '../hosts/catalog.ts';
 
 /** Launches can take a while: T3 prepares the worktree before answering. */
 const LAUNCH_TIMEOUT_MS = 60 * SECOND;

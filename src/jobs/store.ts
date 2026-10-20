@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
 import type { Logger } from '../log.ts';
@@ -97,6 +98,11 @@ export interface Job {
    * and folder holds it: the ledger refuses a second, atomically.
    */
   workspaceRootHeldAt: number | null;
+  /**
+   * Opaque tokens of the follow-ups and answers the gateway has begun to send to this idle job and that no outcome has settled
+   * (see `reserveRoot`). Never shown or logged.
+   */
+  workspaceResumeTokens: string[];
   /** Probes that could not reach the host for this queued job, and the earliest time of the next try (migration 12). */
   probeAttempts: number;
   probeRetryAt: number | null;
@@ -229,6 +235,7 @@ interface JobRow {
   workspace_kind: 'root' | 'worktree' | null;
   workspace_root_key: string | null;
   workspace_root_held_at: number | null;
+  workspace_resume_tokens: string;
   probe_attempts: number;
   probe_retry_at: number | null;
 }
@@ -352,6 +359,7 @@ function toJob(row: JobRow): Job {
     workspaceKind: row.workspace_kind,
     workspaceRootKey: row.workspace_root_key,
     workspaceRootHeldAt: row.workspace_root_held_at,
+    workspaceResumeTokens: parseIds(row.workspace_resume_tokens),
     probeAttempts: row.probe_attempts,
     probeRetryAt: row.probe_retry_at,
   };
@@ -436,6 +444,9 @@ export interface NewStandingJob {
   delegatedUntracked: number;
   delegatedUntrackedRunId: string | null;
 }
+
+/** Resume attempts at once that no outcome has settled, per job; beyond this a resume is refused as busy. */
+const MAX_RESUME_ATTEMPTS = 8;
 
 /** What a write found out beyond what it wrote. */
 interface WriteOutcome {
@@ -753,43 +764,56 @@ export class JobStore {
   }
 
   /**
-   * Take the reservation of an idle root job that is about to be resumed (a follow-up or an answer the gateway sends to its
-   * thread), before anything is sent. `busy`: another job on the host holds the folder, so nothing may be sent. A job that is
-   * not a root job, or already holds its folder, needs nothing.
+   * Begin an attempt to resume an idle root job (a follow-up or an answer the gateway is about to send to its thread), before
+   * anything is sent. The folder is taken if no other job on the host holds it (`busy` otherwise, and nothing may be sent);
+   * a job that is not an idle root job needs nothing. Every attempt gets its own opaque `token`, stored with the job, and
+   * restarts the grace period (`workspace_root_held_at` is set to now, whether or not the job already held the folder), so a
+   * retry can never be swept while it is in flight. The attempt must end with `abandonResume(token)` if T3 definitely did not
+   * take the message; any other end leaves its token, which is the uncertainty: the folder stays held until the job's state
+   * takes over (the message started a run: the tokens are cleared), or the grace period ends without a later attempt.
    */
-  reserveRoot(id: string): 'held' | 'not_needed' | 'busy' {
+  reserveRoot(id: string): { kind: 'not_needed' | 'busy' } | { kind: 'held'; token: string } {
     return transaction(this.#db, () => {
       const job = this.get(id);
-      if (!job || job.workspaceRootKey === null || isTerminal(job.state)) return 'not_needed';
-      if (job.workspaceRootHeldAt !== null) return 'held';
-      if (this.#otherHolder(job.hostId, job.workspaceRootKey, id)) return 'busy';
-      this.#db.prepare('UPDATE jobs SET workspace_root_held_at = ? WHERE id = ?').run(this.#clock(), id);
-      return 'held';
+      if (!job || job.workspaceRootKey === null || job.state !== 'idle') return { kind: 'not_needed' } as const;
+      if (job.workspaceRootHeldAt === null && this.#otherHolder(job.hostId, job.workspaceRootKey, id)) return { kind: 'busy' } as const;
+      if (job.workspaceResumeTokens.length >= MAX_RESUME_ATTEMPTS) return { kind: 'busy' } as const;
+      const token = randomUUID();
+      this.#db
+        .prepare('UPDATE jobs SET workspace_root_held_at = ?, workspace_resume_tokens = ? WHERE id = ?')
+        .run(this.#clock(), JSON.stringify([...job.workspaceResumeTokens, token]), id);
+      return { kind: 'held', token } as const;
     });
   }
 
   /**
-   * Give back a reservation taken for a resume that definitely did not reach T3, if the job is at rest (idle, nothing
-   * delegated). A job that is running, or waiting on delegated work, keeps its folder.
+   * The attempt `token` (from `reserveRoot`) definitely did not reach T3. It leaves the job's attempts; only when none is left
+   * (no other attempt in flight, none that ended unknown) and the job is at rest (idle, nothing delegated) is the folder given
+   * back. A token that is no longer there (the state took over, the grace period ended) changes nothing.
    */
-  releaseResumeHold(id: string): void {
-    this.#db
-      .prepare(
-        `UPDATE jobs SET workspace_root_held_at = NULL WHERE id = ? AND workspace_root_held_at IS NOT NULL AND state = 'idle'
-           AND delegated_work = '[]' AND delegated_untracked = 0`,
-      )
-      .run(id);
+  abandonResume(id: string, token: string): void {
+    transaction(this.#db, () => {
+      const job = this.get(id);
+      if (!job || !job.workspaceResumeTokens.includes(token)) return;
+      const remaining = job.workspaceResumeTokens.filter((candidate) => candidate !== token);
+      const atRest = job.state === 'idle' && job.delegatedWork.length === 0 && job.delegatedUntracked === 0;
+      if (remaining.length === 0 && atRest) {
+        this.#db.prepare("UPDATE jobs SET workspace_root_held_at = NULL, workspace_resume_tokens = '[]' WHERE id = ?").run(id);
+      } else {
+        this.#db.prepare('UPDATE jobs SET workspace_resume_tokens = ? WHERE id = ?').run(JSON.stringify(remaining), id);
+      }
+    });
   }
 
   /**
    * Release the reservations of idle jobs on a host that nothing runs behind any more and that have held for longer than
-   * `maxAgeMs`: a resume whose outcome stayed unknown and was never followed up. One bounded statement; a run that did
+   * `maxAgeMs`: a resume whose outcome stayed unknown and was never followed up (every attempt restarts the period). One bounded statement; a run that did
    * start is seen by the watcher, which moves the job out of idle, and holds again by state. Returns how many were released.
    */
   releaseStaleHolds(hostId: string, now: number, maxAgeMs: number): number {
     const result = this.#db
       .prepare(
-        `UPDATE jobs SET workspace_root_held_at = NULL WHERE host_id = ? AND workspace_root_held_at IS NOT NULL AND workspace_root_held_at < ?
+        `UPDATE jobs SET workspace_root_held_at = NULL, workspace_resume_tokens = '[]' WHERE host_id = ? AND workspace_root_held_at IS NOT NULL AND workspace_root_held_at < ?
            AND state = 'idle' AND delegated_work = '[]' AND delegated_untracked = 0`,
       )
       .run(hostId, now - maxAgeMs);
@@ -979,7 +1003,11 @@ export class JobStore {
     const rootKey = effective.workspaceRootKey === undefined ? current.workspaceRootKey : effective.workspaceRootKey;
     const holds = rootKey !== null && holdsRoot(nextState, nextWork, nextUntracked);
     const occupiedBefore = holdsRoot(current.state, current.delegatedWork, current.delegatedUntracked);
-    const moved = nextState !== current.state || JSON.stringify(nextWork) !== JSON.stringify(current.delegatedWork) || nextUntracked !== current.delegatedUntracked;
+    const stateChanged = nextState !== current.state;
+    const moved = stateChanged || JSON.stringify(nextWork) !== JSON.stringify(current.delegatedWork) || nextUntracked !== current.delegatedUntracked;
+    // Resume attempts that no outcome settled keep an idle job's folder; a change of state ends them (the state holds, or does not).
+    if (stateChanged && current.workspaceResumeTokens.length > 0) sets.push("workspace_resume_tokens = '[]'");
+    const resuming = !stateChanged && current.workspaceResumeTokens.length > 0;
     if (holds && current.workspaceRootHeldAt === null) {
       if (this.#otherHolder(current.hostId, rootKey, current.id)) {
         if (outcome && !occupiedBefore) outcome.contended = true;
@@ -987,7 +1015,7 @@ export class JobStore {
         sets.push('workspace_root_held_at = ?');
         params.push(now);
       }
-    } else if (!holds && current.workspaceRootHeldAt !== null && (moved || rootKey === null)) {
+    } else if (!holds && !resuming && current.workspaceRootHeldAt !== null && (moved || rootKey === null)) {
       sets.push('workspace_root_held_at = NULL');
     }
     if (sets.length === 0) return false;

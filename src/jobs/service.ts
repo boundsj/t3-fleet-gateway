@@ -820,7 +820,8 @@ export class JobService {
     if (threadId === null) throw new GatewayError('job_state_conflict', `Job ${job.id} has no thread.`);
     // Resuming an idle job that works in the project's own folder takes the folder back first, before anything is sent: while
     // another job holds it the follow-up waits, and the same requestId may be sent again later.
-    if (job.state === 'idle' && this.store.reserveRoot(job.id) === 'busy') {
+    const attempt = job.state === 'idle' ? this.store.reserveRoot(job.id) : ({ kind: 'not_needed' } as const);
+    if (attempt.kind === 'busy') {
       if (!key) this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
       throw rootBusy(job);
     }
@@ -835,7 +836,8 @@ export class JobService {
     } catch (error) {
       if (error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered')) {
         this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
-        this.store.releaseResumeHold(job.id);
+        // Only this attempt's own claim ends here: an earlier attempt of the job that may have been delivered keeps the folder.
+        if (attempt.kind === 'held') this.store.abandonResume(job.id, attempt.token);
         throw error;
       }
       const described = describeError(error);
@@ -867,11 +869,14 @@ export class JobService {
       throw new GatewayError('not_found', `That request is not pending on job ${job.id}. ${hint}`);
     }
     // An answer starts the worker again: an idle root job takes its folder back first (see continue).
-    if (job.state === 'idle' && this.store.reserveRoot(job.id) === 'busy') throw rootBusy(job);
+    const attempt = job.state === 'idle' ? this.store.reserveRoot(job.id) : ({ kind: 'not_needed' } as const);
+    if (attempt.kind === 'busy') throw rootBusy(job);
     try {
       await client.respondToPendingRequest(job.threadId, input.requestId, input.answers);
     } catch (error) {
-      if (error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered')) this.store.releaseResumeHold(job.id);
+      if (attempt.kind === 'held' && (error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered'))) {
+        this.store.abandonResume(job.id, attempt.token);
+      }
       throw error;
     }
     const remaining = pending.filter((id) => id !== input.requestId);

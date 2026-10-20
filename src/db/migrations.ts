@@ -327,12 +327,16 @@ ALTER TABLE webhook_subscriptions ADD COLUMN last_test_status_code INTEGER;
     // resolves: workspace_kind ('root', the project's own folder, or 'worktree'; NULL for jobs without a resolved workspace)
     // and workspace_root_key (a hash of host and canonical folder, set for root jobs). workspace_root_held_at is the ledger
     // reservation: the job holds its folder from that time, and the partial unique index lets one job per host and folder
-    // hold it. The probe columns bound the retries of a job whose probe could not reach its host (attempts, and not before).
+    // hold it. workspace_resume_tokens (a JSON array of opaque tokens, '[]' by default) names the follow-ups and answers the gateway has
+    // begun sending to an idle root job that no outcome has settled: an attempt adds its token before it sends and removes it when T3
+    // definitely did not take the message; a token that stays (an unknown outcome) keeps the folder held until the job's state takes
+    // over or the grace period ends. The probe columns bound the retries of a job whose probe could not reach its host (attempts, and not before).
     // Existing rows and their indexes are unchanged.
     sql: `
 ALTER TABLE jobs ADD COLUMN workspace_kind TEXT CHECK (workspace_kind IN ('root', 'worktree'));
 ALTER TABLE jobs ADD COLUMN workspace_root_key TEXT;
 ALTER TABLE jobs ADD COLUMN workspace_root_held_at INTEGER;
+ALTER TABLE jobs ADD COLUMN workspace_resume_tokens TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE jobs ADD COLUMN probe_attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN probe_retry_at INTEGER;
 CREATE INDEX jobs_workspace_root ON jobs(host_id, workspace_root_key) WHERE workspace_root_key IS NOT NULL;

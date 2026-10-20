@@ -476,9 +476,10 @@ export class FakeT3 {
     return new Promise((resolve) => this.#holdWaiters.push({ tool, resolve }));
   }
 
-  /** Send every held answer. */
-  releaseHeld(): void {
-    for (const held of this.#held.splice(0)) held.release();
+  /** Send every held answer, or only the `first` or `last` one to be held (callers in flight finish in the order the test chooses). */
+  releaseHeld(which: 'all' | 'first' | 'last' = 'all'): void {
+    const released = which === 'all' ? this.#held.splice(0) : this.#held.splice(which === 'first' ? 0 : this.#held.length - 1, 1);
+    for (const held of released) held.release();
   }
 
   /** Apply interrupts accepted while deferInterrupts was set. */

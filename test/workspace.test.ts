@@ -516,7 +516,7 @@ describe('root reservations', () => {
     // The first job finishes, and a follow-up to it is sent before the waiting job launches; its outcome stays unknown.
     h.fake.finishTurn(h.fake.threadForJob(first.jobId).threadId, 'done');
     assert.ok(store(h).transition(first.jobId, { from: ['running'], to: 'idle', detail: { reason: 'completed' } }));
-    assert.equal(store(h).reserveRoot(first.jobId), 'held');
+    assert.equal(store(h).reserveRoot(first.jobId).kind, 'held');
     assert.notEqual(store(h).require(first.jobId).workspaceRootHeldAt, null);
     await h.tick();
     assert.equal(await jobState(h.agent, second.jobId), 'queued', 'the held folder keeps the other job waiting');
@@ -554,6 +554,177 @@ describe('root reservations', () => {
     assert.equal(store(h).require(first.jobId).workspaceRootHeldAt, null);
     const feed = await h.agent.call<{ events: { type: string; jobId: string; reason: string | null }[] }>('work_feed', { cursor: 0, limit: 100 });
     assert.ok(feed.events.some((event) => event.type === 'workspace_root_contended' && event.jobId === first.jobId && event.reason === 'workspace_root_busy'));
+  });
+});
+
+describe('resume ownership of a held folder', () => {
+  /** An idle root job A that has the folder to itself and has nothing in flight, as the tests start from. */
+  async function idleRoot(h: Probed) {
+    h.fake.projects[0]!.workspaceRoot = SHARED;
+    h.fake.projects[1]!.workspaceRoot = SHARED;
+    const a = await start(h, { project: 'pilot', workspace: root });
+    await h.tick();
+    h.fake.finishTurn(h.fake.threadForJob(a.jobId).threadId, 'done');
+    await h.tick();
+    assert.equal(store(h).require(a.jobId).state, 'idle');
+    assert.equal(store(h).require(a.jobId).workspaceRootHeldAt, null);
+    return a;
+  }
+  const waitingJob = (h: Probed) => start(h, { project: 'docs', workspace: root });
+  const holder = (h: Probed, jobId: string) => store(h).require(jobId).workspaceRootHeldAt;
+  const call = (h: Probed, name: string, args: Record<string, unknown>) => h.agent.client.callTool({ name, arguments: args });
+  const sendsAre = async (h: Probed, count: number) => {
+    for (let waited = 0; h.fake.sends.length < count && waited < 200; waited++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(h.fake.sends.length, count);
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+
+  test('a retry after an unknown send refreshes the grace period: the sweep cannot free the folder under it', async (t) => {
+    const h = await probed(t, { maxConcurrentJobs: 4 });
+    const a = await idleRoot(h);
+    h.fake.statusOnce.set('t3_thread_send', 502);
+    const first = await call(h, 'work_continue', { jobId: a.jobId, message: 'More', requestId: 'resend' });
+    assert.equal(first.isError, true, 'the outcome of the first send is unknown');
+    assert.notEqual(holder(h, a.jobId), null);
+    const q = await waitingJob(h);
+    await h.tick();
+    assert.equal(store(h).require(q.jobId).state, 'queued');
+    await h.tickAfter(9 * MINUTE + 59 * SECOND);
+    assert.equal(store(h).require(q.jobId).state, 'queued', 'inside the grace period');
+    h.fake.holdResponses.add('t3_thread_send');
+    const retry = call(h, 'work_continue', { jobId: a.jobId, message: 'More', requestId: 'resend' });
+    await h.fake.whenHeld('t3_thread_send');
+    // The original attempt is now more than ten minutes old; the retry is in flight and has restarted the period.
+    await h.tickAfter(20 * SECOND);
+    assert.notEqual(holder(h, a.jobId), null, 'the retry in flight still holds the folder');
+    assert.equal(store(h).require(q.jobId).state, 'queued', 'the other job did not launch under the retry');
+    h.fake.holdResponses.delete('t3_thread_send');
+    h.fake.releaseHeld();
+    assert.equal((await retry).isError, undefined);
+    assert.equal(await jobState(h.agent, a.jobId), 'running');
+    assert.equal(h.fake.launches.length, 1, 'still only the first job');
+    // Normal recovery: when the resumed turn is over the waiting job starts.
+    h.fake.finishTurn(h.fake.threadForJob(a.jobId).threadId, 'done again');
+    await h.tick();
+    await h.tick();
+    assert.equal(store(h).require(q.jobId).state, 'running');
+  });
+
+  for (const order of ['taken first', 'second first'] as const) {
+    test(`two concurrent follow-ups to one idle job: a definite failure of one never frees the folder under the other (${order} fails)`, async (t) => {
+      const h = await probed(t, { maxConcurrentJobs: 4 });
+      const a = await idleRoot(h);
+      const q = await waitingJob(h);
+      h.fake.holdResponses.add('t3_thread_send');
+      // The call that fails definitely (T3 answers with an error once the message has been handled) is the first or the second to arrive.
+      const fails = order === 'taken first' ? 0 : 1;
+      const calls: Promise<{ isError?: boolean | undefined }>[] = [];
+      for (const index of [0, 1]) {
+        if (index === fails) h.fake.failuresAfterEffect.set('t3_thread_send', { code: 'invalid_request', message: 'Synthetic refusal.' });
+        calls.push(call(h, 'work_continue', { jobId: a.jobId, message: `Follow-up ${index}`, requestId: `double-${index}` }));
+        await sendsAre(h, index + 1);
+        h.fake.failuresAfterEffect.delete('t3_thread_send');
+      }
+      h.fake.holdResponses.delete('t3_thread_send');
+      // The failing call finishes first while the other is still in flight.
+      h.fake.releaseHeld(fails === 0 ? 'first' : 'last');
+      assert.equal((await calls[fails]!).isError, true);
+      await settle();
+      assert.notEqual(holder(h, a.jobId), null, 'the other call is still in flight');
+      await h.tick();
+      assert.equal(store(h).require(q.jobId).state, 'queued');
+      h.fake.releaseHeld();
+      assert.equal((await calls[1 - fails]!).isError, undefined);
+      assert.equal(await jobState(h.agent, a.jobId), 'running');
+      assert.equal(store(h).require(q.jobId).state, 'queued', 'the resumed job keeps the folder');
+    });
+  }
+
+  test('when both concurrent follow-ups fail definitely the folder is free again, and only then', async (t) => {
+    const h = await probed(t, { maxConcurrentJobs: 4 });
+    const a = await idleRoot(h);
+    const q = await waitingJob(h);
+    h.fake.holdResponses.add('t3_thread_send');
+    h.fake.failuresAfterEffect.set('t3_thread_send', { code: 'invalid_request', message: 'Synthetic refusal.' });
+    const calls = [0, 1].map((index) => call(h, 'work_continue', { jobId: a.jobId, message: `Follow-up ${index}`, requestId: `both-${index}` }));
+    await sendsAre(h, 2);
+    h.fake.holdResponses.delete('t3_thread_send');
+    h.fake.releaseHeld('first');
+    await settle();
+    assert.notEqual(holder(h, a.jobId), null, 'one attempt is still in flight');
+    h.fake.releaseHeld();
+    assert.deepEqual((await Promise.all(calls)).map((result) => result.isError), [true, true]);
+    assert.equal(holder(h, a.jobId), null);
+    assert.equal(await jobState(h.agent, a.jobId), 'idle');
+    await h.tick();
+    assert.equal(store(h).require(q.jobId).state, 'running');
+  });
+
+  test('a definite refusal of a retry never frees the hold an earlier unknown attempt left', async (t) => {
+    const h = await probed(t, { maxConcurrentJobs: 4 });
+    const a = await idleRoot(h);
+    h.fake.statusOnce.set('t3_thread_send', 502);
+    assert.equal((await call(h, 'work_continue', { jobId: a.jobId, message: 'More', requestId: 'retry-refused' })).isError, true);
+    const q = await waitingJob(h);
+    h.fake.failures.set('t3_thread_send', { code: 'invalid_request', message: 'Synthetic refusal.' });
+    assert.equal((await call(h, 'work_continue', { jobId: a.jobId, message: 'More', requestId: 'retry-refused' })).isError, true);
+    h.fake.failures.delete('t3_thread_send');
+    assert.notEqual(holder(h, a.jobId), null, 'the first attempt may have been delivered');
+    await h.tick();
+    assert.equal(store(h).require(q.jobId).state, 'queued');
+    // The uncertainty survives a restart of the engine's memory (it is in the ledger) and ends only with the grace period.
+    await h.tickAfter(11 * MINUTE);
+    await h.tick();
+    assert.equal(holder(h, a.jobId), null);
+    assert.equal(store(h).require(q.jobId).state, 'running');
+  });
+
+  test('an answer follows the same rule: a refused retry does not free the hold of an unknown answer', async (t) => {
+    const h = await probed(t, { maxConcurrentJobs: 4 });
+    h.fake.projects[0]!.workspaceRoot = SHARED;
+    h.fake.projects[1]!.workspaceRoot = SHARED;
+    const a = await start(h, { project: 'pilot', workspace: root });
+    await h.tick();
+    const thread = h.fake.threadForJob(a.jobId);
+    const requestId = h.fake.askQuestion(thread.threadId, [{ id: 'q1', header: 'H', question: 'Which?', options: [{ label: 'A', description: 'a' }] }]);
+    h.fake.endTurn(thread.threadId);
+    await h.tick();
+    // The job is at rest with the question still listed (forced through the ledger: the watcher would call it needs_input).
+    store(h).transition(a.jobId, { from: ['needs_input'], to: 'idle', detail: { reason: 'test' } });
+    assert.equal(holder(h, a.jobId), null);
+    h.fake.statusOnce.set('t3_pending_request_respond', 502);
+    assert.equal((await call(h, 'work_respond', { jobId: a.jobId, requestId, answers: { q1: 'A' } })).isError, true);
+    assert.notEqual(holder(h, a.jobId), null);
+    const q = await waitingJob(h);
+    h.fake.failures.set('t3_pending_request_respond', { code: 'invalid_request', message: 'Synthetic refusal.' });
+    assert.equal((await call(h, 'work_respond', { jobId: a.jobId, requestId, answers: { q1: 'A' } })).isError, true);
+    h.fake.failures.delete('t3_pending_request_respond');
+    assert.notEqual(holder(h, a.jobId), null, 'the first answer may have been delivered');
+    await h.tick();
+    assert.equal(store(h).require(q.jobId).state, 'queued');
+    // The question is still listed, so the watcher puts the job back to needs_input: the state holds the folder from here on.
+    await h.tickAfter(11 * MINUTE);
+    assert.equal(await jobState(h.agent, a.jobId), 'needs_input');
+    assert.notEqual(holder(h, a.jobId), null);
+    assert.deepEqual(store(h).require(a.jobId).workspaceResumeTokens, [], 'the state took over from the attempts');
+    assert.equal(store(h).require(q.jobId).state, 'queued');
+  });
+
+  test('the ownership token of an attempt in flight never leaves the ledger and is gone once the job runs by state', async (t) => {
+    const h = await probed(t, { maxConcurrentJobs: 4 });
+    const a = await idleRoot(h);
+    h.fake.holdResponses.add('t3_thread_send');
+    const pending = call(h, 'work_continue', { jobId: a.jobId, message: 'More', requestId: 'token' });
+    await h.fake.whenHeld('t3_thread_send');
+    const [token] = store(h).require(a.jobId).workspaceResumeTokens;
+    assert.ok(token, 'an attempt in flight has an owner');
+    const seen = JSON.stringify([await h.agent.call('work_status', { jobId: a.jobId }), await h.agent.call('work_list', {}), await h.agent.call('work_feed', { cursor: 0, limit: 100 })]);
+    assert.equal(seen.includes(token), false);
+    h.fake.holdResponses.delete('t3_thread_send');
+    h.fake.releaseHeld();
+    await pending;
+    assertNotLogged(h.gw, [token]);
+    assert.deepEqual(store(h).require(a.jobId).workspaceResumeTokens, [], 'the running job holds by state, not by attempt');
   });
 });
 

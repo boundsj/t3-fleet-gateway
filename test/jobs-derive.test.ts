@@ -42,6 +42,7 @@ function job(overrides: Partial<Job> = {}): Job {
     workspaceKind: null,
     workspaceRootKey: null,
     workspaceRootHeldAt: null,
+    workspaceResumeTokens: [],
     probeAttempts: 0,
     probeRetryAt: null,
     standing: false,

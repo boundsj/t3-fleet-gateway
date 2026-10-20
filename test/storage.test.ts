@@ -123,7 +123,7 @@ describe('database', () => {
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
       after.map(
-        ({ standing, delegated_work, activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, probe_attempts, probe_retry_at, ...rest }) =>
+        ({ standing, delegated_work, activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, ...rest }) =>
           rest,
       ),
       before,
@@ -217,7 +217,7 @@ CREATE TABLE jobs (
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
     const after = (db.prepare('SELECT * FROM jobs').all() as Record<string, unknown>[]).map(
-      ({ activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, probe_attempts, probe_retry_at, ...rest }) => [activity_position, rest],
+      ({ activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, ...rest }) => [activity_position, rest],
     );
     assert.deepEqual(after, before.map((row) => [null, row]), 'existing jobs keep every column and have no activity position yet');
     const store = new JobStore(db, () => 1_000, silentLogger);
@@ -251,7 +251,7 @@ CREATE TABLE jobs (
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
     const after = (db.prepare('SELECT * FROM jobs').all() as Record<string, unknown>[]).map(
-      ({ delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, probe_attempts, probe_retry_at, ...rest }) => [[delegated_untracked, delegated_untracked_run_id, delegated_ended_at], rest],
+      ({ delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, ...rest }) => [[delegated_untracked, delegated_untracked_run_id, delegated_ended_at], rest],
     );
     assert.deepEqual(after, before.map((row) => [[0, null, null], row]), 'existing jobs keep every column, with nothing untracked or ended');
     const store = new JobStore(db, () => 1_000, silentLogger);
@@ -289,7 +289,7 @@ CREATE TABLE jobs (
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
     const after = (db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[]).map(
-      ({ latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, probe_attempts, probe_retry_at, ...rest }) => [latest_message_truncated, rest],
+      ({ latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, ...rest }) => [latest_message_truncated, rest],
     );
     assert.deepEqual(after, before.map((row, index) => [[0, 1, 1, 0][index], row]), 'existing jobs keep every column; excerpts at the bound are cut');
     const store = new JobStore(db, () => 1_000, silentLogger);
@@ -333,7 +333,7 @@ CREATE TABLE jobs (
     assert.deepEqual(
       tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().map((row) => {
         // Migration 8 adds launch_spec to jobs, NULL for every existing row.
-        const { launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, probe_attempts, probe_retry_at, ...rest } = { ...row } as Record<string, unknown>;
+        const { launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, ...rest } = { ...row } as Record<string, unknown>;
         if (table === 'jobs') assert.equal(launch_spec, null);
         return table === 'jobs' ? rest : { ...row };
       })),
@@ -391,7 +391,7 @@ CREATE TABLE jobs (
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
     assert.deepEqual(tables.map((table) => rowsWithoutV12(db, table)), before);
-    const jobs = (db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[]).map(({ launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, probe_attempts, probe_retry_at, ...rest }) => [launch_spec, rest]);
+    const jobs = (db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[]).map(({ launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, ...rest }) => [launch_spec, rest]);
     assert.deepEqual(jobs, jobsBefore.map((row) => [null, row]), 'existing jobs keep every column and have no launch spec');
     const store = new JobStore(db, () => 1_000, silentLogger);
     assert.deepEqual([store.require('jobqueue001').launchSpec, store.require('jobstand001').launchSpec, store.require('jobstand001').standing], [null, null, true]);
@@ -550,8 +550,8 @@ CREATE TABLE jobs (
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
     assert.equal(SCHEMA_VERSION, 12);
     assert.deepEqual(['jobs', 'job_events', 'idempotency_keys'].map((table) => rowsWithoutV12(db, table)), before, 'no existing column changes');
-    const added = db.prepare('SELECT workspace_kind, workspace_root_key, workspace_root_held_at, probe_attempts, probe_retry_at FROM jobs ORDER BY rowid').all().map((row) => ({ ...row }));
-    assert.deepEqual(added, Array(2).fill({ workspace_kind: null, workspace_root_key: null, workspace_root_held_at: null, probe_attempts: 0, probe_retry_at: null }));
+    const added = db.prepare('SELECT workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at FROM jobs ORDER BY rowid').all().map((row) => ({ ...row }));
+    assert.deepEqual(added, Array(2).fill({ workspace_kind: null, workspace_root_key: null, workspace_root_held_at: null, workspace_resume_tokens: '[]', probe_attempts: 0, probe_retry_at: null }));
     const migrated = new JobStore(db, () => 2_000, silentLogger);
     assert.equal(migrated.require('legacy0002').launchSpec?.v, 1);
     assert.equal(migrated.require('legacy0001').workspaceKind, null);
