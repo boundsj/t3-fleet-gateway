@@ -121,6 +121,20 @@ Open your private dashboard to see which machines answer, which agents have conn
 
 The dashboard uses a separate loopback listener and belongs behind your private tailnet proxy. Your public MCP URL is for agents. [Dashboard setup and access](docs/operations.md#operator-dashboard).
 
+## Follow a job's pull requests
+
+Ask your bot:
+
+```text
+Which PRs came out of that job? Show me what's open and what's merged.
+```
+
+`work_status` and `work_list` include cached PR links and states, even for text-only clients. The dashboard shows a small **PR #21 open** badge beside the job. Workers need to register their PR with T3's `link_pull_request`; a coordinator should link its children's PRs too.
+
+> **What this means:** you can follow the result of a job without searching GitHub. PRs refresh about once a minute while the job is followed, on top of T3's own sync delay. Unknown means not yet readable; a finished or released job keeps its last snapshot.
+
+Want your bot to wake when a PR opens or merges? Add `pull_request_opened` and `pull_request_merged` to a [configured webhook subscription](docs/configuration.md#webhooks). These are opt-in; dashboard connections keep their existing five events.
+
 ## Discover projects and choose models
 
 Discovery is off by default: agents see the aliases you configured. To browse a machine's existing T3 projects and available models, ask your setup agent:

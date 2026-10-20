@@ -101,6 +101,8 @@ const EVENT_TYPES: Record<string, string> = {
   input_answered: 'Question answered',
   turn_finished: 'Ran a turn by itself',
   delegated_work_ended: 'Delegated work ended',
+  pull_request_opened: 'Pull request opened',
+  pull_request_merged: 'Pull request merged',
   interrupt_requested: 'Interrupt requested',
 };
 

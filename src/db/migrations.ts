@@ -343,6 +343,12 @@ CREATE INDEX jobs_workspace_root ON jobs(host_id, workspace_root_key) WHERE work
 CREATE UNIQUE INDEX jobs_workspace_root_held ON jobs(host_id, workspace_root_key) WHERE workspace_root_held_at IS NOT NULL;
 `,
   },
+  {
+    version: 13,
+    name: 'job pull request snapshots',
+    sql: `ALTER TABLE jobs ADD COLUMN pull_requests TEXT;
+ALTER TABLE jobs ADD COLUMN pull_requests_checked_at INTEGER;`,
+  },
 ];
 
 /**

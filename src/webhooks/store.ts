@@ -51,6 +51,7 @@ export interface WebhookPayload {
   standing: boolean;
   waitingOnDelegatedWork: boolean;
   turnInitiator: { kind: 'gateway' | 'unknown'; clientId: string | null };
+  pullRequests?: { number: number; state: 'open' | 'closed' | 'merged' | null; url: string }[];
   excerpt?: string | null;
   excerptTruncated?: boolean;
 }
@@ -68,6 +69,7 @@ export interface ClaimedDelivery {
   lease: string; attempt: number; expiresAt: number; route: WebhookRoute;
 }
 function eventType(event: JobEvent): WebhookEventType | undefined {
+  if (event.type === 'pull_request_opened' || event.type === 'pull_request_merged') return event.type;
   if (event.type === 'delegated_work_ended') return 'delegated_work_ended';
   if (event.type === 'turn_finished') return 'idle';
   if (event.type === 'state_changed' && ['idle', 'needs_input', 'failed', 'cancelled', 'running'].includes(event.toState ?? '')) {
@@ -216,6 +218,9 @@ export class WebhookStore {
       standing: job.standing, waitingOnDelegatedWork: job.delegatedWork.length > 0 || job.delegatedUntracked > 0,
       turnInitiator: turn ? { kind: 'gateway', clientId: turn.client_id } : { kind: 'unknown', clientId: null },
     };
+    if (type === 'pull_request_opened' || type === 'pull_request_merged') {
+      payload.pullRequests = (job.pullRequests ?? []).map(({ number, state, url }) => ({ number, state, url }));
+    }
     for (const row of matches) {
       const s = JSON.parse(row.settings) as SubscriptionSettings;
       const body = { ...payload };

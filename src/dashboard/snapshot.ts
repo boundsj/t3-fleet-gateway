@@ -346,6 +346,7 @@ function replacementCommand(client: ClientView): string | null {
 // Jobs and events
 
 export interface JobView {
+  pullRequests: { number: number; state: string | null }[] | null;
   id: string;
   title: string;
   project: string;
@@ -373,6 +374,7 @@ function jobView(job: Job, clientLabels: Map<string, string>): JobView {
   const isOperator = job.clientId === OPERATOR_CLIENT_ID;
   return {
     id: job.id,
+    pullRequests: job.pullRequests?.map(({ number, state }) => ({ number, state })) ?? null,
     // Launched jobs' titles end with their thread marker; the id is shown on its own.
     title: clip(job.title.replace(/\s*\[job:[^\]]*\]\s*$/i, '') || job.title),
     project: job.projectAlias,
