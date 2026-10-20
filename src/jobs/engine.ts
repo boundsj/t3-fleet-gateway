@@ -11,7 +11,7 @@ import { MINUTE, SECOND, type Clock } from '../time.ts';
 import { readActivity, refreshDelegated, scanActivity } from './activity.ts';
 import { EXCERPT_CHARS, isActiveStatus, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { deliverInterrupt } from './interrupt.ts';
-import { validateSelection, type LaunchSpec, type ModelSelection, type Workspace } from './launchSpec.ts';
+import { validateSelection, type LaunchSpec, type ModelSelection } from './launchSpec.ts';
 import { jobMarker } from './service.ts';
 import type { Job, JobChanges, JobStore } from './store.ts';
 import { launchPolicy, mapProjects } from './targets.ts';
@@ -67,7 +67,14 @@ export function launchMessage(job: Job): string {
   return `${job.task}\n\n---\nStarted through t3-fleet-gateway as job ${job.id}, ${workspace}.`;
 }
 
-/** What one launch sends: from the project config (alias-only jobs) or from the job's recorded launch spec. */
+/** Where a launch puts the thread: a fresh worktree on a branch of the project, or T3's own scratch workspace. */
+type Workspace = { kind: 'scratch' } | { kind: 'worktree'; baseRef: string; branch: string };
+
+/**
+ * What one launch sends: from the project config (alias-only jobs) or from the job's recorded launch spec. For a scratch
+ * launch `projectId` is the configured pin: it is checked against the host's projects before the launch and names the project
+ * a lost launch is looked for in, but it is not sent (T3 files a scratch thread under its own scratch project).
+ */
 interface LaunchPlan {
   projectId: string;
   workspace: Workspace;
@@ -94,7 +101,7 @@ function planFromConfig(config: GatewayConfig, project: ProjectConfig, projectId
 function planFromSpec(spec: LaunchSpec, hostId: string, branch: string): LaunchPlan {
   return {
     projectId: spec.projectId,
-    workspace: spec.v === 1 ? { kind: 'worktree', baseRef: spec.baseRef, branch } : spec.workspace,
+    workspace: spec.v === 1 ? { kind: 'worktree', baseRef: spec.baseRef, branch } : { kind: 'scratch' },
     modelSelection: spec.model.selection ?? undefined,
     alias: spec.alias,
     missingModelHint: spec.model.selection
@@ -327,8 +334,8 @@ export class JobEngine {
    */
   async #planFromSpec(host: HostConfig, job: Job, spec: LaunchSpec): Promise<LaunchPlan | undefined> {
     const { config, catalog } = this.#options;
-    if (spec.v === 2 && (spec.hostId !== job.hostId ||
-        (spec.defaultProject !== null && (!host.discovery.enabled || host.defaultProject !== spec.defaultProject)))) {
+    // A host default needs no discovery: only the binding the job was started under must still hold.
+    if (spec.v === 2 && (spec.hostId !== job.hostId || (spec.defaultProject !== null && host.defaultProject !== spec.defaultProject))) {
       this.#failQueued(job, 'launch_policy_changed', 'The recorded host or default scratch binding changed. Start the work again under the current policy.');
       return undefined;
     }
@@ -352,7 +359,7 @@ export class JobEngine {
       if (alias) {
         // The agent named the alias: it must still resolve to the recorded project (a title may have moved) and accept work.
         if (!mapping.aliases.includes(alias)) changed = `project "${alias.alias}" no longer resolves to T3 project ${spec.projectId} on host ${job.hostId}`;
-        else if (alias.workspaceMode !== (spec.v === 1 ? 'worktree' : spec.workspace.kind)) changed = `project "${alias.alias}" changed workspace mode`;
+        else if (alias.workspaceMode !== (spec.v === 1 ? 'worktree' : 'scratch')) changed = `project "${alias.alias}" changed workspace mode`;
         else if (spec.v === 2 && alias.runtimeMode !== spec.runtimeMode) changed = `project "${alias.alias}" changed runtime mode`;
         else if (!alias.allowWorkStart) changed = `project "${alias.alias}" no longer accepts work_start`;
       } else {
@@ -406,14 +413,16 @@ export class JobEngine {
       try {
         launched = await registry.client(job.hostId).launchThread(
           {
-            projectId: plan.projectId,
             title: job.title,
-            workspaceStrategy: plan.workspace.kind === 'scratch'
-              ? { type: 'root' }
-              : { type: 'worktree', baseRef: plan.workspace.baseRef, branch: plan.workspace.branch, startFromOrigin: false },
             runtimeMode: job.runtimeMode as RuntimeMode,
             ...(plan.modelSelection ? { modelSelection: plan.modelSelection } : {}),
             message: launchMessage(job),
+            ...(plan.workspace.kind === 'scratch'
+              ? { scratch: true as const }
+              : {
+                  projectId: plan.projectId,
+                  workspaceStrategy: { type: 'worktree' as const, baseRef: plan.workspace.baseRef, branch: plan.workspace.branch, startFromOrigin: false },
+                }),
           },
           { timeoutMs: this.#launchTimeoutMs },
         );
@@ -436,6 +445,10 @@ export class JobEngine {
         if (error instanceof T3TransportError && error.code === 't3_timeout') return false;
         if (isHostFailure(error)) throw error;
         return true;
+      }
+      // The thread exists whichever project T3 filed it under, so the job follows it; only the warning says the pin was wrong.
+      if (plan.workspace.kind === 'scratch' && launched.projectId !== plan.projectId) {
+        this.#options.logger.warn('job.scratch_project_mismatch', { jobId: job.id, hostId: job.hostId });
       }
       const thread = { threadId: launched.threadId, threadTitle: job.title, lastRunId: launched.runId, threadLink: threadLinkTarget(launched.link) };
       await this.#attach(job.id, thread, 'launched', null);

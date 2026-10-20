@@ -230,6 +230,18 @@ const configSchema = z
         ctx.addIssue({ code: 'custom', path: ['hosts', index, 'defaultProject'], message: 'defaultProject must name a configured scratch alias on this host' });
       }
     });
+    // A scratch pin is T3's scratch project: a worktree alias on the same id would put branches there and make a launch's policy depend on which alias is named.
+    config.projects.forEach((project, index) => {
+      if (project.workspaceMode !== 'scratch') return;
+      const shared = config.projects.find((other) => other !== project && other.workspaceMode !== 'scratch' && other.host === project.host && other.t3ProjectId === project.t3ProjectId);
+      if (shared) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['projects', index, 't3ProjectId'],
+          message: `scratch alias "${project.alias}" shares its pinned T3 project with non-scratch alias "${shared.alias}" on host "${project.host}"; a scratch pin must be used by scratch aliases only`,
+        });
+      }
+    });
     const aliases = new Set<string>();
     config.projects.forEach((project, index) => {
       if (aliases.has(project.alias)) {

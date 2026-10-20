@@ -126,6 +126,8 @@ export interface FakeThread {
   createdAt: string;
   updatedAt: string;
   launch: Record<string, unknown>;
+  /** A scratch thread's own folder, which T3 creates for it; null for a thread in a project's root or worktree. */
+  scratchFolder: string | null;
 }
 
 /** Made-up environment id, used in thread links the way T3 builds them. */
@@ -253,6 +255,11 @@ export class FakeT3 {
    * session's MCP initialization before it is handled (a client still connecting).
    */
   readonly holdResponses = new Set<string>();
+  /**
+   * The project T3 files `scratch: true` threads under (its internal scratch project). Tests pin their scratch aliases to it;
+   * set it to another id to model a pin that is not T3's scratch project.
+   */
+  scratchProjectId = 'project-1';
   /** When set, t3_thread_launch creates the thread but starts no run on it (thread `idle`, no runs). */
   launchWithoutRun = false;
   /** Older T3 versions supplied links; current published thread tools omit them. */
@@ -853,7 +860,13 @@ export class FakeT3 {
   }
 
   #launch(input: z.output<typeof launchInput>): Record<string, unknown> {
-    const projectId = this.#target(input.projectId);
+    // As T3 does: `scratch` is exclusive with a project and a workspace strategy, and T3 files the thread under its scratch project.
+    if (input.scratch) {
+      if (input.projectId || input.workspaceStrategy) {
+        throw new FakeFailure('invalid_request', 'scratch cannot be combined with projectId or workspaceStrategy.');
+      }
+    }
+    const projectId = input.scratch ? this.scratchProjectId : this.#target(input.projectId);
     const project = this.projects.find((candidate) => candidate.id === projectId);
     if (!project) throw new FakeFailure('project_not_found', 'No such project.');
     if (!input.modelSelection && !project.defaultModelSelection) {
@@ -878,6 +891,7 @@ export class FakeT3 {
       createdAt: now,
       updatedAt: now,
       launch: input,
+      scratchFolder: input.scratch ? `/synthetic/scratch/${threadId}` : null,
     };
     this.threads.set(threadId, thread);
     let run: FakeRun | undefined;

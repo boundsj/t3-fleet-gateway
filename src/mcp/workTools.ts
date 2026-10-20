@@ -291,8 +291,9 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'returns the same job (created=false) instead of starting another, and reusing a requestId with different input is ' +
       'rejected (a changed target, model or options counts as different input). Request ids are scoped to this tool: one you also use with work_continue does not collide. Write the task as a complete instruction for a coding agent that cannot ask you anything mid-way except ' +
       'through questions you answer with work_respond. Pass exactly one of project (an alias from fleet_status) or target. ' +
-      'A host-only target requires its defaultProject scratch alias; targets and explicit model selections require a host whose ' +
-      'discovery is enabled and whose launch.allowed is true there. A target that a configured alias maps to is launched as that ' +
+      'target { host } needs only that host\'s defaultProject scratch alias (fleet_status shows it): no discovery is required. ' +
+      'target { host, projectId } and an explicit modelSelection require a host whose discovery is enabled; a project ' +
+      'without a configured alias also needs launch.allowed true there. A target that a configured alias maps to is launched as that ' +
       'alias, with all of its settings, so targeting by id never gets around a project\'s rules. Optionally pass modelSelection ' +
       '{ instanceId, model, options? } built from fleet_models of that host; it must match what the host advertises exactly ' +
       '(a wrong model, option or value is invalid_argument and nothing is started), and without it the configured defaults apply ' +

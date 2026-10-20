@@ -389,26 +389,32 @@ describe('host grants: work tools on two hosts', () => {
     assert.equal((await narrowed.call<{ outcome: string }>('work_cancel', { jobId: job.jobId })).outcome, 'cancelled');
   });
 
-  test('hidden jobs with malformed or unsupported launch specs return the same error as unknown jobs', async (t) => {
+  test('hidden jobs with malformed or unsupported launch specs return the same error as unknown jobs, and are not even reported', async (t) => {
     const { mini, macbook, gw, trusted } = await startFleet(t);
-    const hidden = await startIn(trusted, 'beta', 'Synthetic hidden launch spec');
     const agent = await connect(t, gw, 'operate', ['mini']);
     const calls = [mini.calls.length, macbook.calls.length];
-    const denied: [string, Record<string, unknown>][] = [
-      ['work_status', { jobId: hidden.jobId }],
-      ['work_messages', { jobId: hidden.jobId }],
-      ['work_continue', { jobId: hidden.jobId, message: 'Synthetic follow-up', requestId: 'hidden-continue' }],
-      ['work_respond', { jobId: hidden.jobId, requestId: 'synthetic-question', answers: {} }],
-      ['work_cancel', { jobId: hidden.jobId }],
-    ];
+    // Reading a stored launch plan it cannot parse is logged once per job (`job.launch_spec_unreadable`). For a job the caller may
+    // not see, that line would show the job exists: the row must not be read at all. Each spec gets its own job, because the line
+    // is written only the first time a process reads a job.
+    const reported = (jobId: string) => gw.logs.filter((line) => line.includes('job.launch_spec_unreadable') && line.includes(jobId)).length;
     for (const spec of ['{', '{"v":99}']) {
+      const hidden = await startIn(trusted, 'beta', 'Synthetic hidden launch spec');
       gw.services.db.prepare('UPDATE jobs SET launch_spec = ? WHERE id = ?').run(spec, hidden.jobId);
+      const denied: [string, Record<string, unknown>][] = [
+        ['work_status', { jobId: hidden.jobId }],
+        ['work_messages', { jobId: hidden.jobId }],
+        ['work_continue', { jobId: hidden.jobId, message: 'Synthetic follow-up', requestId: `hidden-continue-${spec.length}` }],
+        ['work_respond', { jobId: hidden.jobId, requestId: 'synthetic-question', answers: {} }],
+        ['work_cancel', { jobId: hidden.jobId }],
+      ];
       for (const [tool, args] of denied) {
         assert.equal((await agent.callError(tool, args)).text, unknownJob(hidden.jobId), tool);
       }
+      assert.equal(reported(hidden.jobId), 0, 'nothing was logged about a job the caller cannot see');
       // A caller who may see the job reads it: a bad launch plan costs it what only the plan said, not the read.
       const seen = await trusted.call<{ jobId: string; host: string; workspaceMode: string | null }>('work_status', { jobId: hidden.jobId });
       assert.deepEqual([seen.jobId, seen.host, seen.workspaceMode], [hidden.jobId, 'macbook', null]);
+      assert.equal(reported(hidden.jobId), 1, 'and the authorized read reports it, once');
     }
     assert.deepEqual([mini.calls.length, macbook.calls.length], calls);
   });
@@ -442,7 +448,7 @@ describe('host grants: work tools on two hosts', () => {
       ['mini-scratch', 'mini', '', 'scratch', true]);
     const jobId = started.job.jobId;
     await tick();
-    assert.deepEqual(mini.threadForJob(jobId).launch.workspaceStrategy, { type: 'root' });
+    assert.equal(mini.threadForJob(jobId).launch.scratch, true);
     assert.equal(macbook.launches.length, 0);
 
     // What the grants see of it: Read on the machine shows the job and the default; Operate elsewhere shows neither.

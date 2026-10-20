@@ -17,11 +17,8 @@ export interface ModelSelection {
 /** Where a job's model comes from: the agent's selection, the gateway config, or T3's own project default (nothing sent). */
 export type ModelSource = 'explicit' | 'project' | 'host' | 't3_default';
 
-const workspaceSchema = z.discriminatedUnion('kind', [
-  z.strictObject({ kind: z.literal('scratch') }),
-  z.strictObject({ kind: z.literal('worktree'), baseRef: z.string().min(1), branch: z.string().min(1) }),
-]);
-export type Workspace = z.infer<typeof workspaceSchema>;
+/** Version 2 records scratch launches only (T3's own scratch project, no worktree or branch); worktree launches are version 1. */
+const scratchWorkspaceSchema = z.strictObject({ kind: z.literal('scratch') });
 
 const modelSchema = z.strictObject({
   source: z.enum(['explicit', 'project', 'host', 't3_default']),
@@ -39,16 +36,25 @@ const launchSpecSchema = z.union([
   z.strictObject({ v: z.literal(1), ...sharedSpec, baseRef: z.string().min(1) }),
   z.strictObject({
     v: z.literal(2), ...sharedSpec,
+    // A scratch launch never reads the project's name from T3: nothing of T3's metadata is recorded.
+    projectName: z.null(),
     hostId: z.string().min(1),
-    workspace: workspaceSchema,
+    workspace: scratchWorkspaceSchema,
     defaultProject: z.string().min(1).nullable(),
-  }).refine((spec) => spec.workspace.kind !== 'scratch' || (spec.source === 'alias' && spec.alias !== null), {
+  }).refine((spec) => spec.source === 'alias' && spec.alias !== null, {
     message: 'scratch launches require a configured alias',
-  }).refine((spec) => spec.defaultProject === null || (spec.workspace.kind === 'scratch' && spec.defaultProject === spec.alias), {
+  }).refine((spec) => spec.defaultProject === null || spec.defaultProject === spec.alias, {
     message: 'host defaults must bind the recorded scratch alias',
   }),
 ]);
 
+/**
+ * What a job started through a direct target, an explicit model selection or a scratch alias resolved to when it was created
+ * (`jobs.launch_spec`): the dispatcher launches from this record, so a later config change, catalog change or alias ambiguity
+ * cannot move the job. Alias-only worktree jobs have none and dispatch from the configuration. `source` is `alias` when a
+ * configured project's policy governs and `discovered` when the host's discovery policy does; `model.selection` is the exact
+ * `modelSelection` sent to T3 (null leaves the choice to the T3 project's default). Version 2 is a scratch launch. Never holds task text.
+ */
 export type LaunchSpec = z.infer<typeof launchSpecSchema>;
 
 /**

@@ -508,7 +508,7 @@ CREATE TABLE jobs (
     assert.deepEqual(migrated.require('legacy0001').launchSpec, worktree);
     assert.equal(migrated.require('legacy0002').launchSpec, null);
     const scratch = {
-      v: 2, projectId: 'scratch-id', projectName: 'Synthetic scratch', source: 'alias', alias: 'scratch', hostId: 'main',
+      v: 2, projectId: 'scratch-id', projectName: null, source: 'alias', alias: 'scratch', hostId: 'main',
       workspace: { kind: 'scratch' }, defaultProject: 'scratch', runtimeMode: 'auto', model: { source: 'host', selection: { model: 'synthetic-model' } },
     } satisfies LaunchSpec;
     migrated.create({ ...job, id: 'scratch001', requestId: 'r3', branch: '', t3ProjectId: 'scratch-id', launchSpec: scratch });

@@ -255,6 +255,7 @@ describe('outbound job webhooks through MCP, watcher and HTTP', () => {
       host: { discovery: { enabled: true }, defaultProject: 'scratch' },
       projects: [{ alias: 'scratch', host: 'main', t3ProjectId: 'project-3', workspaceMode: 'scratch', runtimeMode: 'auto' }],
     });
+    h.fake.scratchProjectId = 'project-3';
     type Started = { job: { jobId: string; title: string; project: string; projectId: string; branch: string; workspaceMode: string } };
     const start = (requestId: string, title: string) => h.agent.call<Started>('work_start', {
       target: { host: 'main' }, task: 'Synthetic scratch task never sent to a webhook', title, requestId,
@@ -265,7 +266,7 @@ describe('outbound job webhooks through MCP, watcher and HTTP', () => {
     await h.agent.call('work_cancel', { jobId: queued.jobId });
     await h.tick();
     const thread = h.fake.threadForJob(job.jobId);
-    assert.deepEqual(thread.launch.workspaceStrategy, { type: 'root' });
+    assert.equal(thread.launch.scratch, true);
     assert.equal(thread.projectId, 'project-3');
     // The launch recorded who started the first run, as it does for a worktree launch.
     const turns = h.gw.services.db.prepare('SELECT run_id, client_id FROM job_turns WHERE job_id = ?').all(job.jobId).map((row) => ({ ...row }));

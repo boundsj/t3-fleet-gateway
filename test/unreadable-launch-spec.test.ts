@@ -210,7 +210,7 @@ describe('a stored launch spec this build cannot read', () => {
     t.after(() => db.close());
     const store = new JobStore(db, () => 1_000, createLogger({ sink: (line) => lines.push(line) }));
     const readable: LaunchSpec = {
-      v: 2, projectId: 'project-1', projectName: 'Synthetic scratch', source: 'alias', alias: 'pilot', hostId: 'main',
+      v: 2, projectId: 'project-1', projectName: null, source: 'alias', alias: 'pilot', hostId: 'main',
       workspace: { kind: 'scratch' }, defaultProject: null, runtimeMode: 'auto', model: { source: 't3_default', selection: null },
     };
     const unreadable: [string, string][] = [

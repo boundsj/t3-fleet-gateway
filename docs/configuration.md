@@ -116,8 +116,7 @@ Merge these fields into your configuration, keeping the existing host URL and ot
   "hosts": [{
     "id": "machine-a",
     "t3Url": "http://127.0.0.1:3773",
-    "defaultProject": "machine-a-scratch",
-    "discovery": { "enabled": true }
+    "defaultProject": "machine-a-scratch"
   }],
   "projects": [{
     "alias": "machine-a-scratch",
@@ -141,7 +140,7 @@ Keep a configured model at the project, host, or T3 project level as described i
 
 The agent interprets "no project" or an omitted project as this host-only target. The gateway resolves it to `defaultProject`; it does not parse the task text. A named project still uses its alias or `target: { host, projectId }`. Resolve an unknown project rather than falling back to scratch.
 
-Host-only starts use the scratch alias's permissions and model defaults. They do not require `discovery.allowWorkStart`, which governs unconfigured projects. An explicit scratch alias also works without discovery unless the request includes a model selection. Existing aliases default to worktrees. Scratch jobs have an empty `branch`, and T3 owns the scratch folders. Titles retain the `[job:<id>]` marker used for recovery.
+Host-only starts use the scratch alias's permissions and model defaults. They need neither `discovery.enabled` nor `discovery.allowWorkStart` (which governs unconfigured projects); only an explicit `projectId` and a model selection need discovery. A scratch job is recorded from the configuration without reading T3, so it queues while the host is down and records no T3 project name. The `t3ProjectId` pin must be the id of T3's internal scratch project: the gateway checks it against the host's projects before each launch and looks for a lost launch there, but a scratch launch itself sends no project id (T3 files the thread under its own scratch project). A scratch pin may not also be the pin of a worktree alias on the same host. Existing aliases default to worktrees. Scratch jobs have an empty `branch`, and T3 owns the scratch folders. Titles retain the `[job:<id>]` marker used for recovery.
 
 Upgrading to a build with scratch support moves the ledger from schema version 10 (v0.1.9) to 11. Migration 11 changes no data and no table: it only makes older builds refuse the ledger, because they would read a scratch launch record as no record and start scratch work in a git worktree. Stop older gateway processes first, and back up the data directory before the first start of the new build: going back means restoring that backup. Running any command of the new build against the live data directory (`doctor`, `jobs list`, `pair`) migrates it, and a service still on the older build then refuses to start. Existing jobs, credentials, grants and webhook connections are preserved.
 

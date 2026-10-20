@@ -376,7 +376,7 @@ function jobView(job: Job, clientLabels: Map<string, string>): JobView {
     // Launched jobs' titles end with their thread marker; the id is shown on its own.
     title: clip(job.title.replace(/\s*\[job:[^\]]*\]\s*$/i, '') || job.title),
     project: job.projectAlias,
-    projectName: job.launchSpec?.source === 'discovered' ? clip(job.launchSpec.projectName, 80) : null,
+    projectName: job.launchSpec?.source === 'discovered' && job.launchSpec.projectName !== null ? clip(job.launchSpec.projectName, 80) : null,
     hostId: job.hostId,
     state: job.state,
     standing: job.standing,

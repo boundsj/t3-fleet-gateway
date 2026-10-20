@@ -20,8 +20,11 @@ describe('projectless work', () => {
     fake.projects[0]!.title = 'PRIVATE_SYNTHETIC_SCRATCH_NAME';
     const starts = [input('host'), { ...input('alias'), target: undefined, project: 'pilot' }, { ...input('id'), target: { host: 'main', projectId: 'project-1' } }];
     for (const start of starts) {
-      const { job } = await agent.call<{ job: ScratchJob }>('work_start', start);
-      assert.deepEqual([job.host, job.project, job.projectId, job.workspaceMode, job.branch], ['main', 'pilot', 'project-1', 'scratch', '']);
+      fake.calls.length = 0;
+      const { job } = await agent.call<{ job: ScratchJob & { projectName: string | null } }>('work_start', start);
+      // Only an explicit project id reads the host (to resolve it); the alias and the host default are recorded from the configuration.
+      assert.equal(fake.calls.length > 0, start.requestId === 'id', `${start.requestId}: reads of T3 at start`);
+      assert.deepEqual([job.host, job.project, job.projectId, job.workspaceMode, job.branch, job.projectName], ['main', 'pilot', 'project-1', 'scratch', '', null]);
       const spec = gw.services.jobs.store.require(job.jobId).launchSpec;
       assert.equal(spec?.v, 2);
       if (spec?.v !== 2) assert.fail('scratch must have a v2 spec');
@@ -36,8 +39,9 @@ describe('projectless work', () => {
     await tick();
     assert.equal(fake.launches.length, 3);
     for (const launch of fake.launches) {
-      assert.deepEqual(launch.workspaceStrategy, { type: 'root' });
-      assert.equal(launch.projectId, 'project-1');
+      // T3 refuses `scratch` beside a project or a workspace strategy, so a scratch launch sends neither.
+      assert.equal(launch.scratch, true);
+      assert.deepEqual(['projectId', 'workspaceStrategy'].filter((field) => field in launch), []);
       assert.equal(launch.runtimeMode, 'full-access');
       assert.deepEqual(launch.modelSelection, selection);
       assert.ok(typeof launch.message === 'string');
@@ -45,6 +49,9 @@ describe('projectless work', () => {
       assert.match(launch.message, /internal scratch workspace\.$/);
       assert.doesNotMatch(launch.message, /branch|worktree/);
     }
+    const folders = [...fake.threads.values()].map((thread) => [thread.projectId, thread.scratchFolder]);
+    assert.deepEqual(folders.map(([projectId]) => projectId), ['project-1', 'project-1', 'project-1'], 'T3 files scratch threads under its scratch project');
+    assert.equal(new Set(folders.map(([, folder]) => folder)).size, 3, 'each scratch thread has a folder of its own');
     const fleet = await agent.call<{ hosts: { defaultProject: string | null }[]; projects: { alias: string; workspaceMode: string }[] }>('fleet_status');
     assert.equal(fleet.hosts[0]!.defaultProject, 'pilot');
     assert.equal(fleet.projects.find((project) => project.alias === 'pilot')?.workspaceMode, 'scratch');
@@ -122,6 +129,13 @@ describe('projectless work', () => {
     gw.services.db.prepare('UPDATE jobs SET launch_spec = ? WHERE id = ?').run('{', job.jobId);
     await assert.rejects(gw.services.jobs.start(narrowed, start), { code: 'insufficient_scope' });
     assert.deepEqual(fake.calls, []);
+    // The refused replay did not read the job's row: reading a plan it cannot parse is logged, and that line would show the job exists.
+    const reported = () => gw.logs.filter((line) => line.includes('job.launch_spec_unreadable')).length;
+    assert.equal(reported(), 0, 'nothing is logged about a job the replaying caller may not operate');
+    // The same request from a caller who may operate the job is a replay of it, and reading it reports the plan once.
+    const replay = await agent.call<{ job: ScratchJob; created: boolean }>('work_start', start);
+    assert.deepEqual([replay.created, replay.job.jobId], [false, job.jobId]);
+    assert.equal(reported(), 1);
   });
 
   for (const race of [
@@ -134,11 +148,12 @@ describe('projectless work', () => {
   ] as const) {
     test(`transactional replay on ${race.host}, changed=${race.changed}, malformed=${race.malformed} returns ${race.outcome}`, async (t) => {
       const { fake, gw, agent } = await startJobHarness(t, scratch);
-      const start = { project: 'pilot', task: 'Synthetic racing replay', requestId: 'racing-replay' };
+      // A model selection makes the start await the host's capabilities, which is the window the competing request lands in.
+      const start = { project: 'pilot', task: 'Synthetic racing replay', requestId: 'racing-replay', modelSelection: selection };
       const caller = { clientId: agent.clientId, scopes: ['host:main:read', 'host:main:operate'] as const };
-      fake.holdResponses.add('t3_project_list');
+      fake.holdResponses.add('orchestrator_capabilities');
       const pending = gw.services.jobs.start(caller, start);
-      await fake.whenHeld('t3_project_list');
+      await fake.whenHeld('orchestrator_capabilities');
       const competing = gw.services.jobs.store.create({
         id: 'racejob001',
         clientId: agent.clientId,
@@ -152,7 +167,7 @@ describe('projectless work', () => {
         runtimeMode: 'full-access',
       }).job;
       if (race.malformed) gw.services.db.prepare('UPDATE jobs SET launch_spec = ? WHERE id = ?').run('{', competing.id);
-      fake.holdResponses.delete('t3_project_list');
+      fake.holdResponses.delete('orchestrator_capabilities');
       fake.releaseHeld();
       if (race.outcome === 'replay') {
         assert.deepEqual(await pending, { job: competing, created: false });
@@ -169,7 +184,7 @@ describe('projectless work', () => {
     });
   }
 
-  for (const drift of ['workspace', 'project', 'host', 'disabled', 'runtime', 'ceiling', 'discovery'] as const) {
+  for (const drift of ['workspace', 'project', 'host', 'disabled', 'runtime', 'ceiling', 'default'] as const) {
     test(`queued scratch rejects ${drift} policy drift before launch`, async (t) => {
       const { fake, gw, agent, tick } = await startJobHarness(t, scratch);
       const { job } = await agent.call<{ job: ScratchJob }>('work_start', input(`drift-${drift}`));
@@ -182,7 +197,7 @@ describe('projectless work', () => {
         case 'disabled': project.allowWorkStart = false; break;
         case 'runtime': project.runtimeMode = 'approval-required'; break;
         case 'ceiling': host.access = 'approval-required'; break;
-        case 'discovery': host.discovery.enabled = false; break;
+        case 'default': host.defaultProject = 'docs'; break;
       }
       await tick();
       assert.equal(await jobState(agent, job.jobId), 'failed');
@@ -191,20 +206,80 @@ describe('projectless work', () => {
     });
   }
 
-  test('host defaults require discovery; explicit scratch aliases still work without it', async (t) => {
+  test('a pinned scratch project that is gone from the host fails the queued job before any launch', async (t) => {
+    const { fake, gw, agent, tick } = await startJobHarness(t, scratch);
+    const { job } = await agent.call<{ job: ScratchJob }>('work_start', input('pin-gone'));
+    fake.projects.splice(0, 1);
+    await tick();
+    assert.equal(await jobState(agent, job.jobId), 'failed');
+    assert.equal(gw.services.jobs.store.require(job.jobId).lastErrorCode, 'project_not_found');
+    assert.equal(fake.launches.length, 0);
+  });
+
+  test('the host default and a scratch alias need no discovery; an explicit id or selection still does', async (t) => {
     const { fake, gw, agent, tick } = await startJobHarness(t, { ...scratch, host: { ...scratch.host, discovery: { enabled: false } } });
     fake.calls.length = 0;
-    assert.equal((await agent.callError('work_start', input('discovery-off'))).code, 'discovery_disabled');
+    const queued = await agent.call<{ job: ScratchJob }>('work_start', input('discovery-off'));
+    assert.deepEqual(fake.calls, [], 'recorded from the configuration alone');
+    assert.deepEqual([queued.job.state, queued.job.workspaceMode], ['queued', 'scratch']);
+    assert.equal((await agent.callError('work_start', { ...input('id-off'), target: { host: 'main', projectId: 'project-1' } })).code, 'discovery_disabled');
+    assert.equal((await agent.callError('work_start', { ...input('selection-off'), modelSelection: selection })).code, 'discovery_disabled');
+    assert.equal((await agent.callError('work_start', { project: 'pilot', task: 'Synthetic', requestId: 'alias-selection-off', modelSelection: selection })).code, 'discovery_disabled');
     assert.deepEqual(fake.calls, []);
+    await tick();
+    assert.equal(await jobState(agent, queued.job.jobId), 'running');
+    assert.equal(fake.launches[0]!.scratch, true);
     const { job } = await agent.call<{ job: ScratchJob }>('work_start', { project: 'pilot', task: 'Synthetic', requestId: 'alias-off' });
     await tick();
     assert.equal(await jobState(agent, job.jobId), 'running');
-    assert.deepEqual(fake.launches[0]!.workspaceStrategy, { type: 'root' });
-    gw.services.config.hosts[0]!.discovery.enabled = true;
     delete gw.services.config.hosts[0]!.defaultProject;
     fake.calls.length = 0;
     assert.equal((await agent.callError('work_start', input('no-default'))).code, 'not_found');
     assert.deepEqual(fake.calls, []);
+  });
+
+  test('scratch starts with the host down: queued without a read of T3, launched when it is back; no T3 project name is recorded', async (t) => {
+    const { fake, gw, agent, tick } = await startJobHarness(t, scratch);
+    fake.projects[0]!.title = 'PRIVATE_SYNTHETIC_SCRATCH_NAME';
+    await fake.stop();
+    const hostOnly = await agent.call<{ job: ScratchJob & { projectName: string | null; state: string } }>('work_start', input('down-host'));
+    const alias = await agent.call<{ job: ScratchJob & { projectName: string | null; state: string } }>('work_start', { ...input('down-alias'), target: undefined, project: 'pilot' });
+    for (const { job } of [hostOnly, alias]) assert.deepEqual([job.state, job.projectName, job.workspaceMode], ['queued', null, 'scratch']);
+    assert.equal(gw.services.jobs.store.require(hostOnly.job.jobId).launchSpec?.projectName, null);
+    await fake.start();
+    await tick();
+    assert.deepEqual([await jobState(agent, hostOnly.job.jobId), await jobState(agent, alias.job.jobId)], ['running', 'running']);
+    assertNotLogged(gw, ['PRIVATE_SYNTHETIC_SCRATCH_NAME']);
+  });
+
+  test('an explicit model selection on a scratch alias is validated against the fresh catalog at start and again at dispatch', async (t) => {
+    const { fake, gw, agent, tick } = await startJobHarness(t, scratch);
+    const bad = { instanceId: 'synthetic-provider', model: 'not-advertised' };
+    assert.equal((await agent.callError('work_start', { ...input('bad-selection'), modelSelection: bad })).code, 'invalid_argument');
+    assert.equal(gw.services.db.prepare('SELECT COUNT(*) AS n FROM jobs').get()?.n, 0);
+    const { job } = await agent.call<{ job: ScratchJob }>('work_start', { ...input('good-selection'), modelSelection: selection });
+    const spec = gw.services.jobs.store.require(job.jobId).launchSpec;
+    assert.deepEqual(spec?.model, { source: 'explicit', selection });
+    fake.providers = [];
+    await tick();
+    assert.equal(await jobState(agent, job.jobId), 'failed');
+    assert.equal(gw.services.jobs.store.require(job.jobId).lastErrorCode, 'model_selection_invalid');
+    assert.equal(fake.launches.length, 0);
+  });
+
+  test('a launch T3 files under another project than the pin is followed, with one fixed warning', async (t) => {
+    const { fake, gw, agent, tick } = await startJobHarness(t, scratch);
+    fake.scratchProjectId = 'project-2';
+    const { job } = await agent.call<{ job: ScratchJob }>('work_start', input('mismatch'));
+    await tick();
+    assert.equal(await jobState(agent, job.jobId), 'running');
+    assert.equal(fake.threadForJob(job.jobId).projectId, 'project-2');
+    const warnings = gw.logs.map((line) => JSON.parse(line) as Record<string, unknown>).filter((entry) => entry.event === 'job.scratch_project_mismatch');
+    assert.deepEqual(warnings.map(({ time: _time, ...rest }) => rest), [{ level: 'warn', event: 'job.scratch_project_mismatch', jobId: job.jobId, hostId: 'main' }]);
+    fake.finishTurn(fake.threadForJob(job.jobId).threadId, 'Synthetic result');
+    await tick();
+    assert.equal(await jobState(agent, job.jobId), 'idle', 'the thread is followed by id');
+    assertNotLogged(gw, ['PRIVATE_SYNTHETIC_SCRATCH_TASK']);
   });
 
   test('host authorization precedes missing defaults, discovery and all downstream reads', async (t) => {
@@ -240,7 +315,7 @@ describe('projectless work', () => {
     assert.equal(await jobState(second.agent, job.jobId), 'running');
     assert.equal(first.fake.launches.length, 1);
     assert.equal(first.fake.threadForJob(job.jobId).projectId, 'project-1');
-    assert.deepEqual(first.fake.launches[0]!.workspaceStrategy, { type: 'root' });
+    assert.equal(first.fake.launches[0]!.scratch, true);
   });
 
   test('legacy alias hashes and downstream-free queueing survive; removing aliases leaves idle threads usable', async (t) => {
@@ -300,5 +375,12 @@ test('scratch configuration requires a pinned id and a same-host scratch default
     assert.throws(() => parseConfig({ ...base, projects }), /defaultProject/);
   }
   assert.throws(() => parseConfig({ ...base, projects: [{ ...project, t3ProjectId: undefined, t3ProjectTitle: 'No project' }] }), /explicit t3ProjectId pin/);
+  // A scratch pin is T3's scratch project: a worktree alias on the same id would put branches there. Another host's alias, another id and a second scratch alias are fine.
+  const worktreeOnPin = { alias: 'docs', host: 'main', t3ProjectId: 'pinned-synthetic-id' };
+  assert.throws(() => parseConfig({ ...base, projects: [project, worktreeOnPin] }), /scratch alias "scratch" shares its pinned T3 project with non-scratch alias "docs" on host "main"/);
+  assert.throws(() => parseConfig({ ...base, projects: [worktreeOnPin, project] }), /shares its pinned T3 project/);
+  const other = { id: 'other', t3Url: 'http://127.0.0.1:9' };
+  parseConfig({ ...base, hosts: [...base.hosts, other], projects: [project, { ...worktreeOnPin, host: 'other' }] });
+  parseConfig({ ...base, projects: [project, { ...worktreeOnPin, t3ProjectId: 'another-id' }, { ...project, alias: 'scratch-two' }] });
   assert.throws(() => parseConfig({ ...base, hosts: [{ ...host, access: 'approval-required' }], projects: [{ ...project, runtimeMode: 'full-access' }] }), /exceeds host/);
 });

@@ -94,9 +94,9 @@ function describeHost(host: HostStatus): string {
           ? `credential rejected by T3 (the operator must run: t3-fleet-gateway hosts enroll ${host.id})`
           : `credential expires in ${host.credential.daysLeft} ${host.credential.daysLeft === 1 ? 'day' : 'days'}`;
   const renewal = host.credential.renewalError ? `, last renewal failed (${host.credential.renewalError.code})` : '';
-  const scratch = host.defaultProject === null ? '' : host.discovery.enabled
-    ? `; no named project: work_start { target: { host: ${JSON.stringify(host.id)} } } uses scratch alias ${host.defaultProject}`
-    : `; scratch alias ${host.defaultProject} (host-only starts need discovery enabled)`;
+  const scratch = host.defaultProject === null
+    ? ''
+    : `; no named project: work_start { target: { host: ${JSON.stringify(host.id)} } } uses scratch alias ${host.defaultProject}`;
   const discovery = host.discovery.enabled
     ? `; discovery on (fleet_projects, fleet_models${host.discovery.allowWorkStart ? '; work_start accepts target' : '; launches need a configured alias'})`
     : '';

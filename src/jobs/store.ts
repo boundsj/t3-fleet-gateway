@@ -72,8 +72,8 @@ export interface Job {
   /**
    * What a job started through a direct target, an explicit model selection or a scratch alias resolved to when it
    * was created (migration 8; `src/jobs/launchSpec.ts`): the dispatcher launches from it. Version 1 is a worktree
-   * launch (project id, base ref, runtime mode, model); version 2 adds the host id, the host default binding and
-   * a discriminated workspace, `scratch` (T3's internal scratch project, no branch) or `worktree`, and is why
+   * launch (project id, base ref, runtime mode, model); version 2 is a scratch launch (T3's internal scratch
+   * project, no branch, no recorded project name) with the host id and the host default binding, and is why
    * migration 11 exists. Null for alias-only worktree jobs, which dispatch from the config as before, and also
    * when the stored record cannot be read: check `launchSpecUnreadable` before taking null to mean "alias job".
    */
