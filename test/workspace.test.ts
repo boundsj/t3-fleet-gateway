@@ -706,11 +706,68 @@ describe('resume ownership of a held folder', () => {
     await h.tickAfter(11 * MINUTE);
     assert.equal(await jobState(h.agent, a.jobId), 'needs_input');
     assert.notEqual(holder(h, a.jobId), null);
-    assert.deepEqual(store(h).require(a.jobId).workspaceResumeTokens, [], 'the state took over from the attempts');
+    assert.equal(store(h).require(a.jobId).workspaceResumeTokens.length, 1, 'an unrelated state change cannot settle an unknown answer');
     assert.equal(store(h).require(q.jobId).state, 'queued');
   });
 
-  test('the ownership token of an attempt in flight never leaves the ledger and is gone once the job runs by state', async (t) => {
+  test('a successful sibling cannot settle another follow-up still awaiting its response', async (t) => {
+    const h = await probed(t, { maxConcurrentJobs: 4 });
+    const a = await idleRoot(h);
+    const q = await waitingJob(h);
+    h.fake.holdResponses.add('t3_thread_send');
+    const first = call(h, 'work_continue', { jobId: a.jobId, message: 'First', requestId: 'success-first' });
+    await sendsAre(h, 1);
+    const second = call(h, 'work_continue', { jobId: a.jobId, message: 'Second', requestId: 'success-second' });
+    await sendsAre(h, 2);
+    assert.equal(store(h).require(a.jobId).workspaceResumeTokens.length, 2);
+    h.fake.releaseHeld('first');
+    assert.notEqual((await first).isError, true);
+    assert.equal(store(h).require(a.jobId).workspaceResumeTokens.length, 1, 'only the successful call settled');
+    h.fake.finishTurn(h.fake.threadForJob(a.jobId).threadId, 'Done between polls');
+    await h.tickAfter(2 * MINUTE);
+    assert.notEqual(holder(h, a.jobId), null, 'the sibling still awaiting owns the idle reservation');
+    assert.equal(store(h).require(q.jobId).state, 'queued');
+    h.fake.holdResponses.delete('t3_thread_send');
+    h.fake.releaseHeld();
+    assert.notEqual((await second).isError, true);
+    assert.deepEqual(store(h).require(a.jobId).workspaceResumeTokens, []);
+    await h.tickAfter(2 * MINUTE);
+    assert.equal(store(h).require(q.jobId).state, 'running');
+  });
+
+  test('a successful answer from stale idle state holds by running state before settling its token', async (t) => {
+    const h = await probed(t, { maxConcurrentJobs: 4 });
+    const a = await idleRoot(h);
+    const q = await waitingJob(h);
+    const thread = h.fake.threadForJob(a.jobId);
+    const requestId = h.fake.askQuestion(thread.threadId, [{ id: 'q1', header: 'H', question: 'Which?', options: [{ label: 'A', description: 'a' }] }]);
+    await h.agent.call('work_respond', { jobId: a.jobId, requestId, answers: { q1: 'A' } });
+    assert.equal(store(h).require(a.jobId).state, 'running');
+    assert.deepEqual(store(h).require(a.jobId).workspaceResumeTokens, []);
+    assert.notEqual(holder(h, a.jobId), null);
+    await h.tick();
+    assert.equal(store(h).require(q.jobId).state, 'queued');
+    h.fake.finishTurn(thread.threadId, 'Done');
+    await h.tick();
+    assert.equal(store(h).require(q.jobId).state, 'running');
+  });
+
+  test('terminal state does not discard a pending attempt, and its definite settlement releases the folder', async (t) => {
+    const h = await probed(t, { maxConcurrentJobs: 4 });
+    const a = await idleRoot(h);
+    const q = await waitingJob(h);
+    const attempt = store(h).reserveRoot(a.jobId);
+    assert.equal(attempt.kind, 'held');
+    if (attempt.kind !== 'held') throw Error('No reservation');
+    store(h).transition(a.jobId, { from: ['idle'], to: 'cancelled' });
+    await h.tick();
+    assert.equal(store(h).require(q.jobId).state, 'queued', 'a terminal state does not settle the call');
+    store(h).abandonResume(a.jobId, attempt.token);
+    await h.tick();
+    assert.equal(store(h).require(q.jobId).state, 'running');
+  });
+
+  test('the ownership token of an attempt in flight never leaves the ledger and is gone once its call settles', async (t) => {
     const h = await probed(t, { maxConcurrentJobs: 4 });
     const a = await idleRoot(h);
     h.fake.holdResponses.add('t3_thread_send');

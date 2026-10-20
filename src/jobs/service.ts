@@ -820,7 +820,7 @@ export class JobService {
     if (threadId === null) throw new GatewayError('job_state_conflict', `Job ${job.id} has no thread.`);
     // Resuming an idle job that works in the project's own folder takes the folder back first, before anything is sent: while
     // another job holds it the follow-up waits, and the same requestId may be sent again later.
-    const attempt = job.state === 'idle' ? this.store.reserveRoot(job.id) : ({ kind: 'not_needed' } as const);
+    const attempt = job.state === 'idle' ? this.store.reserveRoot(job.id, `continue:${caller.clientId}:${input.requestId}`) : ({ kind: 'not_needed' } as const);
     if (attempt.kind === 'busy') {
       if (!key) this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
       throw rootBusy(job);
@@ -846,7 +846,7 @@ export class JobService {
         `${described.message}. The message may or may not have reached T3: call work_continue again with the same requestId; T3 deduplicates it.`,
       );
     }
-    this.store.recordSend(job.id, sent, caller.clientId, input.requestId);
+    this.store.recordSend(job.id, sent, caller.clientId, input.requestId, attempt.kind === 'held' ? attempt.token : undefined);
     this.wake();
     return { job: this.store.require(job.id), delivery: sent.delivery, replayed: false };
   }
@@ -869,7 +869,7 @@ export class JobService {
       throw new GatewayError('not_found', `That request is not pending on job ${job.id}. ${hint}`);
     }
     // An answer starts the worker again: an idle root job takes its folder back first (see continue).
-    const attempt = job.state === 'idle' ? this.store.reserveRoot(job.id) : ({ kind: 'not_needed' } as const);
+    const attempt = job.state === 'idle' ? this.store.reserveRoot(job.id, `respond:${input.requestId}`) : ({ kind: 'not_needed' } as const);
     if (attempt.kind === 'busy') throw rootBusy(job);
     try {
       await client.respondToPendingRequest(job.threadId, input.requestId, input.answers);
@@ -883,8 +883,14 @@ export class JobService {
     this.store.appendEvent(job.id, 'input_answered', job.state, { requestId: input.requestId });
     const moved =
       remaining.length === 0 &&
-      this.store.transition(job.id, { from: ['needs_input'], to: 'running', changes: { pendingRequestIds: remaining }, detail: { reason: 'input_answered' } });
-    if (!moved) this.store.update(job.id, { pendingRequestIds: remaining });
+      this.store.transition(job.id, { from: attempt.kind === 'held' ? ['needs_input', 'idle'] : ['needs_input'], to: 'running', changes: { pendingRequestIds: remaining }, detail: { reason: 'input_answered' } });
+    if (!moved) {
+      const waiting = attempt.kind === 'held' && remaining.length > 0 && this.store.transition(job.id, {
+        from: ['idle'], to: 'needs_input', changes: { pendingRequestIds: remaining }, detail: { reason: 'question' },
+      });
+      if (!waiting) this.store.update(job.id, { pendingRequestIds: remaining });
+    }
+    if (attempt.kind === 'held') this.store.settleResume(job.id, attempt.token);
     this.wake();
     return this.store.require(job.id);
   }

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { sha256Hex } from '../crypto.ts';
 import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
 import type { Logger } from '../log.ts';
@@ -769,16 +770,15 @@ export class JobStore {
    * a job that is not an idle root job needs nothing. Every attempt gets its own opaque `token`, stored with the job, and
    * restarts the grace period (`workspace_root_held_at` is set to now, whether or not the job already held the folder), so a
    * retry can never be swept while it is in flight. The attempt must end with `abandonResume(token)` if T3 definitely did not
-   * take the message; any other end leaves its token, which is the uncertainty: the folder stays held until the job's state
-   * takes over (the message started a run: the tokens are cleared), or the grace period ends without a later attempt.
+   * take the message; any other end leaves its token, which is the uncertainty: the folder stays held until each attempt settles individually, or the grace period ends without a later attempt.
    */
-  reserveRoot(id: string): { kind: 'not_needed' | 'busy' } | { kind: 'held'; token: string } {
+  reserveRoot(id: string, operationId?: string): { kind: 'not_needed' | 'busy' } | { kind: 'held'; token: string } {
     return transaction(this.#db, () => {
       const job = this.get(id);
       if (!job || job.workspaceRootKey === null || job.state !== 'idle') return { kind: 'not_needed' } as const;
       if (job.workspaceRootHeldAt === null && this.#otherHolder(job.hostId, job.workspaceRootKey, id)) return { kind: 'busy' } as const;
       if (job.workspaceResumeTokens.length >= MAX_RESUME_ATTEMPTS) return { kind: 'busy' } as const;
-      const token = randomUUID();
+      const token = `${sha256Hex(operationId ?? randomUUID())}.${randomUUID()}`;
       this.#db
         .prepare('UPDATE jobs SET workspace_root_held_at = ?, workspace_resume_tokens = ? WHERE id = ?')
         .run(this.#clock(), JSON.stringify([...job.workspaceResumeTokens, token]), id);
@@ -789,24 +789,33 @@ export class JobStore {
   /**
    * The attempt `token` (from `reserveRoot`) definitely did not reach T3. It leaves the job's attempts; only when none is left
    * (no other attempt in flight, none that ended unknown) and the job is at rest (idle, nothing delegated) is the folder given
-   * back. A token that is no longer there (the state took over, the grace period ended) changes nothing.
+   * back. A token that is no longer there (its operation settled, or the grace period ended) changes nothing.
    */
   abandonResume(id: string, token: string): void {
-    transaction(this.#db, () => {
-      const job = this.get(id);
-      if (!job || !job.workspaceResumeTokens.includes(token)) return;
-      const remaining = job.workspaceResumeTokens.filter((candidate) => candidate !== token);
-      const atRest = job.state === 'idle' && job.delegatedWork.length === 0 && job.delegatedUntracked === 0;
-      if (remaining.length === 0 && atRest) {
-        this.#db.prepare("UPDATE jobs SET workspace_root_held_at = NULL, workspace_resume_tokens = '[]' WHERE id = ?").run(id);
-      } else {
-        this.#db.prepare('UPDATE jobs SET workspace_resume_tokens = ? WHERE id = ?').run(JSON.stringify(remaining), id);
-      }
-    });
+    transaction(this.#db, () => this.#settleResume(id, token, false));
+  }
+
+  /** A known answer settles its deduplicated operation only. State changes never settle unrelated calls awaiting an answer. */
+  settleResume(id: string, token: string): void {
+    transaction(this.#db, () => this.#settleResume(id, token, true));
+  }
+
+  #settleResume(id: string, token: string, success = true): void {
+    const job = this.get(id);
+    if (!job || !job.workspaceResumeTokens.includes(token)) return;
+    // A known success also resolves retries of the same deduplicated T3 operation, never another follow-up.
+    const operation = token.split('.')[0];
+    const remaining = job.workspaceResumeTokens.filter((candidate) => success ? candidate.split('.')[0] !== operation : candidate !== token);
+    const atRest = !holdsRoot(job.state, job.delegatedWork, job.delegatedUntracked);
+    if (remaining.length === 0 && atRest) {
+      this.#db.prepare("UPDATE jobs SET workspace_root_held_at = NULL, workspace_resume_tokens = '[]' WHERE id = ?").run(id);
+    } else {
+      this.#db.prepare('UPDATE jobs SET workspace_resume_tokens = ? WHERE id = ?').run(JSON.stringify(remaining), id);
+    }
   }
 
   /**
-   * Release the reservations of idle jobs on a host that nothing runs behind any more and that have held for longer than
+   * Release the reservations of idle or terminal jobs on a host that nothing runs behind any more and that have held for longer than
    * `maxAgeMs`: a resume whose outcome stayed unknown and was never followed up (every attempt restarts the period). One bounded statement; a run that did
    * start is seen by the watcher, which moves the job out of idle, and holds again by state. Returns how many were released.
    */
@@ -814,9 +823,9 @@ export class JobStore {
     const result = this.#db
       .prepare(
         `UPDATE jobs SET workspace_root_held_at = NULL, workspace_resume_tokens = '[]' WHERE host_id = ? AND workspace_root_held_at IS NOT NULL AND workspace_root_held_at < ?
-           AND state = 'idle' AND delegated_work = '[]' AND delegated_untracked = 0`,
+           AND state IN ('idle', ${NOT_OPEN}) AND delegated_work = '[]' AND delegated_untracked = 0`,
       )
-      .run(hostId, now - maxAgeMs);
+      .run(hostId, now - maxAgeMs, ...TERMINAL_STATES);
     return Number(result.changes);
   }
 
@@ -846,11 +855,14 @@ export class JobStore {
   }
 
   /** Commit a successful send and its idempotency result together. Only a newly started exact run proves its caller. */
-  recordSend(id: string, sent: { runId: string; delivery: string }, clientId: string, requestId: string): void {
+  recordSend(id: string, sent: { runId: string; delivery: string }, clientId: string, requestId: string, resumeToken?: string): void {
     transaction(this.#db, () => {
       this.completeIdempotencyKey(clientId, 'work_continue', requestId, JSON.stringify({ runId: sent.runId, delivery: sent.delivery }));
       const job = this.require(id);
-      if (isTerminal(job.state)) return;
+      if (isTerminal(job.state)) {
+        if (resumeToken !== undefined) this.#settleResume(id, resumeToken);
+        return;
+      }
       const now = this.#clock();
       if (sent.delivery === 'started') this.#recordTurn(id, sent.runId, clientId);
       const next = job.state === 'idle' ? 'running' : job.state;
@@ -861,6 +873,7 @@ export class JobStore {
         { reason: next !== job.state ? 'followup' : sent.delivery }, now);
       if (outcome.contended) this.#insertContended(id, next, now);
       if (next !== job.state) this.#logger.info('job.state_changed', { jobId: id, from: job.state, to: next, reason: 'followup' });
+      if (resumeToken !== undefined) this.#settleResume(id, resumeToken);
     });
   }
 
@@ -1005,9 +1018,8 @@ export class JobStore {
     const occupiedBefore = holdsRoot(current.state, current.delegatedWork, current.delegatedUntracked);
     const stateChanged = nextState !== current.state;
     const moved = stateChanged || JSON.stringify(nextWork) !== JSON.stringify(current.delegatedWork) || nextUntracked !== current.delegatedUntracked;
-    // Resume attempts that no outcome settled keep an idle job's folder; a change of state ends them (the state holds, or does not).
-    if (stateChanged && current.workspaceResumeTokens.length > 0) sets.push("workspace_resume_tokens = '[]'");
-    const resuming = !stateChanged && current.workspaceResumeTokens.length > 0;
+    // A state change can belong to a sibling call. Only individual settlement (or the bounded stale sweep) ends attempts.
+    const resuming = current.workspaceResumeTokens.length > 0;
     if (holds && current.workspaceRootHeldAt === null) {
       if (this.#otherHolder(current.hostId, rootKey, current.id)) {
         if (outcome && !occupiedBefore) outcome.contended = true;
