@@ -151,7 +151,7 @@ ID in T3 first; don't guess it from the title. Enable discovery on the
 host, then restart and run doctor.
 ```
 
-When you name a machine but no project, your bot passes `target: { host: "<id>" }` to `work_start`. An explicit project still uses its alias or project ID, and an unknown named project is resolved or reported, never sent to scratch. [Scratch configuration and upgrade notes](docs/configuration.md#no-named-project).
+When you name a machine but no project, your bot passes `target: { host: "<id>" }` to `work_start`. An explicit project still uses its alias or project ID, and an unknown named project is resolved or reported, never sent to scratch. Discovery also lets agents with Read access browse that machine's T3 projects and models; launching into projects without an alias stays off unless you enable it separately. [Scratch configuration and upgrade notes](docs/configuration.md#no-named-project).
 
 ## Keep a coordinator in the loop
 

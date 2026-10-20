@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Work with no named project, per machine. A host can name a scratch alias as its `defaultProject`; `work_start` with `target: { host }` then starts the job in that alias, in T3's internal scratch workspace (shown as "No project" in T3) with no git worktree or branch. The host needs `discovery.enabled`; `discovery.allowWorkStart` still governs only T3 projects without an alias. Agents are told to use a host-only target when the user names no project, and never to fall back to scratch for a named project they cannot resolve. [Configuration](docs/configuration.md#no-named-project).
+- `projects[].workspaceMode`: `worktree` (the default, unchanged) or `scratch`. A scratch alias launches with T3's `root` workspace strategy and needs an explicit `t3ProjectId`; that pin is the operator's attestation that the project is T3's internal scratch project, which the gateway cannot check. A scratch alias keeps every rule of an alias (`allowWorkStart`, `runtimeMode`, model defaults, per-host grants). Naming it with `project` works without discovery unless the request carries a model selection; a `target` always needs discovery, and a target that names the pinned project is launched as that alias, scratch included.
+- `workspaceMode` in job views (null for an adopted standing thread), `fleet_status` projects and `fleet_projects`; `defaultProject` in `fleet_status` hosts. A scratch job's `branch` is empty, and its launch footer says it runs in T3's internal scratch workspace.
+- A scratch launch records a version 2 launch spec: host, project, alias, runtime mode and exact model, the workspace, and the host-default binding when the default chose the alias. The dispatcher checks it again right before launching and fails the job without launching if the alias, its pinned project, workspace mode, runtime mode or `allowWorkStart`, the host's default or discovery setting, or the host's `access` ceiling changed while it was queued (`launch_policy_changed`; `project_not_configured` when the alias was removed, `project_not_found` when the T3 project is gone). Version 1 specs keep their meaning, and a scratch job's lost launch response stays `unknown` and reconciles on the recorded project.
+- The developer compatibility check (`npm run compat:check`) also validates a launch with the `root` workspace strategy, the input a scratch alias sends, against T3's advertised `t3_thread_launch` schema.
+- Migration 11, a schema-version barrier that changes no data and no table, numbered after the webhook migrations 9 and 10. It makes builds that do not know version 2 launch specs refuse the ledger, instead of reading a scratch spec as none and launching it in a worktree.
+
+### Fixed
+
+- A stored launch spec that is malformed or of an unknown version is a `database_error` when its job is read. It used to be read as no spec, so the job was dispatched as a worktree launch from the configuration.
+- Stored jobs are read with the caller's host scope applied in SQL before the launch spec is parsed, so a job on a host the caller cannot read is reported exactly as an unknown job even when its spec is bad. A repeated `work_start` request id is authorized against the stored job's host and answered from the ledger before the current alias is resolved: a replay survives the alias being renamed, moved or removed and asks T3 nothing; a replay without Operate on the job's host is `insufficient_scope`, with or without changed input, and the same check runs again inside the creation transaction.
+
+### Compatibility
+
+- Existing configurations are valid unchanged: aliases default to `workspaceMode: "worktree"`, and `defaultProject` is unset. Existing worktree aliases keep their request-id hashes and their downstream-free queueing; explicit scratch aliases read a fresh project list when the job is created.
+- Upgrading moves the ledger from schema version 10 to 11. Stop older processes first and back up the data directory: a build that stops at version 10 refuses the new ledger, so going back means restoring the backup. Running any command of the new build against the live data directory migrates it.
+- Covered by synthetic tests: `test/projectless.test.ts` (launch shape, replays, policy drift, authorization order, lost responses, restarts, configuration), scratch cases in `test/host-scopes.test.ts`, `test/webhooks.test.ts`, `test/dashboard.test.ts`, `test/fleet-status.test.ts` and `test/discovery.test.ts`, and a populated version 10 to 11 migration in `test/storage.test.ts`. No live T3 run of a scratch launch is claimed.
+
 ## 0.1.9 (2026-10-17)
 
 ### Added

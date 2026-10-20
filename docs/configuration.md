@@ -143,7 +143,7 @@ The agent interprets "no project" or an omitted project as this host-only target
 
 Host-only starts use the scratch alias's permissions and model defaults. They do not require `discovery.allowWorkStart`, which governs unconfigured projects. An explicit scratch alias also works without discovery unless the request includes a model selection. Existing aliases default to worktrees. Scratch jobs have an empty `branch`, and T3 owns the scratch folders. Titles retain the `[job:<id>]` marker used for recovery.
 
-This feature advances the ledger to schema version 9. Stop older gateway processes before upgrading. Older builds refuse the upgraded ledger; downgrading requires a pre-upgrade ledger backup. The migration preserves existing jobs and credentials.
+Upgrading to a build with scratch support moves the ledger from schema version 10 (v0.1.9) to 11. Migration 11 changes no data and no table: it only makes older builds refuse the ledger, because they would read a scratch launch record as no record and start scratch work in a git worktree. Stop older gateway processes first, and back up the data directory before the first start of the new build: going back means restoring that backup. Running any command of the new build against the live data directory (`doctor`, `jobs list`, `pair`) migrates it, and a service still on the older build then refuses to start. Existing jobs, credentials, grants and webhook connections are preserved.
 
 #### Models
 
