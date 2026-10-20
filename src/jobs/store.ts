@@ -69,6 +69,15 @@ export interface Job {
    * starting: the `delegated_work_ended` event. Cleared when the job changes state.
    */
   delegatedEndedAt: number | null;
+  /**
+   * What a job started through a direct target, an explicit model selection or a scratch alias resolved to when it
+   * was created (migration 8; `src/jobs/launchSpec.ts`): the dispatcher launches from it. Version 1 is a worktree
+   * launch (project id, base ref, runtime mode, model); version 2 adds the host id, the host default binding and
+   * a discriminated workspace, `scratch` (T3's internal scratch project, no branch) or `worktree`, and is why
+   * migration 11 exists. Null for alias-only worktree jobs, which dispatch from the config as before. A stored
+   * spec that is malformed or of a version this build does not know is a `database_error` when the job is read,
+   * never null: a scratch job read as "no spec" would be launched in a worktree.
+   */
   launchSpec: LaunchSpec | null;
 }
 
