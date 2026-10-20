@@ -87,6 +87,7 @@ const hostSchema = z.strictObject({
   access: z.enum(T3_ACCESS_LEVELS).default('auto'),
   maxConcurrentJobs: z.int().min(1).max(32).default(2),
   defaultModelSelection: modelSelectionSchema.nullable().default(null),
+  defaultProject: z.string().min(1).max(64).optional(),
   discovery: discoverySchema.default(DEFAULT_DISCOVERY),
 });
 
@@ -95,6 +96,7 @@ const projectSchema = z
     alias: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/, 'use lowercase letters, digits, dots, underscores and hyphens'),
     description: z.string().max(500).default(''),
     host: z.string(),
+    workspaceMode: z.enum(['scratch', 'worktree']).default('worktree'),
     t3ProjectId: z.string().min(1).optional(),
     t3ProjectTitle: z.string().min(1).optional(),
     baseRef: z.string().min(1).max(200).default('main'),
@@ -110,6 +112,9 @@ const projectSchema = z
   })
   .refine((project) => (project.t3ProjectId === undefined) !== (project.t3ProjectTitle === undefined), {
     message: 'set exactly one of t3ProjectId or t3ProjectTitle',
+  })
+  .refine((project) => project.workspaceMode !== 'scratch' || project.t3ProjectId !== undefined, {
+    message: 'scratch workspaceMode requires an explicit t3ProjectId pin',
   });
 
 const LOOPBACK_LISTEN_HOSTS = ['127.0.0.1', '::1', 'localhost'];
@@ -215,6 +220,25 @@ const configSchema = z
           code: 'custom',
           path: ['hosts', index, 'discovery', 'runtimeMode'],
           message: `discovery.runtimeMode "${host.discovery.runtimeMode}" exceeds host "${host.id}" access "${host.access}"`,
+        });
+      }
+    });
+    config.hosts.forEach((host, index) => {
+      if (host.defaultProject === undefined) return;
+      const project = config.projects.find((candidate) => candidate.alias === host.defaultProject);
+      if (!project || project.host !== host.id || project.workspaceMode !== 'scratch') {
+        ctx.addIssue({ code: 'custom', path: ['hosts', index, 'defaultProject'], message: 'defaultProject must name a configured scratch alias on this host' });
+      }
+    });
+    // A scratch pin is T3's scratch project: a worktree alias on the same id would put branches there and make a launch's policy depend on which alias is named.
+    config.projects.forEach((project, index) => {
+      if (project.workspaceMode !== 'scratch') return;
+      const shared = config.projects.find((other) => other !== project && other.workspaceMode !== 'scratch' && other.host === project.host && other.t3ProjectId === project.t3ProjectId);
+      if (shared) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['projects', index, 't3ProjectId'],
+          message: `scratch alias "${project.alias}" shares its pinned T3 project with non-scratch alias "${shared.alias}" on host "${project.host}"; a scratch pin must be used by scratch aliases only`,
         });
       }
     });

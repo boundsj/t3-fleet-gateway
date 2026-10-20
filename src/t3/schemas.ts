@@ -83,14 +83,17 @@ export const ACTIVE_RUN_STATUSES: readonly string[] = ['preparing', 'queued', 's
 export const RUNTIME_MODE_VALUES = ['approval-required', 'auto-accept-edits', 'auto', 'full-access'] as const;
 
 /** Input of `t3_thread_launch` as the gateway sends it (a subset of what T3 accepts). */
-export interface LaunchThreadInput {
-  projectId: string;
+export type LaunchThreadInput = {
   title: string;
-  workspaceStrategy: { type: 'worktree'; baseRef: string; branch: string; startFromOrigin: boolean };
   runtimeMode: (typeof RUNTIME_MODE_VALUES)[number];
   modelSelection?: Record<string, unknown>;
   message: string;
-}
+} & (
+  | { projectId: string; workspaceStrategy: { type: 'worktree'; baseRef: string; branch: string; startFromOrigin: boolean }; scratch?: never }
+  // T3's own scratch workspace: T3 files the thread under its scratch project and gives it a folder of its own. T3 refuses
+  // `scratch` together with `projectId` or `workspaceStrategy`, so a scratch launch sends neither.
+  | { scratch: true; projectId?: never; workspaceStrategy?: never }
+);
 
 /** Current T3 omits links. Keep older supplied links and normalize newer responses at the boundary. */
 function withThreadLink<T extends { threadId: string; link?: string | null }>(thread: T) {

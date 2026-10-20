@@ -309,6 +309,16 @@ ALTER TABLE webhook_subscriptions ADD COLUMN last_test_outcome TEXT;
 ALTER TABLE webhook_subscriptions ADD COLUMN last_test_status_code INTEGER;
 `,
   },
+  {
+    version: 11,
+    name: 'workspace launch spec compatibility barrier',
+    // launch_spec may now hold a version 2 record (src/jobs/launchSpec.ts): a scratch
+    // workspace, with the host id and any host default binding. Older builds read a spec
+    // they do not know as NULL and would launch scratch work in a fresh worktree. This migration changes
+    // no data; it only advances the schema version, so an older build's version check rejects a ledger
+    // that may hold such records before it reads them. A ledger that migrated to 11 cannot go back.
+    sql: 'SELECT 1;',
+  },
 ];
 
 /**

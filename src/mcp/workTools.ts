@@ -18,6 +18,7 @@ import {
 import { JOB_STATES, STATE_MEANINGS } from '../jobs/states.ts';
 import { MAX_SELECTION_CHARS, MAX_SELECTION_ID_CHARS, MAX_SELECTION_OPTIONS } from '../jobs/launchSpec.ts';
 import type { FeedEvent, Job, JobEvent } from '../jobs/store.ts';
+import { parseProjectRef } from '../jobs/targets.ts';
 import { OPERATE_SCOPE, READ_SCOPE } from '../oauth/scopes.ts';
 import { HOUR, isoTime } from '../time.ts';
 import { defineTool, type GatewayTool, type ToolContext } from './tools.ts';
@@ -52,6 +53,11 @@ const targetInput = z.strictObject({
   projectId: z.string().min(1).max(200).describe('T3 project id from fleet_projects'),
 });
 
+const startTargetInput = z.strictObject({
+  host: z.string().min(1).max(32).describe('Host id from fleet_status'),
+  projectId: z.string().min(1).max(200).optional().describe('Explicit T3 project id from fleet_projects; omit for work with no named project'),
+});
+
 const modelSelectionInput = z
   .strictObject({
     instanceId: z.string().trim().min(1).max(MAX_SELECTION_ID_CHARS).describe('providerInstanceId from fleet_models'),
@@ -75,7 +81,10 @@ const jobSchema = z.object({
     .describe('The configured project alias, or for a job targeted by T3 project id without one, the internal ref @<host>/<projectId>'),
   host: z.string(),
   projectId: z.string().nullable().describe('The T3 project id: known from the start for targeted jobs, from dispatch for alias jobs'),
-  projectName: z.string().nullable().describe('The T3 project title, recorded for jobs started with a target or a modelSelection'),
+  projectName: z
+    .string()
+    .nullable()
+    .describe('The T3 project title, recorded for jobs started with a discovered target or a modelSelection on a worktree alias; null for scratch jobs and when the stored launch plan could not be read'),
   source: z
     .enum(['alias', 'discovered'])
     .describe("alias: launched with a configured project's settings; discovered: into a T3 project no alias names, with the host's discovery policy"),
@@ -85,11 +94,21 @@ const jobSchema = z.object({
       selection: z.record(z.string(), z.unknown()).nullable().describe('The exact modelSelection sent to T3; null when T3 chose'),
     })
     .nullable()
-    .describe('Recorded for jobs started with a target or a modelSelection; null for alias-only jobs, whose model comes from the config at dispatch'),
+    .describe(
+      'Recorded for scratch, targeted or explicitly selected jobs; null for alias-only worktree jobs, whose model comes from the config at dispatch, ' +
+        'and when the stored launch plan could not be read',
+    ),
   title: z
     .string()
     .describe("The T3 thread title; a launched job's ends with the marker [job:<jobId>], a standing job's is the title the operator gave it"),
-  branch: z.string().describe("The git branch of the job worktree (a standing job: its thread's branch, or empty)"),
+  workspaceMode: z
+    .enum(['scratch', 'worktree'])
+    .nullable()
+    .describe(
+      'scratch for T3 internal scratch; worktree for project work; null when unknown: an adopted standing thread, or a job whose stored launch plan ' +
+        'could not be read (a queued one then fails with database_error and is never launched; one with a thread carries on)',
+    ),
+  branch: z.string().describe("The git branch of the job worktree; empty for scratch (a standing job: its thread's branch, or empty)"),
   standing: z
     .boolean()
     .describe(
@@ -211,6 +230,8 @@ export type JobView = z.infer<typeof jobSchema>;
 export type JobDetailView = z.infer<typeof jobDetailSchema>;
 
 export function jobView(job: Job, context: ToolContext): JobView {
+  // A launch plan the gateway could not read leaves no spec: what only the spec said (project name, model, workspace) is left out,
+  // and the workspace is unknown rather than assumed to be a worktree.
   const spec = job.launchSpec;
   return {
     jobId: job.id,
@@ -219,9 +240,10 @@ export function jobView(job: Job, context: ToolContext): JobView {
     host: job.hostId,
     projectId: job.t3ProjectId,
     projectName: spec?.projectName ?? null,
-    source: spec?.source ?? 'alias',
+    source: spec?.source ?? (parseProjectRef(job.projectAlias) ? 'discovered' : 'alias'),
     model: spec ? { source: spec.model.source, selection: spec.model.selection } : null,
     title: job.title,
+    workspaceMode: job.standing || job.launchSpecUnreadable ? null : spec?.v === 2 ? spec.workspace.kind : 'worktree',
     branch: job.branch,
     standing: job.standing,
     waitingOnDelegatedWork: job.delegatedWork.length > 0 || job.delegatedUntracked > 0,
@@ -260,15 +282,18 @@ export function workTools(jobs: JobService): GatewayTool[] {
     name: 'work_start',
     title: 'Start work',
     description:
-      'Start a coding job in a project: the gateway creates a fresh git worktree and branch on the project host, opens a T3 Code ' +
+      'Start work on a machine. When the user names no project, pass target { host } to use that machine’s configured T3 internal scratch workspace. ' +
+      'When the user names a project, use its configured alias or explicit target { host, projectId }; project work creates a fresh git worktree and branch. ' +
+      'An unknown named project must be resolved or reported, never treated as scratch. The gateway opens a T3 Code ' +
       'thread there and gives the worker your task. Returns at once with a jobId in state "queued"; the job moves to "running" ' +
       'when its host has a free slot. Follow it with work_feed (recommended: poll with the last cursor) or work_status. ' +
       'Idempotent: always pass a unique requestId per new piece of work; retrying with the same requestId and the same input ' +
       'returns the same job (created=false) instead of starting another, and reusing a requestId with different input is ' +
       'rejected (a changed target, model or options counts as different input). Request ids are scoped to this tool: one you also use with work_continue does not collide. Write the task as a complete instruction for a coding agent that cannot ask you anything mid-way except ' +
-      'through questions you answer with work_respond. Name the project in exactly one way: project, an alias from fleet_status ' +
-      '(the usual way), or target { host, projectId } from fleet_projects for a T3 project without an alias, on a host whose ' +
-      'discovery is enabled and whose launch.allowed is true there. A target that a configured alias maps to is launched as that ' +
+      'through questions you answer with work_respond. Pass exactly one of project (an alias from fleet_status) or target. ' +
+      'target { host } needs only that host\'s defaultProject scratch alias (fleet_status shows it): no discovery is required. ' +
+      'target { host, projectId } and an explicit modelSelection require a host whose discovery is enabled; a project ' +
+      'without a configured alias also needs launch.allowed true there. A target that a configured alias maps to is launched as that ' +
       'alias, with all of its settings, so targeting by id never gets around a project\'s rules. Optionally pass modelSelection ' +
       '{ instanceId, model, options? } built from fleet_models of that host; it must match what the host advertises exactly ' +
       '(a wrong model, option or value is invalid_argument and nothing is started), and without it the configured defaults apply ' +
@@ -279,7 +304,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     readOnly: false,
     inputSchema: z.object({
       project: z.string().min(1).max(64).optional().describe('Project alias from fleet_status (pass this or target)'),
-      target: targetInput.optional().describe('A T3 project by host and id from fleet_projects, when it has no alias (pass this or project)'),
+      target: startTargetInput.optional().describe('Machine only for no named project, or machine and explicit project id (pass this or project)'),
       modelSelection: modelSelectionInput.optional().describe('Explicit provider instance, model and options from fleet_models; omit for the configured defaults'),
       task: z.string().min(1).max(MAX_TASK_CHARS).describe('What the worker should do, as a complete instruction'),
       requestId: requestIdInput,

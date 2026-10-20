@@ -51,13 +51,14 @@ Each entry is a machine running a T3 Code server.
 | `access` | `"auto"` | The T3 approval level the gateway requests when it enrolls: `read-only`, `approval-required`, `auto-accept-edits`, `auto` or `full-access`. T3 treats it as the ceiling for the runtime mode of threads the gateway starts, so a project's `runtimeMode` may not exceed it. Changing it takes a new `hosts enroll`. |
 | `maxConcurrentJobs` | `2` (1 to 32) | Jobs holding a slot at once on this host: `dispatching`, `running`, `needs_input`, `cancel_requested` and `unknown` count; `idle` does not. Further jobs wait as `queued`, first in, first out. |
 | `defaultModelSelection` | `null` | T3 `modelSelection` object (must contain `model`) for launches in projects on this host that set no `modelSelection` of their own, for example `{ "instanceId": "codex", "model": "<model id>" }`. T3's `orchestrator_capabilities` tool lists the provider instances and models, and so does `fleet_models` once discovery is enabled. |
+| `defaultProject` | none | Configured scratch alias on this host for `work_start { target: { host } }`, when no project is named. Host-only starts need no discovery. See "No named project" below. |
 | `discovery` | all off | Opt-in discovery of this host's T3 projects and model catalog for agents, and the policy for launching into T3 projects that have no `projects[]` entry. See "Discovery" below. |
 
 Which `access` to choose: the host's `access` is only a ceiling. What a job may do without asking is decided per project by `runtimeMode`, which defaults to `approval-required`. [`config.example.json`](../config.example.json) therefore enrolls the host with `full-access`, so any project on it can be given a looser mode later without re-enrolling, and keeps its project at `approval-required`. Use a lower `access` if you want the host itself to rule out looser modes.
 
 #### Discovery
 
-Off by default. With `discovery` left out, nothing changes: agents see only the configured aliases, `work_start` takes only aliases, and the gateway never reads a host's project list or model catalog for an agent.
+Off by default. With `discovery` left out, agents see only the configured aliases and `work_start` takes only aliases without an explicit model selection. Existing worktree aliases keep their queueing behavior. Scratch aliases read a fresh project list to resolve their pinned ID even with discovery off.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -71,7 +72,7 @@ Discovery and launching are separate gates, and the per-agent grants still apply
 
 How a launch into a discovered project is governed:
 
-- **A project exactly one alias maps to** (by `t3ProjectId`, or by a `t3ProjectTitle` only that project has) is launched as that alias, with every setting of the alias: `allowWorkStart` (so `false` still refuses with `start_disabled` and names the standing jobs), `runtimeMode`, `baseRef`, `branchPrefix` and the model defaults. Targeting by id never gets around a configured project. The job shows the alias as its project.
+- **A project exactly one alias maps to** (by `t3ProjectId`, or by a `t3ProjectTitle` only that project has) is launched as that alias, with every setting of the alias: `allowWorkStart` (so `false` still refuses with `start_disabled` and names the standing jobs), `workspaceMode`, `runtimeMode`, worktree settings and model defaults. Targeting by id never gets around a configured project. The job shows the alias as its project.
 - **A project several aliases map to**, or one an alias's title mapping matches ambiguously, cannot be targeted by id: the agent must pass the alias it means.
 - **A project no alias maps to** follows this host's discovery policy, and needs `allowWorkStart`. Its model is the host's `defaultModelSelection`, else the T3 project's own default model, else the agent must pass `modelSelection`; a launch with no model anywhere is refused before a job exists. The job's project is shown as the internal ref `@<host>/<projectId>`.
 
@@ -97,11 +98,51 @@ What agents can target. Each entry:
 | `description` | `""` | Shown to agents in `fleet_status`. |
 | `host` | required | A host `id`. |
 | `t3ProjectId` or `t3ProjectTitle` | exactly one required | The T3 project, by id or by exact title. `doctor` checks that it resolves. |
-| `baseRef` | `"main"` | Branch or ref each job's worktree starts from. |
-| `branchPrefix` | `"fleet/"` | Job branches are `<branchPrefix><jobId>`. |
+| `workspaceMode` | `"worktree"` | `worktree` creates a fresh Git worktree and branch. `scratch` launches in T3's internal scratch project and requires an explicit `t3ProjectId` pin. See "No named project" below. |
+| `baseRef` | `"main"` | Branch or ref each worktree job starts from. Unused for scratch. |
+| `branchPrefix` | `"fleet/"` | Worktree job branches are `<branchPrefix><jobId>`. Unused for scratch. |
 | `runtimeMode` | `"approval-required"` | T3 runtime mode for job threads: `approval-required`, `auto-accept-edits`, `auto` or `full-access`. Must not exceed the host's `access`; projects cannot be placed on a `read-only` host. See "Approvals and unattended projects" below. |
 | `modelSelection` | `null` | T3 `modelSelection` object (must contain `model`) for this project's launches. Without it the host's `defaultModelSelection` is used, and without that the T3 project's own default model. |
 | `allowWorkStart` | `true` | Whether agents may start new jobs here with `work_start`. Set `false` for a project run by a standing coordinator thread: `work_start` then fails with `start_disabled`, naming the project's standing jobs, and agents send work to those with `work_continue`. See "Projects with a coordinator" below. |
+
+#### No named project
+
+To give a machine a projectless destination, identify its internal T3 scratch project, shown as "No project" in T3. Verify that identity in T3 before configuring it. The gateway cannot verify the project root from its sanitized catalog, and a matching title alone is not enough.
+
+Merge these fields into your configuration, keeping the existing host URL and other settings. Replace the scratch project ID with the verified ID:
+
+```json
+{
+  "hosts": [{
+    "id": "machine-a",
+    "t3Url": "http://127.0.0.1:3773",
+    "defaultProject": "machine-a-scratch"
+  }],
+  "projects": [{
+    "alias": "machine-a-scratch",
+    "host": "machine-a",
+    "workspaceMode": "scratch",
+    "t3ProjectId": "<T3_SCRATCH_PROJECT_ID>"
+  }]
+}
+```
+
+Keep a configured model at the project, host, or T3 project level as described in "Models" below. Restart the gateway after changing the configuration. Then an agent can start projectless work with:
+
+```json
+{
+  "target": { "host": "machine-a" },
+  "task": "Investigate the requested issue and report the evidence.",
+  "title": "Investigate the issue",
+  "requestId": "<fresh-request-id>"
+}
+```
+
+The agent interprets "no project" or an omitted project as this host-only target. The gateway resolves it to `defaultProject`; it does not parse the task text. A named project still uses its alias or `target: { host, projectId }`. Resolve an unknown project rather than falling back to scratch.
+
+Host-only starts use the scratch alias's permissions and model defaults. They need neither `discovery.enabled` nor `discovery.allowWorkStart` (which governs unconfigured projects); only an explicit `projectId` and a model selection need discovery. A scratch job is recorded from the configuration without reading T3, so it queues while the host is down and records no T3 project name. The `t3ProjectId` pin must be the id of T3's internal scratch project: the gateway checks it against the host's projects before each launch and looks for a lost launch there, but a scratch launch itself sends no project id (T3 files the thread under its own scratch project). A scratch pin may not also be the pin of a worktree alias on the same host. Existing aliases default to worktrees. Scratch jobs have an empty `branch`, and T3 owns the scratch folders. Titles retain the `[job:<id>]` marker used for recovery.
+
+Upgrading to a build with scratch support moves the ledger from schema version 10 (v0.1.9) to 11. Migration 11 changes no data and no table: it only makes older builds refuse the ledger, because they would read a scratch launch record as no record and start scratch work in a git worktree. Stop older gateway processes first, and back up the data directory before the first start of the new build: going back means restoring that backup. Running any command of the new build against the live data directory (`doctor`, `jobs list`, `pair`) migrates it, and a service still on the older build then refuses to start. Existing jobs, credentials, grants and webhook connections are preserved.
 
 #### Models
 
@@ -109,7 +150,7 @@ T3 refuses to launch a thread without a model when the T3 project has no default
 
 #### Approvals and unattended projects
 
-The gateway cannot answer permission approvals: T3's tools do not expose them. In a project with `runtimeMode` `approval-required` (the default), every command or edit the worker needs approved waits until you approve it in T3; the job shows `needs_input` with `waitingForApproval` meanwhile, and agents see that state and the project's mode in `fleet_status`. A project that should run unattended needs `runtimeMode` `auto` or `full-access` (and a host `access` at least that high). Choose looser modes per project deliberately: the worker runs in its own worktree, but with the mode's permissions on your machine.
+The gateway cannot answer permission approvals: T3's tools do not expose them. In a project with `runtimeMode` `approval-required` (the default), every command or edit the worker needs approved waits until you approve it in T3; the job shows `needs_input` with `waitingForApproval` meanwhile, and agents see that state and the project's mode in `fleet_status`. A project that should run unattended needs `runtimeMode` `auto` or `full-access` (and a host `access` at least that high). Choose looser modes per project deliberately: the worker runs in the configured workspace, with the mode's permissions on your machine.
 
 #### Projects with a coordinator
 

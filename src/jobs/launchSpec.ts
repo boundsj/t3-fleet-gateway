@@ -1,3 +1,4 @@
+import * as z from 'zod';
 import { GatewayError } from '../errors.ts';
 import type { CatalogModel, CatalogProvider } from '../hosts/catalog.ts';
 
@@ -16,35 +17,65 @@ export interface ModelSelection {
 /** Where a job's model comes from: the agent's selection, the gateway config, or T3's own project default (nothing sent). */
 export type ModelSource = 'explicit' | 'project' | 'host' | 't3_default';
 
-/**
- * What a job launched through a direct target or an explicit model selection resolved to when it was
- * created (`jobs.launch_spec`, migration 8): the dispatcher launches from this record, so a later config
- * change, catalog change or alias ambiguity cannot move the job. Ordinary alias-only jobs have none and
- * dispatch as before. Never holds task text.
- */
-export interface LaunchSpec {
-  v: 1;
-  projectId: string;
-  projectName: string;
-  /** `alias`: policy from a configured project; `discovered`: the host's discovery policy. */
-  source: 'alias' | 'discovered';
-  alias: string | null;
-  baseRef: string;
-  runtimeMode: string;
-  model: {
-    source: ModelSource;
-    /** The exact `modelSelection` sent to T3; null leaves the choice to the T3 project's default. */
-    selection: Record<string, unknown> | null;
-  };
-}
+/** Version 2 records scratch launches only (T3's own scratch project, no worktree or branch); worktree launches are version 1. */
+const scratchWorkspaceSchema = z.strictObject({ kind: z.literal('scratch') });
 
-export function parseLaunchSpec(text: string | null): LaunchSpec | null {
-  if (text === null) return null;
+const modelSchema = z.strictObject({
+  source: z.enum(['explicit', 'project', 'host', 't3_default']),
+  selection: z.record(z.string(), z.unknown()).nullable(),
+});
+const sharedSpec = {
+  projectId: z.string().min(1),
+  projectName: z.string(),
+  source: z.enum(['alias', 'discovered']),
+  alias: z.string().min(1).nullable(),
+  runtimeMode: z.enum(['approval-required', 'auto-accept-edits', 'auto', 'full-access']),
+  model: modelSchema,
+};
+const launchSpecSchema = z.union([
+  z.strictObject({ v: z.literal(1), ...sharedSpec, baseRef: z.string().min(1) }),
+  z.strictObject({
+    v: z.literal(2), ...sharedSpec,
+    // A scratch launch never reads the project's name from T3: nothing of T3's metadata is recorded.
+    projectName: z.null(),
+    hostId: z.string().min(1),
+    workspace: scratchWorkspaceSchema,
+    defaultProject: z.string().min(1).nullable(),
+  }).refine((spec) => spec.source === 'alias' && spec.alias !== null, {
+    message: 'scratch launches require a configured alias',
+  }).refine((spec) => spec.defaultProject === null || spec.defaultProject === spec.alias, {
+    message: 'host defaults must bind the recorded scratch alias',
+  }),
+]);
+
+/**
+ * What a job started through a direct target, an explicit model selection or a scratch alias resolved to when it was created
+ * (`jobs.launch_spec`): the dispatcher launches from this record, so a later config change, catalog change or alias ambiguity
+ * cannot move the job. Alias-only worktree jobs have none and dispatch from the configuration. `source` is `alias` when a
+ * configured project's policy governs and `discovered` when the host's discovery policy does; `model.selection` is the exact
+ * `modelSelection` sent to T3 (null leaves the choice to the T3 project's default). Version 2 is a scratch launch. Never holds task text.
+ */
+export type LaunchSpec = z.infer<typeof launchSpecSchema>;
+
+/**
+ * What `jobs.launch_spec` holds, as this build reads it: nothing (an alias job, launched from the configuration), a spec it
+ * understands, or a record it cannot read (damaged, or written by a build that knows more).
+ */
+export type StoredLaunchSpec = { kind: 'none' } | { kind: 'spec'; spec: LaunchSpec } | { kind: 'unreadable' };
+
+/**
+ * Read the stored text of one job's launch spec. Never throws, and never reports an unreadable record as nothing:
+ * "nothing" dispatches the job from the configuration as a worktree job, which for a scratch job (or one started with a
+ * model selection) is the wrong launch. Nor does an unreadable record fail the read: one bad row must not stop the
+ * reads of every other job. The text, and what is wrong with it, are not kept: they may hold anything.
+ */
+export function readLaunchSpec(text: string | null): StoredLaunchSpec {
+  if (text === null) return { kind: 'none' };
   try {
-    const value = JSON.parse(text) as LaunchSpec;
-    return value && value.v === 1 && typeof value.projectId === 'string' ? value : null;
+    const parsed = launchSpecSchema.safeParse(JSON.parse(text));
+    return parsed.success ? { kind: 'spec', spec: parsed.data } : { kind: 'unreadable' };
   } catch {
-    return null;
+    return { kind: 'unreadable' };
   }
 }
 

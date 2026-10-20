@@ -154,6 +154,19 @@ describe('T3 advertised input checks', () => {
     }
   });
 
+  test('a launch schema without the scratch flag fails, because scratch aliases launch with it', () => {
+    const launch = (scratch: boolean) => ({
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        projectId: { type: 'string' }, title: { type: 'string' }, message: { type: 'string' }, modelSelection: { type: 'object' },
+        runtimeMode: { type: 'string' }, workspaceStrategy: { type: 'object' }, ...(scratch ? { scratch: { type: 'boolean' } } : {}),
+      },
+    });
+    assert.deepEqual(inputCheck('t3_thread_launch', launch(false)), { tool: 't3_thread_launch', status: 'fail', code: 'sample_input_rejected' });
+    assert.equal(inputCheck('t3_thread_launch', launch(true)).status, 'pass');
+  });
+
   test('warns on unsupported schemas and formats without printing validator errors', (t) => {
     const warnings: unknown[] = [];
     t.mock.method(console, 'warn', (...args: unknown[]) => warnings.push(args));

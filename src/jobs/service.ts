@@ -49,10 +49,14 @@ export interface Caller {
   scopes: readonly Scope[];
 }
 
-/** Exactly one of `project` (a configured alias) or `target` (a T3 project by id on a host with discovery enabled). */
+/**
+ * What work_start was asked for: exactly one of `project` (a configured alias) or `target`. `target: { host }` names no
+ * project and means the host's scratch alias (`defaultProject`); `target: { host, projectId }` names a T3 project from
+ * fleet_projects on a host with discovery enabled.
+ */
 export interface StartInput {
   project?: string | undefined;
-  target?: { host: string; projectId: string } | undefined;
+  target?: { host: string; projectId?: string | undefined } | undefined;
   /** An explicit provider, model and options from fleet_models; without it the configured defaults apply. */
   modelSelection?: ModelSelection | undefined;
   task: string;
@@ -164,7 +168,7 @@ export function startInputHash(input: StartInput): string {
   }
   return inputHash('work_start', {
     project: input.project ?? null,
-    target: input.target === undefined ? null : { host: input.target.host, projectId: input.target.projectId },
+    target: input.target === undefined ? null : { host: input.target.host, ...(input.target.projectId === undefined ? {} : { projectId: input.target.projectId }) },
     modelSelection: input.modelSelection === undefined ? null : canonicalSelection(input.modelSelection),
     task: input.task,
     title: input.title,
@@ -253,10 +257,16 @@ export class JobService {
   /**
    * A job as an agent may use it, checked before anything is read from T3 or returned from the ledger: a job on
    * a host the agent may not read is reported exactly as an unknown job id; one it may read but not operate is
-   * refused with insufficient_scope.
+   * refused with insufficient_scope. The ledger read is limited to the grant's hosts in SQL, so the stored row of a
+   * job the agent may not see is not even parsed (a launch plan it cannot read would be reported, and the report
+   * would show the job exists).
    */
   #jobFor(caller: Caller, jobId: string, level: AccessLevel): Job {
-    const job = this.store.get(jobId);
+    const requestedHosts = permittedHosts(caller.scopes, level);
+    const readableHosts = permittedHosts(caller.scopes, 'read');
+    const scope = requestedHosts === 'all' || readableHosts === 'all'
+      ? {} : { hostIds: [...new Set([...requestedHosts, ...readableHosts])] };
+    const job = this.store.get(jobId, scope);
     if (job && permits(caller.scopes, level, job.hostId)) return job;
     if (job && permits(caller.scopes, 'read', job.hostId)) {
       throw new GatewayError(
@@ -287,24 +297,29 @@ export class JobService {
   }
 
   /**
-   * Start a job. The host is authorized first, then the request id is checked: a repeated request returns
-   * its job (if the agent may still operate on that job's host), a reused one with different input is
-   * refused, all before anything is read from T3. An alias-only request without a model selection is
-   * recorded at once and resolved at dispatch, as before. A request with a target or a model selection is
-   * resolved now against the host's catalogs (read-only), and its launch spec is recorded with the job.
+   * Start a job. A repeated request id is answered first, from the ledger and the grant alone: it returns its job (if the
+   * agent may operate on that job's host, the one it was started on, whatever the configuration says now), a reused
+   * one with different input is refused (`request_id_conflict`), and nothing is read from T3 or from the current
+   * project configuration. Then the host is authorized. A configured alias without a model selection is
+   * recorded at once and resolved at dispatch: a worktree alias with no stored plan, a scratch alias (or the host's
+   * default, for `target: { host }`) with a plan built from the configuration alone. Neither needs the host to be up,
+   * so both queue while it is down. A request with a `target.projectId` or a selection on a worktree alias is resolved
+   * now against the host's catalogs (read-only; nothing is created until that returns), and its launch spec is
+   * recorded with the job. Discovery is required only for what discovery is: an explicit `projectId` and a model
+   * selection. The host's own default scratch alias needs none.
    */
   async start(caller: Caller, input: StartInput): Promise<{ job: Job; created: boolean }> {
     if ((input.project === undefined) === (input.target === undefined)) {
-      throw new GatewayError('invalid_argument', 'Pass exactly one of project (a configured alias) or target ({ host, projectId } from fleet_projects).');
+      throw new GatewayError('invalid_argument', 'Pass exactly one of project (a configured alias) or target ({ host } for no named project, or { host, projectId } from fleet_projects).');
     }
-    const project = input.project === undefined ? undefined : this.#projectFor(caller, input.project, 'operate');
-    const host = project ? this.#hostFor(caller, project.host, 'operate') : this.#hostFor(caller, input.target!.host, 'operate');
     const hash = startInputHash(input);
     const key = this.store.idempotencyKey(caller.clientId, 'work_start', input.requestId);
     // A retry returns the job of the first request, which the project config may since have moved to another host:
-    // the agent must still be allowed to operate on the job's own host.
-    const replayed = key && this.store.get(key.jobId);
-    if (key && (!replayed || !permits(caller.scopes, 'operate', replayed.hostId))) {
+    // the agent must still be allowed to operate on the job's own host. The lookup is limited to those hosts in SQL.
+    const hosts = permittedHosts(caller.scopes, 'operate');
+    const scope: JobScope = hosts === 'all' ? {} : { hostIds: hosts };
+    const replayed = key && this.store.get(key.jobId, scope);
+    if (key && !replayed) {
       throw new GatewayError(
         'insufficient_scope',
         `requestId "${input.requestId}" belongs to a job on a host this agent may not operate on. Use a new requestId for new work.`,
@@ -317,7 +332,25 @@ export class JobService {
       // A retry of a request made before the operator turned work_start off still gets its job back.
       return { job: replayed, created: false };
     }
-    if (project && input.target === undefined && input.modelSelection === undefined) {
+    let project = input.project === undefined ? undefined : this.#projectFor(caller, input.project, 'operate');
+    const host = project ? this.#hostFor(caller, project.host, 'operate') : this.#hostFor(caller, input.target!.host, 'operate');
+    const hostOnly = input.target !== undefined && input.target.projectId === undefined;
+    if (!host.discovery.enabled && (input.target?.projectId !== undefined || input.modelSelection !== undefined)) {
+      throw new GatewayError(
+        'discovery_disabled',
+        `Host ${host.id} has discovery disabled: work_start there takes a configured project alias (fleet_status lists them), or target { host } for its default scratch alias, and no explicit projectId or modelSelection.`,
+      );
+    }
+    if (hostOnly) {
+      if (host.defaultProject === undefined) {
+        throw new GatewayError('not_found', `Host ${host.id} has no default scratch project. Ask the operator to configure defaultProject.`);
+      }
+      project = this.#projectFor(caller, host.defaultProject, 'operate');
+      if (project.host !== host.id || project.workspaceMode !== 'scratch') {
+        throw new GatewayError('invalid_argument', `Host ${host.id} defaultProject must be a scratch alias on that host.`);
+      }
+    }
+    if (project?.workspaceMode === 'worktree' && input.target === undefined && input.modelSelection === undefined) {
       if (!project.allowWorkStart) throw this.#startDisabled(caller, project);
       const id = newJobId();
       const result = this.store.create({
@@ -331,17 +364,13 @@ export class JobService {
         title: threadTitle(id, input.task, input.title),
         branch: `${project.branchPrefix}${id}`,
         runtimeMode: project.runtimeMode,
-      });
+      }, scope);
       if (result.created) this.wake();
       return result;
     }
-    if (!host.discovery.enabled) {
-      throw new GatewayError(
-        'discovery_disabled',
-        `Host ${host.id} has discovery disabled: work_start there takes a configured project alias (fleet_status lists them) and no target or modelSelection.`,
-      );
-    }
-    const { spec, branchPrefix } = await this.#resolveLaunch(caller, host, project, input);
+    const { spec, branchPrefix } = project?.workspaceMode === 'scratch' && input.target?.projectId === undefined
+      ? await this.#scratchLaunch(caller, host, project, input)
+      : await this.#resolveLaunch(caller, host, project, input);
     const id = newJobId();
     const result = this.store.create({
       id,
@@ -352,11 +381,11 @@ export class JobService {
       hostId: host.id,
       task: input.task,
       title: threadTitle(id, input.task, input.title),
-      branch: `${branchPrefix}${id}`,
+      branch: spec.v === 2 ? '' : `${branchPrefix}${id}`,
       runtimeMode: spec.runtimeMode,
       t3ProjectId: spec.projectId,
       launchSpec: spec,
-    });
+    }, scope);
     if (result.created) this.wake();
     return result;
   }
@@ -364,6 +393,44 @@ export class JobService {
   #startDisabled(caller: Caller, project: ProjectConfig): GatewayError {
     const standing = this.store.standingJobs(project.alias).filter((job) => permits(caller.scopes, 'read', job.hostId));
     return new GatewayError('start_disabled', startDisabledMessage(project.alias, standing));
+  }
+
+  /**
+   * The launch plan of a scratch alias, built from the configuration alone: its pin, runtime mode and model come from the
+   * config, and nothing about the project is read from T3 (the dispatcher checks the pin against the host's projects right
+   * before the launch). A host that is down therefore still takes the job, and no T3 project name is ever recorded.
+   * An explicit model selection is the exception: it is validated against the host's fresh catalog now and again at dispatch.
+   */
+  async #scratchLaunch(
+    caller: Caller,
+    host: HostConfig,
+    project: ProjectConfig,
+    input: StartInput,
+  ): Promise<{ spec: LaunchSpec; branchPrefix: string }> {
+    if (!project.allowWorkStart) throw this.#startDisabled(caller, project);
+    let model: LaunchSpec['model'];
+    if (input.modelSelection) {
+      const providers = (await this.#catalog.models(host.id, { refresh: true })).value;
+      model = { source: 'explicit', selection: { ...validateSelection(host.id, providers, input.modelSelection) } };
+    } else {
+      const configured = configuredModel(this.#config, project);
+      model = configured ? { source: configured.source, selection: configured.selection } : { source: 't3_default', selection: null };
+    }
+    return {
+      spec: {
+        v: 2,
+        projectId: project.t3ProjectId!,
+        projectName: null,
+        source: 'alias',
+        alias: project.alias,
+        runtimeMode: project.runtimeMode,
+        model,
+        hostId: host.id,
+        workspace: { kind: 'scratch' },
+        defaultProject: input.target !== undefined && input.target.projectId === undefined ? project.alias : null,
+      },
+      branchPrefix: project.branchPrefix,
+    };
   }
 
   /**
@@ -401,7 +468,7 @@ export class JobService {
       policy = project;
       alias = project.alias;
     } else {
-      const mapping = mappings.get(input.target!.projectId);
+      const mapping = input.target?.projectId === undefined ? undefined : mappings.get(input.target.projectId);
       if (!mapping) {
         throw new GatewayError('not_found', `Host ${host.id} has no T3 project ${JSON.stringify(input.target!.projectId)}. fleet_projects lists them.`);
       }
@@ -449,16 +516,28 @@ export class JobService {
           '({ instanceId, model, options? } from fleet_models).',
       );
     }
+    const scratch = alias === null ? undefined : this.#config.projects.find((candidate) => candidate.alias === alias && candidate.workspaceMode === 'scratch');
+    const common = {
+      projectId: found.id,
+      source: alias === null ? 'discovered' : 'alias',
+      alias,
+      runtimeMode: policy.runtimeMode,
+      model,
+    } satisfies Pick<LaunchSpec, 'projectId' | 'source' | 'alias' | 'runtimeMode' | 'model'>;
     return {
-      spec: {
+      // A pinned scratch project reached by its id is a scratch launch like the alias itself: no name recorded, no branch.
+      spec: scratch ? {
+        v: 2,
+        ...common,
+        projectName: null,
+        hostId: host.id,
+        workspace: { kind: 'scratch' },
+        defaultProject: null,
+      } : {
         v: 1,
-        projectId: found.id,
+        ...common,
         projectName: found.name,
-        source: alias === null ? 'discovered' : 'alias',
-        alias,
         baseRef: policy.baseRef,
-        runtimeMode: policy.runtimeMode,
-        model,
       },
       branchPrefix: policy.branchPrefix,
     };

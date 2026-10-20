@@ -333,13 +333,18 @@ const FLEET_PROJECTS = [
   { alias: 'alpha', description: 'Synthetic alpha', host: 'mini', t3ProjectId: 'project-1', runtimeMode: 'auto' },
   { alias: 'beta', description: 'Synthetic beta', host: 'macbook', t3ProjectId: 'project-1', runtimeMode: 'auto' },
 ];
+/** The mini's machine default for work with no named project: discovery on, and a scratch alias pinned to one of its T3 projects. */
+const SCRATCH_DEFAULT = { discovery: { enabled: true }, defaultProject: 'mini-scratch' };
+const SCRATCH_PROJECT = { alias: 'mini-scratch', description: 'Synthetic scratch', host: 'mini', workspaceMode: 'scratch', t3ProjectId: 'project-2', runtimeMode: 'auto' };
 
-async function startFleet(t: TestContext): Promise<Fleet> {
+async function startFleet(t: TestContext, options: { scratch?: boolean } = {}): Promise<Fleet> {
   const mini = await startFakeT3();
   const macbook = await startFakeT3();
   t.after(() => mini.close());
   t.after(() => macbook.close());
-  const gw = await startTestGateway(t, { config: { hosts: FLEET_HOSTS(mini, macbook), projects: FLEET_PROJECTS }, jobEngine: { autoStart: false } });
+  const hosts = FLEET_HOSTS(mini, macbook).map((host) => (options.scratch && host.id === 'mini' ? { ...host, ...SCRATCH_DEFAULT } : host));
+  const projects = options.scratch ? [...FLEET_PROJECTS, SCRATCH_PROJECT] : FLEET_PROJECTS;
+  const gw = await startTestGateway(t, { config: { hosts, projects }, jobEngine: { autoStart: false } });
   await gw.services.registry.enroll('mini');
   await gw.services.registry.enroll('macbook');
   const trusted = await connect(t, gw, 'operate');
@@ -370,6 +375,135 @@ async function stopGateway(gw: TestGateway): Promise<void> {
 const unknownJob = (jobId: string) => `not_found: No job ${jobId}. Use work_list to see jobs.`;
 
 describe('host grants: work tools on two hosts', () => {
+  test('an Operate-only grant narrowed by refresh can still cancel an allowed job', async (t) => {
+    const { gw, trusted } = await startFleet(t);
+    const job = await startIn(trusted, 'beta', 'Synthetic operate-only cancellation');
+    const agent = await connect(t, gw, 'operate', ['macbook']);
+    const response = await tokenRequest(gw.baseUrl, {
+      grant_type: 'refresh_token', client_id: agent.clientId, refresh_token: agent.tokens.refresh_token, scope: 'host:macbook:operate',
+    });
+    assert.equal(response.status, 200);
+    const tokens = (await response.json()) as IssuedTokens;
+    assert.equal(tokens.scope, 'host:macbook:operate');
+    const narrowed = await agentWithToken(t, gw.baseUrl, agent.clientId, tokens.access_token);
+    assert.equal((await narrowed.call<{ outcome: string }>('work_cancel', { jobId: job.jobId })).outcome, 'cancelled');
+  });
+
+  test('hidden jobs with malformed or unsupported launch specs return the same error as unknown jobs, and are not even reported', async (t) => {
+    const { mini, macbook, gw, trusted } = await startFleet(t);
+    const agent = await connect(t, gw, 'operate', ['mini']);
+    const calls = [mini.calls.length, macbook.calls.length];
+    // Reading a stored launch plan it cannot parse is logged once per job (`job.launch_spec_unreadable`). For a job the caller may
+    // not see, that line would show the job exists: the row must not be read at all. Each spec gets its own job, because the line
+    // is written only the first time a process reads a job.
+    const reported = (jobId: string) => gw.logs.filter((line) => line.includes('job.launch_spec_unreadable') && line.includes(jobId)).length;
+    for (const spec of ['{', '{"v":99}']) {
+      const hidden = await startIn(trusted, 'beta', 'Synthetic hidden launch spec');
+      gw.services.db.prepare('UPDATE jobs SET launch_spec = ? WHERE id = ?').run(spec, hidden.jobId);
+      const denied: [string, Record<string, unknown>][] = [
+        ['work_status', { jobId: hidden.jobId }],
+        ['work_messages', { jobId: hidden.jobId }],
+        ['work_continue', { jobId: hidden.jobId, message: 'Synthetic follow-up', requestId: `hidden-continue-${spec.length}` }],
+        ['work_respond', { jobId: hidden.jobId, requestId: 'synthetic-question', answers: {} }],
+        ['work_cancel', { jobId: hidden.jobId }],
+      ];
+      for (const [tool, args] of denied) {
+        assert.equal((await agent.callError(tool, args)).text, unknownJob(hidden.jobId), tool);
+      }
+      assert.equal(reported(hidden.jobId), 0, 'nothing was logged about a job the caller cannot see');
+      // A caller who may see the job reads it: a bad launch plan costs it what only the plan said, not the read.
+      const seen = await trusted.call<{ jobId: string; host: string; workspaceMode: string | null }>('work_status', { jobId: hidden.jobId });
+      assert.deepEqual([seen.jobId, seen.host, seen.workspaceMode], [hidden.jobId, 'macbook', null]);
+      assert.equal(reported(hidden.jobId), 1, 'and the authorized read reports it, once');
+    }
+    assert.deepEqual([mini.calls.length, macbook.calls.length], calls);
+  });
+
+  test('scratch starts and replays follow the host grants', async (t) => {
+    type Started = { job: { jobId: string; project: string; host: string; branch: string; workspaceMode: string }; created: boolean };
+    type FleetView = { hosts: { id: string; defaultProject: string | null }[]; projects: { alias: string; workspaceMode: string }[] };
+    const unknownHost = 'not_found: No host "mini". fleet_status lists the hosts you can use.';
+    const unknownAlias = 'not_found: No project "mini-scratch". Known projects: beta. fleet_status lists them.';
+    const { mini, macbook, gw, tick } = await startFleet(t, { scratch: true });
+    const miniOperate = await connect(t, gw, 'operate', ['mini']);
+    const macbookOnly = await connect(t, gw, 'operate', ['macbook']);
+    const miniReader = await connect(t, gw, 'read', ['mini']);
+    const hostOnly = (requestId: string, task = 'Synthetic scratch task') => ({ target: { host: 'mini' }, task, requestId });
+    const byAlias = (requestId: string) => ({ project: 'mini-scratch', task: 'Synthetic scratch task', requestId });
+    const calls = () => [mini.calls.length, macbook.calls.length];
+    const untouched = (before: number[]) => assert.deepEqual(calls(), before, 'nothing was asked of T3');
+
+    // A grant without the machine: neither the machine, its scratch alias nor its default exists for it.
+    const before = calls();
+    assert.equal((await macbookOnly.callError('work_start', hostOnly('hidden-host'))).text, unknownHost);
+    assert.equal((await macbookOnly.callError('work_start', byAlias('hidden-alias'))).text, unknownAlias);
+    // Read only: the machine is visible, so the refusal says what is missing. Still nothing reaches T3.
+    assert.equal((await miniReader.callError('work_start', hostOnly('read-only'))).code, 'insufficient_scope');
+    assert.equal((await miniReader.callError('work_start', byAlias('read-only-alias'))).code, 'insufficient_scope');
+    untouched(before);
+    assert.equal(gw.services.jobs.store.list({ limit: 100 }).length, 0, 'no job was created');
+
+    const started = await miniOperate.call<Started>('work_start', hostOnly('first-start'));
+    assert.deepEqual([started.job.project, started.job.host, started.job.branch, started.job.workspaceMode, started.created],
+      ['mini-scratch', 'mini', '', 'scratch', true]);
+    const jobId = started.job.jobId;
+    await tick();
+    assert.equal(mini.threadForJob(jobId).launch.scratch, true);
+    assert.equal(macbook.launches.length, 0);
+
+    // What the grants see of it: Read on the machine shows the job and the default; Operate elsewhere shows neither.
+    const reader = await miniReader.call<{ workspaceMode: string; branch: string }>('work_status', { jobId });
+    assert.deepEqual([reader.workspaceMode, reader.branch], ['scratch', '']);
+    assert.equal((await miniReader.callError('work_cancel', { jobId })).code, 'insufficient_scope');
+    const readerFleet = (await toolText(miniReader, 'fleet_status')).structured as FleetView;
+    assert.deepEqual(readerFleet.hosts.map((host) => [host.id, host.defaultProject]), [['mini', 'mini-scratch']]);
+    assert.deepEqual(readerFleet.projects.map((project) => [project.alias, project.workspaceMode]), [['alpha', 'worktree'], ['mini-scratch', 'scratch']]);
+    const hidden = await toolText(macbookOnly, 'fleet_status');
+    const hiddenFleet = hidden.structured as FleetView;
+    assert.deepEqual(hiddenFleet.hosts.map((host) => [host.id, host.defaultProject]), [['macbook', null]]);
+    assert.deepEqual(hiddenFleet.projects.map((project) => project.alias), ['beta']);
+    assert.equal(hidden.text.includes('mini-scratch'), false);
+    const hiddenBefore = calls();
+    for (const [tool, args] of [
+      ['work_status', { jobId }],
+      ['work_messages', { jobId }],
+      ['work_continue', { jobId, message: 'Synthetic steer', requestId: 'hidden-steer' }],
+      ['work_cancel', { jobId }],
+    ] as const) {
+      assert.equal((await macbookOnly.callError(tool, args)).text, unknownJob(jobId), tool);
+    }
+    assert.equal((await macbookOnly.callError('work_list', { project: 'mini-scratch' })).text, unknownAlias);
+    assert.deepEqual((await macbookOnly.call<{ jobs: unknown[] }>('work_list')).jobs, []);
+    untouched(hiddenBefore);
+
+    // Replays: an authorized one returns the job without asking T3 anything, and a changed input conflicts.
+    const replayBefore = calls();
+    const replay = await miniOperate.call<Started>('work_start', hostOnly('first-start'));
+    assert.deepEqual([replay.job.jobId, replay.created], [jobId, false]);
+    assert.equal((await miniOperate.callError('work_start', hostOnly('first-start', 'A different synthetic task'))).code, 'request_id_conflict');
+    untouched(replayBefore);
+
+    // The same agent after its grant is narrowed to the other machine: the replay is refused without naming the job or the machine,
+    // with or without changed input, so a conflict never shows that the id was used.
+    const both = await connect(t, gw, 'operate', ['mini', 'macbook']);
+    const second = await both.call<Started>('work_start', hostOnly('second-start'));
+    assert.equal((await both.call<Started>('work_start', hostOnly('second-start'))).created, false, 'with Operate on the machine it replays');
+    const response = await tokenRequest(gw.baseUrl, {
+      grant_type: 'refresh_token', client_id: both.clientId, refresh_token: both.tokens.refresh_token, scope: 'host:macbook:read host:macbook:operate',
+    });
+    assert.equal(response.status, 200);
+    const narrowed = await agentWithToken(t, gw.baseUrl, both.clientId, ((await response.json()) as IssuedTokens).access_token);
+    const narrowedBefore = calls();
+    for (const task of ['Synthetic scratch task', 'A different synthetic task']) {
+      const refused = await narrowed.callError('work_start', hostOnly('second-start', task));
+      assert.equal(refused.code, 'insufficient_scope');
+      assert.equal(new RegExp(`${second.job.jobId}|mini|scratch`).test(refused.text), false, refused.text);
+    }
+    untouched(narrowedBefore);
+    assert.equal(gw.services.jobs.store.list({ limit: 100 }).length, 2, 'refused replays created nothing');
+    assertNotLogged(gw, ['Synthetic scratch task', 'A different synthetic task']);
+  });
+
   test('a mini-only Operate agent reads, starts and steers mini work; MacBook work is invisible and untouched', async (t) => {
     const fleet = await startFleet(t);
     const { mini, macbook, gw, trusted, tick } = fleet;

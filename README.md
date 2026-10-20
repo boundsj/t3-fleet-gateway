@@ -4,7 +4,7 @@
 
 Ask your bot to get something done. Let [T3 Code](https://github.com/pingdotgg/t3code) do the coding on your machines.
 
-T3 Fleet Gateway connects Grok Bot, Notion and other MCP clients to your T3 servers through one connection. Your agent can find projects, start work, answer worker questions and bring back the result. Each new job gets a T3 thread and its own git worktree and branch; you can open the thread in T3 whenever you want.
+T3 Fleet Gateway connects Grok Bot, Notion and other MCP clients to your T3 servers through one connection. Your agent can find projects, start work, answer worker questions and bring back the result. Each new job gets a T3 thread you can open in T3 whenever you want: a named project's job gets its own git worktree and branch, and work with no named project can run in a machine's T3 scratch workspace.
 
 ![A bot connects to one gateway, which routes coding work to T3 projects on several machines.](docs/images/architecture.svg)
 
@@ -139,6 +139,19 @@ and the models and reasoning efforts it offers. For my next job in
 ```
 
 Browsing and launching are separate choices. To launch into projects without aliases, explicitly enable that host's discovery launch policy. Existing aliases keep their restrictions; model choices must match what T3 advertises. [Discovery settings](docs/configuration.md#discovery).
+
+## Start work with no named project
+
+Some requests name a machine but no project. A machine can have a default **scratch** destination: T3's internal "No project" workspace, with no git worktree or branch. Named projects are unchanged and still get a fresh worktree per job. Ask your setup agent:
+
+```text
+On gateway host <id>, add a scratch alias for T3's internal "No project"
+workspace and make it the host's default project. Verify that project's
+ID in T3 first; don't guess it from the title. Then restart and run
+doctor.
+```
+
+When you name a machine but no project, your bot passes `target: { host: "<id>" }` to `work_start`. An explicit project still uses its alias or project ID, and an unknown named project is resolved or reported, never sent to scratch. The scratch default needs no discovery. Enabling discovery lets agents with Read access browse that machine's T3 projects and models; launching into projects without an alias stays off unless you enable it separately. [Scratch configuration and upgrade notes](docs/configuration.md#no-named-project).
 
 ## Keep a coordinator in the loop
 

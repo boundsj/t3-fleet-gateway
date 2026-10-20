@@ -82,7 +82,7 @@ node bin/t3-fleet-gateway.js clients token --name <client-name> --access read --
 
 Copy the printed token privately into the connector's bearer-token setting. Use `--access operate` when it needs to start or steer work. The token is printed once and stored by the gateway only as a hash; it has no refresh flow. See [bearer clients](operations.md#agents-that-only-take-a-bearer-token) for expiry and revocation.
 
-Ask the client to call `fleet_status`, then start a small job or read an existing standing job. Each new job has a `[job:<id>]` title marker in T3 and a separate worktree and branch.
+Ask the client to call `fleet_status`, then start a small job or read an existing standing job. Each new job has a `[job:<id>]` title marker in T3 and, in a named project, a separate worktree and branch (a machine's scratch alias, if you configured one, uses T3's scratch workspace instead; see [configuration](configuration.md#no-named-project)).
 
 To inspect or disconnect a client:
 
