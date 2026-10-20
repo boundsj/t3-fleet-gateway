@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.1.9 (2026-10-17)
+
+### Added
+
+- **Connect Grok Bot** in the private dashboard: paste a webhook URL and its full authentication header, choose a configured project, and select **Connect & Test**. Generic HTTPS receivers work too. A successful test means the receiver accepted the request; check the bot conversation to confirm its response. Connections send `idle`, `needs_input`, `failed`, `cancelled` and `delegated_work_ended`, with worker excerpts off.
+- A **Webhooks** view lists project, host, management source and safe last-test information. Dashboard connections support **Send test**, **Replace key** (including a replacement URL), and confirmed **Disconnect**, without editing files or restarting. Saved destinations and authentication values are never returned to the browser.
+- Migration 10 adds explicit config/dashboard ownership and safe last-test metadata. Existing subscriptions remain config-owned. Dashboard connections and their queues survive restarts independently of config reconciliation; the CLI can list attempts and ping either source.
+- `dashboard:demo -- --webhook-receiver` provides a local synthetic receiver for accepted, rejected and timed-out setup tests. Demo management refuses destinations outside literal loopback.
+- Opt-in outbound job webhooks with private per-subscription auth headers, project/host/event filters, metadata-only default payloads, bounded optional excerpts, durable atomic snapshots and deliveries, stable event IDs, restart recovery, bounded HTTPS attempts and retries, and safe CLI diagnostics/test ping. Existing feed cursor behavior and polling fallback remain unchanged. Migration 9 adds outbox/attempt tables and durable exact-run gateway attribution; unknown turn origins remain unknown.
+- Watcher same-state events (`turn_finished`, `delegated_work_ended`) commit atomically with their observed job changes. Whole turns between polls generate an idle webhook. Config revisions cancel queued payloads for replaced routes; read-only commands never apply stale config.
+
+### Documentation
+
+- Shorter, prompt-led README with a Grok routine walkthrough, private field-link instructions and an illustrated setup guide. Manual installation and connection commands moved to `docs/setup.md`; release history stays in the changelog and GitHub releases.
+
+### Security and lifecycle
+
+- The dashboard's private network boundary now permits webhook destination management. It remains separate from the MCP/OAuth listener; job, host and client controls are unchanged. Management requests require JSON, the custom API header, an exact request-host Origin and same-origin fetch metadata when present. Errors and audit records contain fixed codes only; no saved URL, header, response body or credential is exposed, and the browser stores no secrets.
+- Connection creation and replacement use the same bounded TLS-validating POST transport as delivery. A failed test preserves the existing route. Successful changes recheck the revision after the awaited test and cancel pending old-route payloads; disconnect cannot be undone by a slow test. Writes are refused before readiness and after shutdown begins; shutdown aborts and drains management pings before closing SQLite.
+- No live Grok receiver or production deployment qualification is claimed by this implementation's synthetic tests.
+
+## 0.1.8 (2026-10-16)
+
+### Added
+
+- An opt-in, read-only operator dashboard (`dashboard`, off by default; [operations](docs/operations.md#operator-dashboard), [design](docs/design.md#operator-dashboard), [security](docs/security.md#the-operator-dashboard)). `serve` runs it on a loopback listener of its own (default `127.0.0.1:3791`, never the MCP port), to be published with a tailnet-only proxy on a path (`dashboard.basePath`). Views: an overview (what needs you, vital signs, an agents → gateway → hosts map, recent activity), hosts (last check with its time, engine backoff, credential and renewal, capacity, policy and projects), clients (authorization separated from observed MCP and refresh successes; unknown stays unknown), jobs (waiting or recent, open, finished, with T3 thread links and a code-only activity log) and checks. It controls nothing: approvals and job control stay in T3.
+- **Run checks**, on demand only: a fresh `t3_environment_read` per host, the public URL's metadata, that the public URL does not serve the dashboard, the database quick check, data directory permissions, credential state and the mint executable's resolution. Nothing is enrolled, renewed or executed.
+- `doctor`, with the dashboard enabled, checks that it answers on its listener and that the public URL does not serve it (`dashboard exposure`).
+- `hosts[].transportNote` (a descriptive label such as "SSH tunnel", shown on the dashboard and never checked) and `dashboard.clientLabels` (display names for client ids).
+- `npm run dashboard:demo`: the dashboard on a synthetic fleet (a real gateway with temporary data, fake T3 hosts on loopback, the fictional clients Grok Bot, Muse and Notion) in five scenarios, for screenshots and browser checks.
+
+### Security
+
+- No login, session, cookie or browser storage: the network (loopback plus a tailnet-only proxy) is the boundary, and the page holds no secret. Requests with an unexpected `Host` get `421` (DNS rebinding); requests Tailscale marks as Funnel traffic get `403`; API requests need a custom header and refuse cross-site fetch metadata and foreign origins; responses carry a strict CSP without inline script or style, `frame-ancestors 'none'` and CORP. The page builds its DOM without HTML parsing and links only to its own views and `t3-thread://v1/<id>` (built from validated thread ids).
+- The dashboard shows no tokens, hashes, codes, T3 credentials, the server key, mint commands or their output, task text, replies, questions, options, answers, delegated task titles or catalogs, and errors only as codes with fixed text. Opening it never contacts T3.
+
+### Compatibility
+
+- No migration and no change to OAuth, MCP, tools, grants or the job engine's behavior. The engine and host registry gain read-only accessors (`JobEngine.status()`, `HostRegistry.lastHealth()`), the job store two read queries, and `doctor`'s public URL check shares its probe with the dashboard. Existing configs are valid unchanged.
+- Covered by synthetic tests: `test/dashboard.test.ts` (configuration, listener isolation both ways, Host/Funnel/Origin/fetch-metadata/content-type handling, headers, base paths, honest host states including outage, refusal, not enrolled and engine backoff, clients with expired, revoked, replayed and never-observed grants, jobs and attention, privacy of content and secrets in responses and logs, bounds, read-only checks, exposure through a misdirected tunnel), `test/dashboard-ui.test.ts` (hostile text in every view, unsafe links dropped, no HTML-parsing APIs) and `test/dashboard-demo.test.ts` (four demo scenarios end to end). No live deployment is claimed here.
+
 ## 0.1.7 (2026-10-16)
 
 ### Fixed

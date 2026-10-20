@@ -68,10 +68,14 @@ describe('database', () => {
       'host_renewals',
       'idempotency_keys',
       'job_events',
+      'job_turns',
       'jobs',
       'oauth_clients',
       'refresh_tokens',
       'token_families',
+      'webhook_attempts',
+      'webhook_deliveries',
+      'webhook_subscriptions',
     ]);
   });
 
@@ -114,7 +118,7 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 9);
+    assert.equal(SCHEMA_VERSION, 11);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
       after.map(
@@ -408,35 +412,116 @@ CREATE TABLE jobs (
     assert.deepEqual(schema(db), schema(fresh));
   });
 
-  test('migration 9 preserves a populated v8 ledger and older builds reject v2 scratch plans', (t) => {
-    const db = new DatabaseSync(join(tempDir(t), 'test.db'));
+  test('migration 10 preserves populated version 9 queues, leases, secrets and revisions with config ownership and unknown test results', (t) => {
+    const path = openDataDir(join(tempDir(t), 'data')).databasePath;
+    const old = new DatabaseSync(path);
+    migrate(old, MIGRATIONS.slice(0, 9));
+    assert.equal(schemaVersion(old), 9);
+    old.exec(`
+      INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode,
+        created_at, updated_at, state_changed_at)
+        VALUES ('jobold0001', 'synthetic-client', 'r1', 'pilot', 'main', 'idle', 'Synthetic task', 'Synthetic job', 'fleet/old', 'auto', 1, 2, 2);
+      INSERT INTO job_events (id, job_id, type, from_state, to_state, created_at) VALUES (1, 'jobold0001', 'state_changed', 'running', 'idle', 2);
+      INSERT INTO job_turns (job_id, run_id, client_id) VALUES ('jobold0001', 'run-1', 'synthetic-client');
+      INSERT INTO webhook_subscriptions (id, revision, identity, settings, route, overflow_count, overflow_sequence, overflow_at, overflow_reason)
+        VALUES ('old-route', 'original-revision', 'original-identity', '{"events":["idle"],"excerptChars":0}',
+          '{"url":"https://receiver.example.com/synthetic-private-path","header":"authorization","value":"Bearer synthetic-private-key"}',
+          4, 1, 2, 'backlog');
+      INSERT INTO webhook_deliveries (id, subscription_id, revision, event_id, feed_sequence, payload, created_at, expires_at,
+        next_attempt_at, state, attempt_count, lease, lease_until)
+        VALUES (1, 'old-route', 'original-revision', 'event-1', 1, '{"synthetic":"immutable payload"}', 2, 3600002, 2, 'sending', 1, 'lease-1', 30002);
+      INSERT INTO webhook_deliveries (id, subscription_id, revision, event_id, feed_sequence, payload, created_at, expires_at, next_attempt_at, state)
+        VALUES (2, 'old-route', 'original-revision', 'event-2', 1, '{"synthetic":"pending payload"}', 2, 3600002, 2, 'pending');
+      INSERT INTO webhook_attempts (subscription_id, delivery_id, event_id, attempted_at, outcome, lease)
+        VALUES ('old-route', 1, 'event-1', 2, 'in_progress', 'lease-1');
+      INSERT INTO webhook_attempts (subscription_id, event_id, attempted_at, status_code, outcome)
+        VALUES ('old-route', 'old-ping', 1, 204, 'delivered');
+    `);
+    const tables = ['jobs', 'job_events', 'job_turns', 'webhook_deliveries', 'webhook_attempts'];
+    const before = tables.map((table) => old.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const subscriptions = old.prepare('SELECT * FROM webhook_subscriptions ORDER BY id').all().map((row) => ({ ...row }));
+    old.close();
+
+    const db = openDatabase(path);
     t.after(() => db.close());
-    migrate(db, MIGRATIONS.slice(0, 8));
-    const store = new JobStore(db, () => 1_000, silentLogger);
-    const v1 = {
+    assert.equal(schemaVersion(db), SCHEMA_VERSION);
+    assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
+    const migrated = db.prepare('SELECT * FROM webhook_subscriptions ORDER BY id').all()
+      .map(({ source, last_test_at, last_test_outcome, last_test_status_code, ...rest }) =>
+        ({ source, last_test_at, last_test_outcome, last_test_status_code, original: rest }));
+    assert.deepEqual(migrated, subscriptions.map((original) =>
+      ({ source: 'config', last_test_at: null, last_test_outcome: null, last_test_status_code: null, original })));
+    assert.throws(() => db.prepare("UPDATE webhook_subscriptions SET source = 'unknown'").run(), /CHECK constraint/);
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+    assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
+    assert.throws(() => db.prepare('DELETE FROM job_events').run(), /append-only/);
+    const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
+    t.after(() => fresh.close());
+    const schema = (target: typeof db) => target.prepare('SELECT type, name, sql FROM sqlite_master ORDER BY name').all();
+    assert.deepEqual(schema(db), schema(fresh));
+  });
+
+  test('migration 11 keeps a populated version 10 ledger as it was and bars older builds from version 2 launch specs', (t) => {
+    const path = openDataDir(join(tempDir(t), 'data')).databasePath;
+    const old = new DatabaseSync(path);
+    old.exec('PRAGMA foreign_keys = ON');
+    migrate(old, MIGRATIONS.slice(0, 10));
+    assert.equal(schemaVersion(old), 10);
+    const store = new JobStore(old, () => 1_000, silentLogger);
+    const worktree = {
       v: 1, projectId: 'project-1', projectName: 'Synthetic worktree', source: 'alias', alias: 'pilot', baseRef: 'main',
       runtimeMode: 'auto', model: { source: 't3_default', selection: null },
     } satisfies LaunchSpec;
     const job = { clientId: 'c', requestId: 'r', inputHash: 'h', projectAlias: 'pilot', hostId: 'main', task: 'Synthetic', title: 'Synthetic', branch: 'fleet/wt', runtimeMode: 'auto' };
-    store.create({ ...job, id: 'legacy0001', launchSpec: v1 });
+    store.create({ ...job, id: 'legacy0001', launchSpec: worktree });
     store.create({ ...job, id: 'legacy0002', requestId: 'r2' });
-    db.prepare("INSERT INTO host_credentials VALUES ('main', 'synthetic-client', 'synthetic-token', 'orchestration', 'full-access', 1, 10000, 1)").run();
-    const tables = ['jobs', 'job_events', 'idempotency_keys', 'host_credentials'];
-    const before = tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
-    migrate(db);
-    assert.equal(schemaVersion(db), 9);
-    assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
-    assert.deepEqual(store.require('legacy0001').launchSpec, v1);
-    assert.equal(store.require('legacy0002').launchSpec, null);
-    const v2 = {
+    old.exec(`
+      INSERT INTO host_credentials (host_id, t3_client_id, access_token, scope, access, issued_at, expires_at, verified_at)
+        VALUES ('main', 'synthetic-client', 'synthetic-token', 'orchestration', 'full-access', 1, 10000, 1);
+      INSERT INTO job_turns (job_id, run_id, client_id) VALUES ('legacy0001', 'run-1', 'c');
+      INSERT INTO webhook_subscriptions (id, revision, identity, settings, route, source, last_test_at, last_test_outcome, last_test_status_code)
+        VALUES ('old-route', 'original-revision', 'original-identity', '{"events":["idle"],"excerptChars":0}',
+          '{"url":"https://receiver.example.com/synthetic-private-path","header":"authorization","value":"Bearer synthetic-private-key"}',
+          'dashboard', 5, 'delivered', 204);
+      INSERT INTO webhook_deliveries (id, subscription_id, revision, event_id, feed_sequence, payload, created_at, expires_at,
+        next_attempt_at, state, attempt_count, lease, lease_until)
+        VALUES (1, 'old-route', 'original-revision', 'event-1', 1, '{"synthetic":"immutable payload"}', 2, 3600002, 2, 'sending', 1, 'lease-1', 30002);
+      INSERT INTO webhook_deliveries (id, subscription_id, revision, event_id, feed_sequence, payload, created_at, expires_at, next_attempt_at, state)
+        VALUES (2, 'old-route', 'original-revision', 'event-2', 2, '{"synthetic":"pending payload"}', 2, 3600002, 2, 'pending');
+      INSERT INTO webhook_attempts (subscription_id, delivery_id, event_id, attempted_at, outcome, lease)
+        VALUES ('old-route', 1, 'event-1', 2, 'in_progress', 'lease-1');
+    `);
+    const schema = (target: DatabaseSync) => target.prepare('SELECT type, name, sql FROM sqlite_master ORDER BY name').all();
+    const tables = ['jobs', 'job_events', 'idempotency_keys', 'host_credentials', 'job_turns', 'webhook_subscriptions', 'webhook_deliveries', 'webhook_attempts'];
+    const before = tables.map((table) => old.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    assert.ok(before.every((rows) => rows.length > 0), 'every table that holds state is populated');
+    const schemaBefore = schema(old);
+    old.close();
+
+    const db = openDatabase(path);
+    t.after(() => db.close());
+    assert.equal(schemaVersion(db), SCHEMA_VERSION);
+    assert.equal(SCHEMA_VERSION, 11);
+    assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before, 'no row changes');
+    assert.deepEqual(schema(db), schemaBefore, 'the barrier changes the version and nothing else');
+    const migrated = new JobStore(db, () => 2_000, silentLogger);
+    assert.deepEqual(migrated.require('legacy0001').launchSpec, worktree);
+    assert.equal(migrated.require('legacy0002').launchSpec, null);
+    const scratch = {
       v: 2, projectId: 'scratch-id', projectName: 'Synthetic scratch', source: 'alias', alias: 'scratch', hostId: 'main',
       workspace: { kind: 'scratch' }, defaultProject: 'scratch', runtimeMode: 'auto', model: { source: 'host', selection: { model: 'synthetic-model' } },
     } satisfies LaunchSpec;
-    store.create({ ...job, id: 'scratch001', requestId: 'r3', branch: '', t3ProjectId: 'scratch-id', launchSpec: v2 });
-    assert.deepEqual(store.require('scratch001').launchSpec, v2);
-    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 8)), /schema version 9 is newer than this build supports \(8\)/);
+    migrated.create({ ...job, id: 'scratch001', requestId: 'r3', branch: '', t3ProjectId: 'scratch-id', launchSpec: scratch });
+    assert.deepEqual(migrated.require('scratch001').launchSpec, scratch);
+    // An older build stops at the schema version, before its parser can read the v2 record as no spec at all
+    // (a worktree launch of what was meant to run in T3's scratch workspace).
+    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 10)), /schema version 11 is newer than this build supports \(10\)/);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
-    assert.equal(db.prepare('PRAGMA integrity_check').get()?.integrity_check, 'ok');
+    assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
+    assert.throws(() => db.prepare('DELETE FROM job_events').run(), /append-only/);
+    const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
+    t.after(() => fresh.close());
+    assert.deepEqual(schema(db), schema(fresh));
   });
 
   test('migration 2 names a missing column it cannot fill and leaves the database at version 1', (t) => {

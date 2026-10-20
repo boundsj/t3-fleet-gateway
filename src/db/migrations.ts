@@ -248,9 +248,75 @@ ALTER TABLE jobs ADD COLUMN delegated_ended_at INTEGER;
   },
   {
     version: 9,
+    name: 'outbound webhooks and turn attribution',
+    sql: `
+CREATE TABLE job_turns (
+  job_id TEXT NOT NULL REFERENCES jobs(id),
+  run_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  PRIMARY KEY (job_id, run_id)
+) STRICT;
+CREATE TABLE webhook_subscriptions (
+  id TEXT PRIMARY KEY,
+  revision TEXT NOT NULL,
+  identity TEXT NOT NULL,
+  settings TEXT NOT NULL,
+  route TEXT NOT NULL,
+  overflow_count INTEGER NOT NULL DEFAULT 0,
+  overflow_sequence INTEGER,
+  overflow_at INTEGER,
+  overflow_reason TEXT CHECK (overflow_reason IN ('backlog', 'payload_limit'))
+) STRICT;
+CREATE TABLE webhook_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subscription_id TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  feed_sequence INTEGER NOT NULL REFERENCES job_events(id),
+  payload TEXT,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  next_attempt_at INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'sending', 'delivered', 'expired', 'cancelled')),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  lease TEXT,
+  lease_until INTEGER,
+  UNIQUE (subscription_id, revision, event_id)
+) STRICT;
+CREATE INDEX webhook_delivery_due ON webhook_deliveries(state, next_attempt_at);
+CREATE INDEX webhook_delivery_subscription ON webhook_deliveries(subscription_id, id);
+CREATE TABLE webhook_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subscription_id TEXT NOT NULL,
+  delivery_id INTEGER,
+  event_id TEXT NOT NULL,
+  attempted_at INTEGER NOT NULL,
+  status_code INTEGER,
+  outcome TEXT NOT NULL,
+  lease TEXT
+) STRICT;
+CREATE INDEX webhook_attempt_subscription ON webhook_attempts(subscription_id, id DESC);
+`,
+  },
+  {
+    version: 10,
+    name: 'dashboard webhook ownership and test results',
+    // Existing subscriptions remain file managed; no delivery, revision or private route is rewritten.
+    sql: `
+ALTER TABLE webhook_subscriptions ADD COLUMN source TEXT NOT NULL DEFAULT 'config' CHECK (source IN ('config', 'dashboard'));
+ALTER TABLE webhook_subscriptions ADD COLUMN last_test_at INTEGER;
+ALTER TABLE webhook_subscriptions ADD COLUMN last_test_outcome TEXT;
+ALTER TABLE webhook_subscriptions ADD COLUMN last_test_status_code INTEGER;
+`,
+  },
+  {
+    version: 11,
     name: 'workspace launch spec compatibility barrier',
-    // Older builds interpret an unknown launch_spec as NULL and could launch scratch work in a
-    // worktree. Their schema-version check must reject this ledger before reading v2 records.
+    // launch_spec may now hold a version 2 record (src/jobs/launchSpec.ts): a discriminated workspace,
+    // `scratch` or `worktree`, with the host id and any host default binding. Older builds read a spec
+    // they do not know as NULL and would launch scratch work in a fresh worktree. This migration changes
+    // no data; it only advances the schema version, so an older build's version check rejects a ledger
+    // that may hold such records before it reads them. A ledger that migrated to 11 cannot go back.
     sql: 'SELECT 1;',
   },
 ];

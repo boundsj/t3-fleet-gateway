@@ -2,204 +2,193 @@
 
 [![CI](https://github.com/boundsj/t3-fleet-gateway/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/boundsj/t3-fleet-gateway/actions/workflows/check.yml)
 
-Let long-running AI agents in the cloud hand coding work to the [T3 Code](https://github.com/pingdotgg/t3code) servers on your own machines, and follow that work to completion.
+Ask your bot to get something done. Let [T3 Code](https://github.com/pingdotgg/t3code) do the coding on your machines.
 
-![A terminal-style diagram showing a phone messaging Grok Bot, which talks to a single T3 Fleet Gateway that fans out to a Mac mini and an M3 MacBook, each branching into fleet/job worktrees and a chief-of-staff thread.](docs/images/architecture.svg)
+T3 Fleet Gateway connects Grok Bot, Notion and other MCP clients to your T3 servers through one connection. Your agent can find projects, start work, answer worker questions and bring back the result. Each new job gets a T3 thread you can open in T3 whenever you want: a named project's job gets its own git worktree and branch, and work with no named project can run in a machine's T3 scratch workspace.
 
-The agent says *what* to do and chooses a machine or project. The gateway creates the T3 thread and watches it. Named projects use a fresh git worktree per job. An optional machine default sends work with no named project to T3's internal scratch workspace, shown as "No project". Every job is an ordinary T3 thread you can open, read and interrupt.
+![A bot connects to one gateway, which routes coding work to T3 projects on several machines.](docs/images/architecture.svg)
 
-The first supported agent is Grok Bot; any MCP client with OAuth support should work.
+- **One connection for the fleet.** Add machines behind the gateway without adding an MCP connection to every bot.
+- **Work you can follow.** Jobs have stable IDs, readable replies and a feed of changes that survives restarts.
+- **Access you choose.** Give an agent Read or Operate access to all machines or selected ones. Project rules decide what its workers may do.
+- **Updates when work changes.** Webhooks wake your bot when a turn finishes or a job needs attention.
 
-## Try it
+## Get going with prompts
 
-Setup is a few prompts. Agents like Grok Bot run in the cloud, so the gateway needs a public HTTPS URL; it listens only on loopback, so you expose it with a tunnel you run (Tailscale Funnel, Cloudflare Tunnel, ngrok, …).
+You need an always-on machine with Node.js 24+, a running T3 Code server and its `t3` CLI. A coding agent on that machine can do the setup. The gateway runs from a Git checkout; it is not published to npm.
 
-**1. Set up the gateway.** Give this to a coding agent on the always-on machine that runs T3 Code:
-
-```text
-Set up https://github.com/boundsj/t3-fleet-gateway on this machine by
-following its README. Enroll this machine's T3 Code server as a host
-and add these projects as aliases: <your projects>. Run the gateway as
-a service and expose it over HTTPS with <your tunnel>. Make sure
-`doctor` passes, then give me the public /mcp URL. When I connect an
-agent, mint a one-time approval code for it.
-```
-
-**2. Connect an agent.** One agent can run your whole fleet; you do not need a bot per project. Give it this:
+### 1. Ask your coding agent to set up the gateway
 
 ```text
-Connect to my T3 fleet gateway at https://<your public URL>/mcp.
-Call fleet_status and tell me which machines and projects you can
-use. When I ask you to get something done, start it with work_start
-in the right project, follow it with work_feed and work_status, read
-replies with work_messages, answer the worker's questions with
-work_respond, and tell me when it is ready for review or stuck.
+Set up https://github.com/boundsj/t3-fleet-gateway on this machine.
+Follow docs/setup.md and docs/operations.md. Use a dedicated service
+checkout, enroll this machine's T3 server, and add these project
+aliases: <your projects>.
+
+Use <your HTTPS tunnel> for the public MCP connection. Enable the
+dashboard on a private tailnet URL, separate from the public MCP
+listener. Keep discovery off and project approval settings at their
+defaults. Run doctor, then give me the MCP URL and dashboard URL.
 ```
 
-The agent opens the gateway's approval page. Ask the agent from step 1 for a code (`pair`; codes expire after 15 minutes by default) and choose **Operate**, and **All machines** or just the ones this agent should touch. If you want it to check in on its own, give it a routine with the cadence you like; the gateway does not set one up for you.
+> **What this does:** gives your cloud agent a secure way to reach T3 while keeping the operator dashboard private. The gateway handles T3 credential renewal after enrollment.
 
-**3. Let it discover (optional).** By default the agent sees exactly the project aliases you configured, and that stays the way to work. If you would rather not write a config entry for every project, turn on discovery for a machine:
+Prefer doing it yourself? The same steps are in the [manual setup guide](docs/setup.md).
+
+### 2. Connect your bot
+
+Add the returned `/mcp` URL as a remote MCP connection in Grok Bot or your chosen client. For OAuth clients, ask the setup agent to mint a one-time approval code. Enter it on the gateway's approval page, choose **Read** or **Operate**, and select the machines.
+
+> **Pick the right access:** Read follows work; Operate also starts and steers it. All machines includes hosts you add later. Selected machines stays limited to those you approve.
+
+If your client only accepts a bearer token, as Notion's custom MCP connections do, ask the setup agent:
 
 ```text
-In my gateway config, enable discovery on host <id>: set
-"discovery": { "enabled": true } on it, restart the service, and run
-doctor. Keep allowWorkStart off for now: I want agents to browse the
-machine's T3 projects and models, not to start work outside the
-configured aliases yet.
+Create a gateway bearer token for <client name>, with <read or operate>
+access to <host IDs> and a 90-day expiry. Help me enter it privately in
+the client's connection settings. Do not put the token in chat.
 ```
 
-Then the agent can look around and pick its tools:
+Once connected, tell your bot:
 
 ```text
-Call fleet_projects and fleet_models for host <id>. Which T3 projects
-are there, and which models and reasoning efforts does the machine
-offer? Then start this task in the project called "<name>": <task>.
-If the project has an alias, use it; otherwise use the target it
-lists. Pick the model and effort you think fit, say what you chose,
-and follow the job to completion.
+Call fleet_status and tell me which machines and projects you can use.
+When I give you work, use the gateway to start or continue the right
+job. Follow its status, read the worker's replies, and tell me when it
+is ready for review or needs my help. Keep the job ID and T3 link.
 ```
 
-Browsing does not grant launching. A project that has an alias is always started as that alias, with all of its rules (including a project that only accepts work through its coordinator). Starting work in a project *without* an alias needs one more switch on the host, `"discovery": { "enabled": true, "allowWorkStart": true }`, plus the runtime mode, base branch and branch prefix you want such jobs to use (see [docs/configuration.md](docs/configuration.md#discovery)). An agent's model choice is accepted only if that machine really advertises it; otherwise the start is refused and nothing is launched.
+### 3. Give it a small job
 
-The manual steps behind the first prompt are in [Setup](#setup) below.
-
-### Work without a project
-
-Configure a scratch alias with `workspaceMode: "scratch"` and the verified ID of the machine's internal T3 scratch project. Set the host's `defaultProject` to that alias and enable discovery. The [configuration guide](docs/configuration.md#no-named-project) includes an example and upgrade instructions.
-
-When the user names no project, the agent passes `target: { host: "machine-a" }` to `work_start`. An explicit project still uses its alias or project ID. An unknown named project must be resolved rather than sent to scratch. Existing aliases keep their worktree behavior unless explicitly changed.
-
-## How it works
-
-```
-Agent (Grok Bot, any MCP client)
-   │  HTTPS through your tunnel, OAuth 2.1 (tokens issued by this gateway)
-   ▼
-t3-fleet-gateway  ── SQLite (clients, tokens, host credentials, jobs)
-   │  MCP client per host, bearer credential issued by that host's T3
-   ▼
-T3 Code server(s)  ──► one T3 thread per job, in a fresh worktree or configured scratch
+```text
+In project <alias>, check the README for broken local links and propose
+the smallest fix. Run the relevant checks and bring me the result for
+review. Don't merge or deploy it.
 ```
 
-- One process on an always-on machine, listening on loopback; your tunnel is the only way in.
-- The gateway is an MCP server to agents and an MCP client to each T3 server. Instead of T3's raw tools, agents get a small job-level contract: `fleet_status` (hosts and configured projects), `fleet_projects` and `fleet_models` (a host's T3 projects, models and options, where you enabled discovery), `work_start`, `work_continue`, `work_respond`, `work_cancel`, `work_status`, `work_messages` (a job's replies in full), `work_list` and `work_feed` (what changed since the agent's last check, from a cursor it keeps).
-- Agents sign in through the gateway's own OAuth 2.1 server: on first connect an agent opens an approval page, and you type a one-time code minted on the gateway machine and choose **Read** (follow work) or **Operate** (start and steer work).
-- The gateway holds its own credential for each T3 server and renews it before it expires (T3 credentials last 30 days). Agent tokens never reach T3, and T3 credentials never leave the gateway.
+> **What happens next:** the gateway starts a T3 thread in a fresh worktree, tracks it, and lets your bot read the result. Worker questions can come back through the bot. Permission approvals still need your click in T3; [unattended projects](docs/configuration.md#approvals-and-unattended-projects) can use a different runtime mode.
 
-## Talk to a coordinator: standing jobs
+## Give your bot a doorbell 🔔
 
-By default each piece of work is a new T3 thread. If you run a long-lived thread that coordinates a project (a "chief of staff" that plans, delegates to child threads of its own and reports back), let the agent talk to that thread instead:
+A webhook tells your bot that something changed, so it can check the job without waiting for its next scheduled poll. The gateway sends a small notification; the bot uses its existing MCP connection to read the details.
 
-```sh
-node bin/t3-fleet-gateway.js jobs adopt pilot <thread id> --title "Chief of Staff"
+![Connect a Grok Bot routine by pasting its webhook URL and authorization header, choosing a project and pressing Connect & Test. The success message asks you to check the bot conversation.](docs/images/webhook-connect.svg)
+
+### 1. Create the routine in Grok Bot
+
+In the bot conversation you want to receive updates, try:
+
+```text
+Create a webhook-triggered routine for T3 gateway updates. For type
+"ping", acknowledge the connection test; it has no job ID. For job
+events, deduplicate by eventId, call work_status for jobId, and read
+work_messages when needed. Report a short status update here.
+
+For this first test, only report: don't start, change or cancel work.
+If waitingOnDelegatedWork is true, say the coordinator is still waiting
+on its helpers. Keep scheduled work_feed catch-up as a fallback.
+
+Give me the clickable Webhook URL, Webhook key and Authorization header
+links that open this routine's private fields. Do not print the actual
+URL, key or header value in chat.
 ```
 
-The gateway checks that the thread belongs to project `pilot` and records it as a **standing job**. The agent sees it with `standing: true` in `work_list`, `work_feed` and `work_status` (and in `fleet_status` under its project), sends it instructions with `work_continue`, and follows its turns with `work_feed`, `work_status` and `work_messages`, just as for jobs it started. A standing job takes no concurrency slot, `work_cancel` only interrupts its current turn (it stays open), and the agent can never close it. `jobs release <job id>` stops the gateway from following it without touching the thread. Set `"allowWorkStart": false` on the project to make the coordinator the only way in: `work_start` there then fails with `start_disabled`, naming the standing job to use instead.
+### 2. Copy the routine's connection details
 
-For example, asking the bot for a project (here a fictional toy app) for a new feature:
+Use the links Grok supplies to open the routine's private fields. If the routine list doesn't show them, ask Grok for those links explicitly. In the routine panel, copy **POST to** into the gateway's **Webhook URL** field, and **header** into **Full authorization header**. The full header already contains the key; you don't need to copy the separate **key** field.
 
-![Grok Bot desktop app with a sidebar of fictional bots and a chat where the user asks the Crumb Exchange CoS for a resting orders panel and later gets a summary that Opus built it and Fable reviewed it.](docs/images/grok-bot-chat.svg)
+Paste both values directly into **Connect Grok Bot** on the private gateway dashboard, then choose the project to follow. Keep them out of chats.
 
-*In Grok Bot: the request, then the summary the bot relays when the coordinator is done.*
+### 3. Click Connect & Test
 
-![T3 Code desktop app with the Crumb Exchange CoS thread selected, a changed files summary, an instruction labeled Sent by another agent, and a composer set to Claude Opus 5.5 with full access.](docs/images/t3-cos-thread.svg)
+The gateway tests the connection, saves it privately and starts delivering updates. No terminal commands, JSON editing or service restart. Use **Replace key** to update the connection details, **Send test** to try again, or **Disconnect** to stop delivery.
 
-*The same request arriving in the project's coordinator thread in T3 Code, sent by the gateway.*
+If you recreate the routine or rotate its credentials, copy both fields again: the **POST to** URL can change along with the key.
 
-![Crumb Exchange, a fictional play-money market for sandwich questions, with a market list, an order ticket, and the newly added Resting orders panel with a Cancel button.](docs/images/crumb-exchange-demo.svg)
+> **What success means:** “Test accepted” means the receiver accepted the HTTP request. Check your Grok conversation for its reply to confirm that the routine ran. An already-idle job doesn't produce a new event just because you connected.
 
-*The result: the app with its new resting orders panel.*
+The default events cover finished turns (`idle`), questions or approvals (`needs_input`), failures, cancellations and delegated work ending. Excerpts are off by default. Delivery may be retried, so routines should deduplicate events and keep feed catch-up enabled. [Delivery and recovery details](docs/design.md#outbound-job-webhooks).
 
-**How a coordinator looks to the agent.** When a T3 coordinator delegates, its own turn ends while the child thread works, and T3 starts its next turn by itself when the child is done. So the agent sees the standing job go `idle` (with `waitingOnDelegatedWork: true` and the delegated task titles while T3 shows that work running), then `running` and `idle` again with no action of its own; `work_feed` reports those turns (`turn_started`, `turn_finished`). The tool descriptions tell the agent to read the coordinator's reply and, while it waits on delegated work, to wait for its next turn rather than send new instructions (which would start a competing turn). Replies are always the coordinator's own messages, never a child's summary. Details: [docs/operations.md](docs/operations.md#standing-jobs) and [docs/configuration.md](docs/configuration.md#projects-with-a-coordinator).
+Using another receiver? Generic HTTPS subscriptions support its own authentication header and project, machine and event filters. See [webhook configuration](docs/configuration.md#webhooks). The quick connection flow needs a routine created in Grok first: two pasted fields and one button, rather than automatic account linking.
 
-## Setup
+## See what's happening
 
-Requirements: Node.js 24 or newer (the latest Node 24 or 26 release is recommended), a T3 Code server, and the `t3` CLI on the machine that can mint pairing codes for it.
+![The gateway dashboard on desktop and phone, with fictional hosts, projects and activity and sample clients Grok Bot, Notion and Muse.](docs/images/dashboard.png)
 
-```sh
-git clone https://github.com/boundsj/t3-fleet-gateway.git
-cd t3-fleet-gateway
-npm ci --omit=dev
+*The real dashboard running on a synthetic demo fleet. Names and activity are made up.*
 
-mkdir -p ~/.config/t3-fleet-gateway
-cp config.example.json ~/.config/t3-fleet-gateway/config.json
-# Edit publicUrl, hosts and projects. See docs/configuration.md.
+Open your private dashboard to see which machines answer, which agents have connected, and which jobs need you. **Run checks** refreshes health checks. Webhook controls connect your routines; job approvals and control stay in T3.
 
-node bin/t3-fleet-gateway.js hosts enroll main   # obtain a T3 credential for host "main"
-deploy/launchd/install.sh                         # macOS: run as a launchd service (Linux: deploy/systemd/)
-node bin/t3-fleet-gateway.js doctor               # check everything, including the public URL
+The dashboard uses a separate loopback listener and belongs behind your private tailnet proxy. Your public MCP URL is for agents. [Dashboard setup and access](docs/operations.md#operator-dashboard).
+
+## Discover projects and choose models
+
+Discovery is off by default: agents see the aliases you configured. To browse a machine's existing T3 projects and available models, ask your setup agent:
+
+```text
+Enable project and model discovery on gateway host <id>. Keep launching
+into projects without an alias disabled. Restart and run doctor.
 ```
 
-- Point your tunnel at the gateway's listen address (default `127.0.0.1:3790`) so that `publicUrl` reaches it over HTTPS; `doctor`'s `public URL` check passes once it does. `node bin/t3-fleet-gateway.js serve` runs it in the foreground instead of as a service.
-- The service runs the code in its checkout directly, so give it a clone of its own rather than one you develop in, and deploy updates in the order in [docs/operations.md](docs/operations.md#run-as-a-service).
-- The service runs `t3` to renew its T3 credential. T3 keeps each version in its own directory, so if `command -v t3` points into `~/.t3/runtime/versions/`, the service would go on running that version after T3 updates itself; give the installer a `t3` that follows T3's updates (`T3_BIN=...`). The installer warns about this. See [docs/operations.md](docs/operations.md#a-t3-that-follows-t3s-updates).
-- The package runs its TypeScript sources directly with Node's type stripping, so run it from a checkout (or `npm link` it). It is not published to npm.
+Then ask your bot:
 
-### Connect an agent
-
-1. In Grok Bot, add a remote MCP server with the URL `https://<your public URL>/mcp`.
-2. Grok Bot registers itself and opens the gateway's approval page. On the gateway machine run `node bin/t3-fleet-gateway.js pair`, enter the printed code on the page, choose **Read** or **Operate**, choose **All machines** or **Selected machines** (with the hosts ticked), and approve. All machines covers every host, including hosts you add later; Selected machines limits the agent to the ticked hosts, and it never sees or touches jobs anywhere else.
-3. Ask the agent to call `fleet_status`: it should list your hosts and project aliases. Then ask it to start a small task with `work_start` (or send one to a standing job with `work_continue`) and to check `work_feed` on a schedule. Each launched job is a T3 thread titled with `[job:<id>]` in its configured workspace, so you can open it in T3 at any time.
-
-An agent that can't sign in with OAuth and only takes a bearer token (Notion's custom MCP connections, for example) gets one from `node bin/t3-fleet-gateway.js clients token --name <name>` instead: Operate access to all hosts, valid a year by default (`--access read`, `--hosts mini,macbook`, `--ttl 90d` or `--ttl never` to change that); see [docs/operations.md](docs/operations.md#agents-that-only-take-a-bearer-token).
-
-`t3-fleet-gateway clients list` shows registered agents (an unrevoked OAuth grant is not proof of usable saved credentials); `clients revoke <id>` disconnects one. If approvals or registrations are throttled (someone probing your URL), `pair` lifts an approval pause and `throttle reset` clears both limits; see [docs/operations.md](docs/operations.md#throttles).
-
-### Recover a disconnected agent
-
-```sh
-node bin/t3-fleet-gateway.js clients list
-node bin/t3-fleet-gateway.js clients diagnose <client-id>  # offline grants, expiries, revocation, separate success times
-node bin/t3-fleet-gateway.js doctor                      # operator-route public URL and separate downstream checks
+```text
+Use fleet_projects and fleet_models on host <id>. Show me its projects
+and the models and reasoning efforts it offers. For my next job in
+<configured alias>, use <model and effort> and tell me what you selected.
 ```
 
-A network outage is separate from token expiry. Keep the OAuth credentials and saved `work_feed.nextCursor`, restore ingress, then reconnect with those credentials: a usable saved refresh token can replace an expired access token without another approval. Resume `work_feed` after the saved cursor; reuse the same request id and input for any uncertain work mutation. Static bearer clients have no refresh; replace an expired/revoked token in the connector settings. Inspect and re-enable a disabled bot routine yourself: longer token lifetimes cannot restart it. Actual Grok/Notion retry thresholds remain unverified; [recovery instructions and tested SDK limits](docs/operations.md#authentication-and-outage-recovery) explain the evidence and next steps.
+Browsing and launching are separate choices. To launch into projects without aliases, explicitly enable that host's discovery launch policy. Existing aliases keep their restrictions; model choices must match what T3 advertises. [Discovery settings](docs/configuration.md#discovery).
 
-## Status
+## Start work with no named project
 
-**v0.1.7** fixes the startup and `doctor` probe deadline: the configured non-mutating `mintPairingCodeProbe` now has ten seconds instead of two, because a launchd agent with `ProcessType` Background runs its children at a lower priority and the T3 version probe was measured at just over two seconds there, warning `probe_timeout` on every start ([evidence](docs/evidence/startup-probe.md)). Nothing else about the probe or the service template changes. It also carries opt-in discovery ([issue #12](https://github.com/boundsj/t3-fleet-gateway/issues/12)). Per host, `discovery.enabled` lets agents list that machine's T3 projects (`fleet_projects`) and its providers, models and options such as reasoning effort (`fleet_models`), read live from T3 and bounded; `work_start` then also takes a `target` by T3 project id and an explicit `modelSelection`, validated against what the host advertises. Launching into projects without an alias is a separate switch (`discovery.allowWorkStart`), and configured aliases keep all their rules. Everything is off by default and existing setups are unchanged. Covered by synthetic two-host tests and a bounded isolated smoke against one fresh QA-only T3 instance (28 of 28 checks, [evidence](docs/evidence/discovery.md)); not yet a live fleet, production or hosted-connector qualification.
+Some requests name a machine but no project. A machine can have a default **scratch** destination: T3's internal "No project" workspace, with no git worktree or branch. Named projects are unchanged and still get a fresh worktree per job. Ask your setup agent:
 
-**v0.1.6** accepts current T3 thread responses without a `link` field, generates the documented thread URL, and retains older links. Watchers recover and clear stale response-shape errors after a successful observation. No database migration or configuration change.
+```text
+On gateway host <id>, add a scratch alias for T3's internal "No project"
+workspace and make it the host's default project. Verify that project's
+ID in T3 first; don't guess it from the title. Enable discovery on the
+host, then restart and run doctor.
+```
 
-**v0.1.5** adds per-machine authorization: an agent can be approved (or a bearer token minted) for selected hosts only, enforced by the gateway on every tool. Grants and tokens issued before it keep their fleet-wide access without reauthorization. It is covered by synthetic two-host tests; no live multi-host qualification is claimed. See [approval-page and two-host evidence](docs/evidence/host-scopes-v015.md).
+When you name a machine but no project, your bot passes `target: { host: "<id>" }` to `work_start`. An explicit project still uses its alias or project ID, and an unknown named project is resolved or reported, never sent to scratch. [Scratch configuration and upgrade notes](docs/configuration.md#no-named-project).
 
-**v0.1.4.** Released and deployed. Supervised scratch QA found and fixed an incompatible 200-character limit on T3's opaque pending request IDs. Real Codex questions can now be answered with `work_respond` and selected with `work_status.pendingRequestId`; a transient `waiting` status alone no longer invents an approval. v0.1.4 question and lifecycle retests passed, covering all nine tools together. Operator approval completed on v0.1.4 in both the isolated QA gateway and the production gateway's scratch project: the expected marker was written and the approval flag cleared. The native zero-count `waiting` sample was collected before the state-rule fix; its synthetic regression fails before the fix and passes after it, and real question resumption after the fix showed no false approval.
+## Keep a coordinator in the loop
 
-The supervised run began on v0.1.3 and continued through the fix builds. Across those stages it confirmed the lifecycle, an actual isolated provider failure, standing-job use after a failed run, coordinator delegation through automatic parent resumption, and SDK ingress recovery across access-token expiry. A direct HTTP client using only MCP content text passed the isolated v0.1.4 question/answer, messages and feed checks. After deployment, Grok Bot confirmed that its connector is registered as `Cursor`: it read a real Codex question and options from `work_status` as plain text and answered through `work_respond` with the full 228-character request ID. An actual Notion Custom Agent passed a fleet check through its existing MCP connection to v0.1.3. T3FG-3 is complete under the agreed QA scope: Grok verified the shared MCP question/answer contract and Notion connectivity passed. A separate Notion job workflow and hosted-connector recovery remain optional, unrun coverage. T3FG-1 monitoring remains blocked on the operator decision. Owned QA jobs and temporary runtimes/access were cleaned up; the production gateway's original settings were restored and all doctor checks passed. The automated suite uses a fake T3 built from its published tool schemas; [`scripts/e2e-live.ts`](scripts/e2e-live.ts) is the opt-in lifecycle check, with an explicit scratch alias and honest tool coverage (see [docs/operations.md](docs/operations.md#live-end-to-end-check)).
+Already have a T3 thread that plans work and delegates to other agents? Adopt it as a **standing job** so your bot can keep talking to that same thread:
 
-Known limits:
+```text
+Register <T3 thread link> as a standing job for gateway project <alias>.
+Give me its job ID. Leave the thread and any work running in it alone.
+```
 
-- Permission approvals can only be given in T3 itself (T3's tools do not expose them), so jobs in projects with `runtimeMode` `approval-required` (the default) wait for you to approve in T3; projects that should run unattended need `auto` or `full-access` (see [docs/configuration.md](docs/configuration.md#approvals-and-unattended-projects)).
-- Sign-in from browser-based MCP clients is not supported: there is no CORS on the OAuth endpoints (see [docs/security.md](docs/security.md#known-limitations)).
+Give that request to your setup agent, then tell your bot to use the returned job ID with `work_continue`. The gateway follows the coordinator's replies and delegated work. Interrupting a standing job stops its current turn; it keeps the thread available for the next request. [Standing jobs and coordinator-only projects](docs/operations.md#standing-jobs).
 
-## Security model, in short
+## Guides and reference
 
-- Agents authenticate with tokens this gateway issues; approval needs a one-time code minted on the gateway machine. Codes and tokens are stored only as hashes.
-- The gateway obtains T3 credentials by automating T3's pairing-code consent with your own machine access (the same access `t3 auth pairing create` needs). Choose the T3 access level per host.
-- Everything listens on loopback; the tunnel is the only way in. Logs never contain tokens, codes, authorization headers, task text or message content.
+| I want to… | Read this |
+| --- | --- |
+| Install manually or connect a client | [Setup](docs/setup.md) |
+| Change projects, models, discovery or subscriptions | [Configuration](docs/configuration.md) |
+| Diagnose a connection, update, back up or recover | [Operations](docs/operations.md) |
+| Understand access, credentials and trust boundaries | [Security](docs/security.md) |
+| Read the implementation contract | [Design](docs/design.md) |
+| See what changed in a release | [GitHub releases](https://github.com/boundsj/t3-fleet-gateway/releases) · [Changelog](CHANGELOG.md) |
 
-Details: [docs/security.md](docs/security.md). To report a vulnerability, see [SECURITY.md](SECURITY.md).
-
-## Documentation
-
-- [docs/configuration.md](docs/configuration.md): every config field
-- [docs/operations.md](docs/operations.md): enroll, pair, revoke, renewal, standing jobs, doctor, running as a service, logs, backup, uninstall
-- [docs/security.md](docs/security.md): threat model and what is stored where
-- [docs/design.md](docs/design.md): the design specification
+Server-side and native MCP clients are supported; browser-only clients cannot complete OAuth sign-in because the OAuth endpoints do not provide CORS. [Known limitations](docs/security.md#known-limitations). Report vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## Development
 
 ```sh
 npm install
-npm run check      # typecheck and the full test suite
-npm test           # tests only (node:test)
-npm run typecheck  # tsc --noEmit
-npm run compat:check  # on-demand, read-only check of the configured T3 hosts
+npm run check             # typecheck and tests; fake T3, no production access
+npm run dashboard:demo    # try the dashboard with made-up hosts and jobs
+npm run webhooks:smoke    # isolated HTTPS, retries and process-crash checks
 ```
 
-Tests use a fake T3 server built with the MCP SDK and never touch a real T3. CI runs `npm run check` on Node 24 and 26 (Linux) and 26 (macOS). See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
+CI checks Node 24 and 26 on Linux, and Node 26 on macOS. The webhook smoke needs OpenSSL; see its [evidence and instructions](docs/evidence/webhooks.md). The optional [compatibility check](docs/operations.md#developer-compatibility-check) compares T3's MCP schemas and runs read-only probes; it installs no schedule.
 
-The developer compatibility check compares T3's advertised MCP schemas with a private accepted baseline and exercises the gateway's read parsers against existing threads. It reports changed tools, failed checks and skipped coverage. Use `-- --accept` to establish or deliberately replace the baseline after review, and `-- --json` for a machine-readable report. It installs no schedule and runs no jobs. See [manual compatibility checks](docs/operations.md#developer-compatibility-check).
+Contributing? Start with [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
 
 ## License
 

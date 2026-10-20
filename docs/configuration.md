@@ -44,6 +44,7 @@ Each entry is a machine running a T3 Code server.
 | --- | --- | --- |
 | `id` | required | Short stable id (lowercase letters, digits, hyphens; up to 32). Used in project config, CLI commands, tool output and per-host grants (`host:<id>:read`, `clients token --hosts <id>`): renaming a host drops it from every grant restricted to selected machines, and a grant for a removed id applies again to a new host given that id. |
 | `label` | none | Human-friendly name shown in `fleet_status` and on the approval page, which anyone who registers a client can open. |
+| `transportNote` | none | How the gateway reaches this host, in your words, up to 80 characters (for example `SSH tunnel` or `Same machine`). Shown on the operator dashboard next to `t3Url`; descriptive only, never checked. |
 | `t3Url` | required | T3 server origin. `http` only for loopback; `https` for remote hosts. |
 | `mintPairingCode` | `["t3","auth","pairing","create","--ttl","5m","--json"]` | Command (argv, no shell) that prints a T3 pairing code as JSON with a `credential` field. For a remote host use something like `["ssh","other-host","t3","auth","pairing","create","--ttl","5m","--json"]`. Adding `--label t3-fleet-gateway` makes the pairing easy to spot in T3. |
 | `mintPairingCodeProbe` | none | Optional exact argv for a non-mutating check you have verified is safe to run at `doctor` and startup. No shell; 1–32 arguments, at most 4,096 characters each. Never set this to the pairing/mint command. See "Renewal command preflight" below. |
@@ -179,6 +180,30 @@ OAuth TTLs govern gateway grants only; static bearer tokens from `clients token`
 | `pollSeconds` | `10` (2 to 300) | How often the job engine ticks: reconcile uncertain launches, poll active jobs' threads, dispatch queued jobs. Idle jobs are polled at most once a minute. A new job or agent action also triggers a tick at once. |
 | `reconcileWindowMinutes` | `10` (1 to 240) | How long a launch with an unknown outcome may go unconfirmed, while the host answers, before the job fails with `launch_not_confirmed`. Time the host is unreachable does not count. |
 
+### `dashboard`
+
+The operator dashboard (v0.1.9): gateway, hosts, agent clients, jobs and recent job events in a browser, with manual **Run checks** and **Webhook connections**. Monitoring remains read-only; only webhook connection management changes state. Off by default. It runs inside `serve` on a listener of its own, never the MCP listener, so the tunnel that carries `/mcp` to agents does not carry it. See [operations.md](operations.md#operator-dashboard) for publishing it to your tailnet and [security.md](security.md#the-operator-dashboard) for the trust boundary.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Start the dashboard listener with `serve`. |
+| `listen` | `{ "host": "127.0.0.1", "port": 3791 }` | Loopback only (`127.0.0.1`, `::1` or `localhost`), and a different port from `listen.port`. Publish it with a tailnet-only reverse proxy; never point a public tunnel (Funnel) at it. |
+| `basePath` | `"/"` | The path it is served under: `/` or up to four lowercase segments such as `/t3-fleet-gateway`, with no trailing slash. Set it to the proxy's mount path, and have the proxy keep the path (for `tailscale serve --set-path /t3-fleet-gateway`, target `http://127.0.0.1:3791/t3-fleet-gateway`). |
+| `allowedHosts` | `[]` | `Host` header values the dashboard accepts besides its own loopback address and port, exact and lowercase, with a port only when the browser shows one: your proxy's host name, such as `<machine>.<tailnet>.ts.net`. Anything else gets `421` (protection against DNS rebinding). At most 16. |
+| `clientLabels` | `{}` | Display names for agent clients by client id (see `clients list`), for example a connector that registered as `Cursor` shown as `Grok Bot`. At most 100, each up to 80 characters. The registered name is still shown beside it. |
+
+```json
+"dashboard": {
+  "enabled": true,
+  "listen": { "host": "127.0.0.1", "port": 3791 },
+  "basePath": "/t3-fleet-gateway",
+  "allowedHosts": ["<machine>.<tailnet>.ts.net"],
+  "clientLabels": { "<client id>": "Grok Bot" }
+}
+```
+
+Changing dashboard listener settings takes a restart of `serve`. Connections created or changed in the Webhooks view take effect immediately. `doctor` checks that the dashboard answers on its listener and that the public URL does not serve it.
+
 ## A remote host
 
 ```json
@@ -192,3 +217,25 @@ OAuth TTLs govern gateway grants only; static bearer tokens from `clients token`
 ```
 
 Then run `t3-fleet-gateway hosts enroll studio`. Adding a host is configuration plus enrollment. Agents approved for *All machines* (and every grant from before v0.1.5) can use it at once; agents approved for selected machines cannot until you approve them again with it ticked (see [operations.md](operations.md#connect-an-agent)).
+
+## Webhooks
+
+v0.1.9: `webhooks: { "subscriptions": [] }` is the default. The easiest setup is **Connect Grok Bot** in the private dashboard: paste a URL and full authentication header, choose a configured project and test the connection. It works with generic HTTPS receivers too. Dashboard connections live in the database, require no secret file or restart, and use the five default events with excerpts off. They survive config edits and restarts.
+
+The file-managed alternative below remains supported. At most 32 saved active subscriptions across both sources are allowed; restart `serve` to apply file changes. The dashboard labels file-managed rows and cannot replace or disconnect them. ID collisions between ownership types are refused. The [manual setup example](setup.md#configure-a-webhook-by-hand) uses a Grok routine URL and sender-key header. No new incoming connection is required.
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Stable lowercase letters/digits/hyphens, 1–64 characters; unique in this config. Use in CLI commands. |
+| `enabled` | Default `false`. Disabled entries enqueue/send nothing; an explicit test ping is still allowed. |
+| `url` | Absolute HTTPS destination, up to 4,096 characters, no embedded credentials or fragment. Treat it as secret. No redirects are followed. |
+| `auth.header` | Exact HTTP authentication header name supplied by the receiver, such as `X-Sender-Key` or `Authorization`. Transport/control headers (`Host`, framing, connection, proxy headers, etc.) are refused. |
+| `auth.secretFile` | A regular file in the gateway data directory, named by a single filename, owned by the current user and readable only by that user (`0600`), never a symlink or FIFO. Contents are the header value, up to 8 KiB; one final newline is removed. Empty/missing/invalid secrets fail closed. |
+| `projects`, `hosts` | Optional nonempty lists; OR within each, AND between them. Omitted means all. Project matching uses the stored alias (or discovery's `@host/projectId` ref). |
+| `events` | Nonempty selection of `needs_input`, `idle`, `failed`, `cancelled`, `delegated_work_ended`, `running`. Defaults to the first five. |
+| `excerptChars` | Default `0` omits both excerpt fields. Opt in with 1–500 for a bounded worker excerpt and truncation flag. Worker secrets cannot be reliably redacted. |
+| `allowLoopbackHttp` | Default `false`. Isolated development only: permits HTTP at literal `127.0.0.1` or `[::1]`; no other HTTP host. HTTPS always validates certificates. |
+
+Use `webhooks ping <id>` to test config without creating a job, then restart the gateway to apply file changes. The CLI also supports persisted dashboard connections; `webhooks list` identifies the management source. A 2xx test result means the receiver accepted the request; check the bot conversation for its result. `webhooks list` and `webhooks attempts <id> --limit 20` are offline diagnostics and do not apply their config over the serving process. Secrets are stored as plaintext inside the existing protected data directory/database, like downstream credentials. Keep config private too because URLs can contain credentials in their path/query. Protect backups.
+
+New subscriptions do not replay history. Disabling/removing a subscription, or changing its route, key, filters or excerpt policy, cancels its old queue. Unchanged routes resume after restart. An already transmitted request can still arrive. Payloads are capped at 16 KiB; oversized upstream metadata increments the same explicit overflow diagnostic as a full queue. [Delivery, overflow, retention and feed catch-up](design.md#outbound-job-webhooks) define recovery; retain polling even when notifications work.

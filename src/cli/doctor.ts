@@ -4,7 +4,8 @@ import { SCHEMA_VERSION, schemaVersion } from '../db/database.ts';
 import { describeError } from '../errors.ts';
 import type { GatewayServices } from '../gateway.ts';
 import { checkProjectModel, resolveProject } from '../hosts/projects.ts';
-import { RESOURCE_NAME, resourceMetadataUrl } from '../oauth/metadata.ts';
+import { describeExposure, probeDashboardExposure } from '../dashboard/exposure.ts';
+import { probePublicUrl, RESOURCE_NAME, resourceMetadataUrl } from '../oauth/metadata.ts';
 import { SECOND } from '../time.ts';
 
 export type CheckLevel = 'ok' | 'warn' | 'fail';
@@ -18,22 +19,38 @@ export interface CheckResult {
 async function checkPublicUrl(config: GatewayConfig): Promise<CheckResult> {
   const url = resourceMetadataUrl(config.publicUrl);
   const name = 'public URL';
-  try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(5 * SECOND) });
-    if (!response.ok) return { level: 'fail', name, detail: `${url} answered HTTP ${response.status}` };
-    const body = (await response.json()) as { resource?: unknown; resource_name?: unknown };
-    if (body.resource !== mcpResource(config)) {
-      return { level: 'fail', name, detail: `${url} names resource ${String(body.resource)}, expected ${mcpResource(config)}` };
-    }
-    // Any MCP server behind the same URL (T3 itself, behind another proxy) names the same resource.
-    if (body.resource_name !== RESOURCE_NAME) {
-      const named = `resource_name ${String(body.resource_name)}, expected ${RESOURCE_NAME}`;
-      return { level: 'fail', name, detail: `${url} serves a different server's metadata (${named})` };
-    }
-    return { level: 'ok', name, detail: `${config.publicUrl} serves this gateway's metadata` };
-  } catch (error) {
-    return { level: 'fail', name, detail: `${url} is not reachable (${(error as Error).name}). Is the gateway running and the tunnel up?` };
+  const probe = await probePublicUrl(config.publicUrl, mcpResource(config));
+  switch (probe.outcome) {
+    case 'ok':
+      return { level: 'ok', name, detail: `${config.publicUrl} serves this gateway's metadata` };
+    case 'http_error':
+      return { level: 'fail', name, detail: `${url} answered HTTP ${probe.status}` };
+    case 'wrong_resource':
+      return { level: 'fail', name, detail: `${url} names resource ${probe.resource}, expected ${mcpResource(config)}` };
+    case 'different_server':
+      return { level: 'fail', name, detail: `${url} serves a different server's metadata (resource_name ${probe.resourceName}, expected ${RESOURCE_NAME})` };
+    case 'unreachable':
+      return { level: 'fail', name, detail: `${url} is not reachable (${probe.errorName}). Is the gateway running and the tunnel up?` };
   }
+}
+
+/** The dashboard answers on its own loopback listener, and the public MCP URL does not serve it. */
+async function checkDashboard(config: GatewayConfig): Promise<CheckResult[]> {
+  const { host, port } = config.dashboard.listen;
+  const origin = `http://${host.includes(':') ? `[${host}]` : host}:${port}`;
+  const path = config.dashboard.basePath === '/' ? '/' : `${config.dashboard.basePath}/`;
+  let local: CheckResult;
+  try {
+    const response = await fetch(`${origin}${path}`, { redirect: 'manual', signal: AbortSignal.timeout(5 * SECOND) });
+    await response.body?.cancel();
+    local = response.status === 200
+      ? { level: 'ok', name: 'dashboard', detail: `${origin}${path} answers (loopback only; publish it with a tailnet-only proxy)` }
+      : { level: 'fail', name: 'dashboard', detail: `${origin}${path} answered HTTP ${response.status}` };
+  } catch {
+    local = { level: 'warn', name: 'dashboard', detail: `${origin}${path} is not answering. Is serve running?` };
+  }
+  const exposure = describeExposure(await probeDashboardExposure(config.publicUrl, config.dashboard.basePath));
+  return [local, { level: exposure.level, name: 'dashboard exposure', detail: exposure.detail }];
 }
 
 /** Run every check; never throws. The caller already loaded the config and opened the services. */
@@ -103,5 +120,6 @@ export async function runDoctor(services: GatewayServices, dataDir: string): Pro
   }
 
   results.push(await checkPublicUrl(config));
+  if (config.dashboard.enabled) results.push(...(await checkDashboard(config)));
   return results;
 }

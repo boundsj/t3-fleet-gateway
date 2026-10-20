@@ -149,9 +149,66 @@ t3-fleet-gateway jobs release <job id>
 t3-fleet-gateway doctor
 ```
 
-Checks, in order: the config, data directory permissions, database integrity and schema version, each host's credential and live reachability plus mint executable resolution and any explicit non-mutating probe, that each project resolves to a T3 project and has a model (its own `modelSelection`, its host's `defaultModelSelection`, or the T3 project's default model; without one T3 refuses every launch), and that `publicUrl` serves this gateway's protected resource metadata (which needs `serve` and the tunnel running): the `resource` must be `<publicUrl>/mcp` and `resource_name` must be `t3-fleet-gateway`, so another server behind the same URL (T3 itself behind a different proxy, say) fails with "serves a different server's metadata". Each line is `OK`, `WARN` or `FAIL`; any `FAIL` exits `1`.
+Checks, in order: the config, data directory permissions, database integrity and schema version, each host's credential and live reachability plus mint executable resolution and any explicit non-mutating probe, that each project resolves to a T3 project and has a model (its own `modelSelection`, its host's `defaultModelSelection`, or the T3 project's default model; without one T3 refuses every launch), and that `publicUrl` serves this gateway's protected resource metadata (which needs `serve` and the tunnel running): the `resource` must be `<publicUrl>/mcp` and `resource_name` must be `t3-fleet-gateway`, so another server behind the same URL (T3 itself behind a different proxy, say) fails with "serves a different server's metadata". With the dashboard enabled, it also checks that the dashboard answers on its loopback listener and that the public URL does not serve it (see "Operator dashboard"). Each line is `OK`, `WARN` or `FAIL`; any `FAIL` exits `1`.
 
 Mint checks use doctor's actual environment: repeat with the service's PATH to verify service resolution. Missing/non-executable commands fail before a future renewal needs them, even when T3 is healthy and its credential is active. Version-pinned paths warn. Without `mintPairingCodeProbe`, wrapper internals, remote execution and CLI version remain explicitly unverified; nothing is minted to test them. Only an explicitly configured safe probe is run (ten-second deadline, 4,096 bytes per output stream; it was two seconds before 0.1.7, which the Background launchd agent exceeded), with fixed diagnostics and no raw command output or argv. Version comparison accepts bare semver, exact native `t3 v<semver>` output and JSON `{"version":"x.y.z"}`. Doctor uses fresh health; startup uses only completed, unexpired cached health (otherwise comparison remains unverified), with no preflight health request. Disagreement warns without declaring incompatibility. See [configuration.md](configuration.md#renewal-command-preflight).
+
+## Operator dashboard
+
+A private page for you, the operator: is the gateway running, do the hosts answer, which agents can connect and which actually did, what work is waiting on you, and what happened recently. The Webhooks view also connects notification receivers; monitoring views remain read-only. Approvals, answers and stopping work happen in T3; enrolling hosts, approving and revoking agents happen in this CLI. Design: [design.md](design.md#operator-dashboard); trust boundary: [security.md](security.md#the-operator-dashboard).
+
+### Turn it on
+
+1. In the config, add a `dashboard` block ([configuration.md](configuration.md#dashboard)) with `"enabled": true`, a loopback `listen` on its own port (default `3791`, never `listen.port`) and a `basePath` you will mount it under, for example `/t3-fleet-gateway`. Optionally set `transportNote` on hosts (`"SSH tunnel"`, `"Same machine"`) and `clientLabels` for connectors whose registered name is not the one you know them by (`clients list` shows the ids).
+2. Restart the service (see "Run as a service": stop, update, `doctor`, install). `serve` logs `dashboard.started` with the listener and path.
+3. Publish it to your tailnet only, on a path of its own, keeping the path, for example with Tailscale:
+
+   ```sh
+   tailscale serve status    # see what is taken first
+   tailscale serve --bg --https=443 --set-path /t3-fleet-gateway http://127.0.0.1:3791/t3-fleet-gateway
+   ```
+
+   Use `tailscale serve`, never `tailscale funnel`: Funnel would publish it to the internet. (The dashboard refuses requests Tailscale marks as Funnel traffic anyway.) Then add the host name your browser uses (`<machine>.<tailnet>.ts.net`) to `dashboard.allowedHosts` and restart; until then the page answers `421` "This host name is not allowed". On the gateway machine itself, `http://127.0.0.1:3791/t3-fleet-gateway/` always works.
+4. Run `doctor`. With the dashboard enabled it adds two lines: `dashboard` (it answers on its loopback listener) and `dashboard exposure` (the public MCP URL does **not** serve it, checked through your real tunnel). A `FAIL` on the second means your public tunnel points at the dashboard's port: point it at `listen.port`.
+
+To turn it off: `tailscale serve --https=443 --set-path /t3-fleet-gateway off`, set `enabled` to `false` and restart.
+
+### Reading it
+
+- **Overview** opens with what needs you, most serious first, each saying where to act: a T3 thread link (`Open in T3`), a command to run on the gateway machine (copyable), or a dashboard view. The map shows agents → gateway → hosts with each one's state.
+- **Hosts.** Reachability is the **last** health check the gateway made, with its time; opening the page never contacts T3. `Not checked yet` means none since the gateway started: press **Run checks**. `No answer` means nothing answered at the host's `t3Url`; the gateway cannot tell which hop failed (an SSH tunnel, the network or T3), and the transport note is only your description. `Refused credential` means T3 answered but rejected the stored credential: run `hosts enroll <id>`. Jobs on an unreachable host keep their state.
+- **Clients** separate *Authorization* (what the gateway would accept now: grant state, the access its usable tokens carry, expiries; *Approved for* appears when the approval was wider, after a narrowed refresh or once the wider tokens expired) from *Observed* (the last successful MCP request and refresh). `Never observed` and `unknown` mean nothing was recorded, not that the connector is broken; `Seen recently` means a request completed in the last day, not that the connector's routine keeps running; a usable grant does not prove the connector still holds its token. `Needs new approval` / `Token unusable` mean no usable grant is left. A grant revoked for token reuse is flagged: run `clients diagnose <id>`. A bearer token expiring soon comes with a `clients token` command that keeps its access and hosts; check it before running it.
+- **Jobs** lists jobs waiting on someone or recently finished, open jobs and finished ones, with state, host, who started it and a link to its T3 thread. No task text, replies or questions are shown; open the thread in T3. The activity log shows job events as codes.
+- **Run checks** asks every host now (one read-only call each), checks the public URL's metadata from this machine, confirms the public URL does not serve the dashboard, and checks the database, the data directory and whether the renewal command resolves. Nothing is enrolled, renewed or executed. Each host gets five seconds in all; one that has not answered by then is reported as `t3_timeout`, and a late answer shows on Hosts with its own time. Failures and warnings also appear on the Overview until the next run. What it cannot tell (a connector's own route, which tunnel hop failed, whether a connector holds its token) is listed on the page.
+
+The page reloads its data when you open it, press Refresh, or come back to it after a minute. Automatic refresh pauses while a webhook form is open so switching to Grok does not erase pasted values; explicit Refresh clears them. There are no alerts and no background polling of T3.
+
+### Connect a webhook receiver
+
+From **Overview**, choose **Connect Grok Bot**, or open **Webhooks**. For Grok, ask the bot to show clickable links named **Webhook URL**, **Webhook key** and **Authorization header**; these open private panels. Ask it not to print the key in the conversation. Copy **POST to** from the URL panel and the complete **header** from the authorization panel. The full header already contains the key, so there is no separate key field in the dashboard.
+
+1. Paste the **Webhook URL**. This is where the gateway sends job notices.
+2. Paste the **Full authorization header**, including its name and value, for example `Authorization: Bearer example-key`. This tells the receiver to accept the request. Any supported HTTPS receiver and authentication header can be used.
+3. Choose a configured **Project**. Its host is selected from the configuration; only that project's notifications go to this connection.
+4. Select **Connect & Test**. The gateway sends a synthetic test before saving. If accepted, check the bot conversation to confirm its response: an HTTP success does not prove the bot finished.
+
+The connection sends notices when a job finishes a turn (`idle`), needs input, fails, is cancelled, or stops waiting for delegated work. Worker excerpts stay off. No files or restart are needed, and the saved URL and key are never shown again. The list shows project, host, management source and safe last-test status/time.
+
+**Send test** checks an existing connection. **Replace key** tests a new full header and, optionally, a new URL before replacing the old route. Recreating a bot routine changes both its URL and key: replace both. A failed test keeps the old connection working. **Disconnect** asks for confirmation and cancels its queued notices; a request already sent cannot be recalled. File-managed rows must be changed in their configuration and secret file; the dashboard labels them and cannot replace or disconnect them. The CLI's `webhooks list`, `webhooks attempts <id>` and `webhooks ping <id>` work with either source without exporting secrets.
+
+A 401/403 test means the receiver refused authentication. Check the full header and current routine URL. A timeout means no complete response arrived within ten seconds; it does not prove the receiver never received the test. Tests do not automatically retry. If another operator changes or disconnects a row while your test runs, refresh and use its current state. Management is unavailable during startup and shutdown. Keep the dashboard private: anyone who can reach it can manage these destinations.
+
+### Dashboard demo
+
+`npm run dashboard:demo` (or `node scripts/dashboard-demo.ts`) runs the dashboard on a synthetic fleet: a real gateway with a temporary data directory, three fake T3 hosts on loopback and the fictional clients Grok Bot, Muse and Notion, seeded through the gateway's own sign-in and tools. It never reads your config or data directory and contacts nothing beyond loopback. Options: `--scenario mixed|healthy|host-down|auth-issue|empty` (`--list` describes them; `mixed` is the default and the richest), `--port 4791` (`0` picks one), `--base-path /t3-fleet-gateway`, `--no-badge` to hide the "Synthetic demo" badge for screenshots, and `--webhook-receiver` for a local synthetic setup receiver. It prints the URL and runs until Ctrl-C, which deletes the temporary directory. Use it for screenshots and browser checks; never point it at production data.
+
+For a functional webhook setup check:
+
+```sh
+npm run dashboard:demo -- --scenario empty --port 0 --webhook-receiver
+```
+
+Open the printed dashboard URL and select **Connect Grok Bot**. Paste the printed `/accept` URL and the fictional full header `Authorization: Bearer demo-only-key`, then choose `atlas-web`. The receiver accepts with HTTP 202. To exercise a failed replacement, choose **Replace key**, paste the printed `/reject` URL and the same header, then submit: HTTP 401 leaves the working connection in place. The printed `/timeout` URL stalls until the demo's one-second attempt deadline. **Send test** should still succeed on the original connection after either failure. Finally disconnect and confirm the row is removed. All receiver request bodies and headers are discarded; only counts are held in memory. This demo permits only literal-loopback destinations, enables local HTTP explicitly, and cannot target a real bot. Ctrl-C shuts down the gateway and receiver and deletes the temporary database. Production retains normal HTTPS validation and the ten-second deadline.
 
 ## Developer compatibility check
 
@@ -257,7 +314,9 @@ Make it executable (`chmod +x ~/.local/bin/t3`), check that `~/.local/bin/t3 --v
 | `jobs.host_unreachable` (warn), `jobs.host_reachable` | The job engine lost or regained a host; jobs keep their state |
 | `jobs.reconcile_failed`, `jobs.watch_failed`, `jobs.interrupt_failed`, `jobs.interrupt_deferred` (warn) | A T3 call for one job failed (job id, error code); the error is on the job and the call is retried next tick |
 | `jobs.tick_failed`, `jobs.host_tick_failed` (error) | Unexpected engine errors (with an error code and, per host, the step); the next step still runs |
-| `http.request` | Method, path (no query), status, duration |
+| `http.request` | Method, path (no query), status, duration; `listener: dashboard` for the dashboard's listener |
+| `dashboard.started`, `dashboard.checks_run` | The dashboard listener (address and path); a manual check run (result counts) |
+| `dashboard.request_refused` (warn) | A dashboard request refused: `reason` (`host_not_allowed`, `funnel`, `cross_site`, `origin_not_allowed`, `missing_api_header`, `content_type`) and status; never the host or origin |
 | `process.transient_socket_error` (warn) | Node 26.0's `setTypeOfService EINVAL` after T3 reset a new connection; harmless (see Run as a service) |
 | `process.fatal` (error) | An uncaught error (name and code): `serve` shuts down and exits `1`; `gateway.shutdown_timeout` if that took over 10 seconds |
 

@@ -2,6 +2,7 @@ import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
 import type { Logger } from '../log.ts';
 import type { Clock } from '../time.ts';
+import { WebhookStore } from '../webhooks/store.ts';
 import type { DelegatedTask } from './derive.ts';
 import { parseLaunchSpec, type LaunchSpec } from './launchSpec.ts';
 import { isTerminal, RUNNING_STATES, TERMINAL_STATES, type JobState } from './states.ts';
@@ -375,6 +376,12 @@ export interface NewStandingJob {
 }
 
 export interface TransitionOptions {
+  /** An observation must still match its source snapshot, including when the state stayed the same. */
+  expected?: Job;
+  events?: { type: string; detail?: EventDetail }[];
+  gatewayTurn?: { runId: string; clientId: string };
+  /** The observed active/latest run; lastRunId can still be the older run the watcher is following. */
+  turnRunId?: string | null;
   /** The transition happens only if the job is in one of these states. */
   from: readonly JobState[];
   to: JobState;
@@ -391,11 +398,13 @@ export class JobStore {
   readonly #db: Database;
   readonly #clock: Clock;
   readonly #logger: Logger;
+  readonly #webhooks: WebhookStore;
 
   constructor(db: Database, clock: Clock, logger: Logger) {
     this.#db = db;
     this.#clock = clock;
     this.#logger = logger;
+    this.#webhooks = new WebhookStore(db, clock);
   }
 
   get(id: string, scope: JobScope = {}): Job | undefined {
@@ -592,10 +601,12 @@ export class JobStore {
     return transaction(this.#db, () => {
       const current = this.get(id);
       if (!current || !options.from.includes(current.state)) return undefined;
+      if (options.expected && JSON.stringify(current) !== JSON.stringify(options.expected)) return undefined;
+      if (options.gatewayTurn) this.#recordTurn(id, options.gatewayTurn.runId, options.gatewayTurn.clientId);
       const now = this.#clock();
       if (!this.#write(current, options.changes ?? {}, now, options.to)) return current;
       if (current.state !== options.to) {
-        this.#insertEvent(id, 'state_changed', current.state, options.to, options.detail ?? {}, now);
+        this.#insertEvent(id, 'state_changed', current.state, options.to, options.detail ?? {}, now, options.turnRunId);
         this.#logger.info('job.state_changed', {
           jobId: id,
           from: current.state,
@@ -604,6 +615,7 @@ export class JobStore {
           errorCode: options.detail?.code,
         });
       }
+      for (const event of options.events ?? []) this.#insertEvent(id, event.type, current.state, options.to, event.detail ?? {}, now, options.turnRunId);
       return this.get(id);
     });
   }
@@ -616,7 +628,28 @@ export class JobStore {
 
   /** Record an event that is not a state change (for example a follow-up sent to a running job). */
   appendEvent(id: string, type: string, state: JobState, detail: EventDetail = {}): void {
-    this.#insertEvent(id, type, state, state, detail, this.#clock());
+    transaction(this.#db, () => this.#insertEvent(id, type, state, state, detail, this.#clock()));
+  }
+
+  /** Commit a successful send and its idempotency result together. Only a newly started exact run proves its caller. */
+  recordSend(id: string, sent: { runId: string; delivery: string }, clientId: string, requestId: string): void {
+    transaction(this.#db, () => {
+      this.completeIdempotencyKey(clientId, 'work_continue', requestId, JSON.stringify({ runId: sent.runId, delivery: sent.delivery }));
+      const job = this.require(id);
+      if (isTerminal(job.state)) return;
+      const now = this.#clock();
+      if (sent.delivery === 'started') this.#recordTurn(id, sent.runId, clientId);
+      const next = job.state === 'idle' ? 'running' : job.state;
+      // Queued/steered sends may return the run they joined; they never replace its recorded initiator.
+      this.#write(job, { lastRunId: sent.runId, ...(next !== job.state ? { lastErrorCode: null, lastErrorMessage: null } : {}) }, now, next);
+      this.#insertEvent(id, next !== job.state ? 'state_changed' : 'followup_sent', job.state, next,
+        { reason: next !== job.state ? 'followup' : sent.delivery }, now);
+      if (next !== job.state) this.#logger.info('job.state_changed', { jobId: id, from: job.state, to: next, reason: 'followup' });
+    });
+  }
+
+  #recordTurn(jobId: string, runId: string, clientId: string): void {
+    this.#db.prepare('INSERT OR IGNORE INTO job_turns (job_id, run_id, client_id) VALUES (?, ?, ?)').run(jobId, runId, clientId);
   }
 
   /** Mark every open job on a host as unreachable since `since`, keeping an earlier mark. A change bumps `updatedAt`. */
@@ -641,6 +674,25 @@ export class JobStore {
       .prepare('SELECT * FROM (SELECT * FROM job_events WHERE job_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id')
       .all(jobId, limit) as unknown as EventRow[];
     return rows.map(toEvent);
+  }
+
+  /** The newest events across all jobs, newest first, with their job's project and title (the operator dashboard). */
+  latestEvents(limit: number): FeedEvent[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT job_events.*, jobs.project_alias, jobs.title, jobs.host_id, jobs.t3_project_id FROM job_events JOIN jobs ON jobs.id = job_events.job_id
+          ORDER BY job_events.id DESC LIMIT ?`,
+      )
+      .all(limit) as unknown as (EventRow & { project_alias: string; title: string; host_id: string; t3_project_id: string | null })[];
+    return rows.map((row) => ({ ...toEvent(row), projectAlias: row.project_alias, title: row.title, hostId: row.host_id, t3ProjectId: row.t3_project_id }));
+  }
+
+  /** How many jobs are in each state, per host. */
+  stateCounts(): { hostId: string; state: JobState; standing: boolean; count: number }[] {
+    const rows = this.#db
+      .prepare('SELECT host_id, state, standing, COUNT(*) AS n FROM jobs GROUP BY host_id, state, standing ORDER BY host_id, state, standing')
+      .all() as { host_id: string; state: JobState; standing: number; n: number }[];
+    return rows.map((row) => ({ hostId: row.host_id, state: row.state, standing: row.standing === 1, count: row.n }));
   }
 
   /** Events after `cursor` (exclusive), oldest first, with their job's project and title. `scope`: see JobScope. */
@@ -729,10 +781,11 @@ export class JobStore {
     return true;
   }
 
-  #insertEvent(jobId: string, type: string, from: JobState | null, to: JobState | null, detail: EventDetail, now: number): void {
+  #insertEvent(jobId: string, type: string, from: JobState | null, to: JobState | null, detail: EventDetail, now: number, turnRunId?: string | null): void {
     const json = Object.keys(detail).length > 0 ? JSON.stringify(detail) : null;
-    this.#db
+    const result = this.#db
       .prepare('INSERT INTO job_events (job_id, type, from_state, to_state, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(jobId, type, from, to, json, now);
+    this.#webhooks.capture({ id: Number(result.lastInsertRowid), jobId, type, fromState: from, toState: to, detail, createdAt: now }, this.require(jobId), turnRunId);
   }
 }

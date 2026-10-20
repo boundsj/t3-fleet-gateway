@@ -103,6 +103,19 @@ interface HostState {
   unreachableSince: number | null;
   failures: number;
   nextAttemptAt: number;
+  /** The failure that marked the host unreachable most recently; null while it answers. */
+  errorCode: string | null;
+}
+
+/** What the engine holds in memory, for the operator dashboard. Never stored: a restart starts empty. */
+export interface EngineStatus {
+  /** Ticking on its timer (serve); false when stopped or driven by hand (tests). */
+  running: boolean;
+  intervalMs: number;
+  /** When the last tick finished, or null if none has since the process started. */
+  lastTickAt: number | null;
+  /** Hosts the engine failed to reach while following their jobs; hosts without open jobs are never contacted by it. */
+  hosts: { hostId: string; unreachableSince: number; failures: number; nextAttemptAt: number; errorCode: string | null }[];
 }
 
 export interface JobEngineOptions {
@@ -140,6 +153,7 @@ export class JobEngine {
   #current: Promise<void> = Promise.resolve();
   #next: Promise<void> | undefined;
   #stopped = false;
+  #lastTickAt: number | null = null;
 
   constructor(options: JobEngineOptions) {
     this.#options = options;
@@ -175,10 +189,19 @@ export class JobEngine {
       if (this.#stopped) return;
       await Promise.all(this.#options.config.hosts.map((host) => this.#tickHost(host)));
       this.#forgetFinished();
+      this.#lastTickAt = this.#options.clock();
     });
     this.#next = next;
     this.#current = next.catch((error: unknown) => this.#options.logger.error('jobs.tick_failed', { errorCode: describeError(error).code }));
     return next;
+  }
+
+  status(): EngineStatus {
+    const hosts = [...this.#hosts].flatMap(([hostId, state]) =>
+      state.unreachableSince === null
+        ? []
+        : [{ hostId, unreachableSince: state.unreachableSince, failures: state.failures, nextAttemptAt: state.nextAttemptAt, errorCode: state.errorCode }]);
+    return { running: this.#timer !== undefined && !this.#stopped, intervalMs: this.#intervalMs, lastTickAt: this.#lastTickAt, hosts };
   }
 
   /** Drop the in-memory poll times and reconciliation windows of jobs that have finished. */
@@ -580,12 +603,17 @@ export class JobEngine {
           ? { lastErrorCode: null, lastErrorMessage: null }
           : {}),
     };
-    // Both writes are guarded by the state the observation started from: an agent action that
-    // landed while T3 was being read (a follow-up, an answer, a cancel) wins over this observation.
+    // The original snapshot guards both paths: an agent action or another watcher that landed
+    // while T3 was being read wins, even when it kept the same state. Row and event commit together.
     if (seen.state === job.state) {
-      if (!store.transition(job.id, { from: [job.state], to: job.state, changes })) return;
-      if (seen.anotherTurnFinished) store.appendEvent(job.id, 'turn_finished', 'idle', { reason: seen.reason });
-      if (delegatedEnded) store.appendEvent(job.id, 'delegated_work_ended', 'idle', { reason: 'no_turn_started' });
+      if (!store.transition(job.id, {
+        from: [job.state], to: job.state, expected: job, changes,
+        turnRunId: read.thread.activeRunId ?? read.thread.latestRunId,
+        events: [
+          ...(seen.anotherTurnFinished ? [{ type: 'turn_finished', detail: { reason: seen.reason } }] : []),
+          ...(delegatedEnded ? [{ type: 'delegated_work_ended', detail: { reason: 'no_turn_started' } }] : []),
+        ],
+      })) return;
       // Still running after a cancel: the interrupt may never have arrived, or a new run started
       // since (a queued follow-up, or someone in T3). Interrupt the run that is active now.
       if (job.state === 'cancel_requested') {
@@ -596,6 +624,8 @@ export class JobEngine {
     store.transition(job.id, {
       from: [job.state],
       to: seen.state,
+      expected: job,
+      turnRunId: read.thread.activeRunId ?? read.thread.latestRunId,
       changes,
       detail: { reason: seen.reason, ...(seen.errorCode ? { code: seen.errorCode } : {}) },
     });
@@ -663,10 +693,12 @@ export class JobEngine {
       return;
     }
     const changes = { ...rest, ...(threadLink ? { threadLink } : {}), lastErrorCode: null, lastErrorMessage: null };
-    if (store.transition(jobId, { from: ['dispatching', 'unknown'], to: 'running', changes, detail: { reason: via } })) return;
+    const gatewayTurn = via === 'launched' && thread.lastRunId !== null
+      ? { runId: thread.lastRunId, clientId: store.require(jobId).clientId } : undefined;
+    if (store.transition(jobId, { from: ['dispatching', 'unknown'], to: 'running', changes, gatewayTurn, detail: { reason: via } })) return;
     const job = store.get(jobId);
     if (job?.state !== 'cancel_requested') return;
-    store.update(jobId, changes);
+    store.transition(jobId, { from: ['cancel_requested'], to: 'cancel_requested', changes, gatewayTurn });
     await this.#interrupt(jobId, job.hostId, { threadId: thread.threadId, runId: thread.lastRunId }, registry);
   }
 
@@ -692,7 +724,7 @@ export class JobEngine {
   #hostState(hostId: string): HostState {
     let state = this.#hosts.get(hostId);
     if (!state) {
-      state = { unreachableSince: null, failures: 0, nextAttemptAt: 0 };
+      state = { unreachableSince: null, failures: 0, nextAttemptAt: 0, errorCode: null };
       this.#hosts.set(hostId, state);
     }
     return state;
@@ -707,6 +739,7 @@ export class JobEngine {
       logger.warn('jobs.host_unreachable', { hostId, errorCode: error.code });
     }
     state.failures += 1;
+    state.errorCode = error.code;
     state.nextAttemptAt = now + Math.min(MAX_BACKOFF_MS, this.#intervalMs * 2 ** (state.failures - 1));
     store.markHostUnreachable(hostId, state.unreachableSince);
     // The not-found window only counts time the host was answering.
@@ -720,6 +753,7 @@ export class JobEngine {
     state.unreachableSince = null;
     state.failures = 0;
     state.nextAttemptAt = 0;
+    state.errorCode = null;
     this.#options.store.clearHostUnreachable(hostId);
   }
 }
