@@ -6,7 +6,7 @@ Guidance for coding agents working in this repository. The specification is [doc
 
 ```sh
 npm install          # dependencies (runtime: @modelcontextprotocol/server, @modelcontextprotocol/client, zod)
-npm run check        # tsc --noEmit + all tests; must pass before every commit
+npm run check        # tsc --noEmit + all tests + privacy check; must pass before every commit
 npm test             # node --test over test/**/*.test.ts (30 s per-test timeout)
 npm run typecheck    # tsc --noEmit
 node --test test/oauth-token.test.ts   # one file
@@ -16,9 +16,10 @@ npm run compat:check                   # manual developer check; read-only again
 node bin/t3-fleet-gateway.js webhooks list  # offline safe webhook counts; attempts <id> shows history, ping <id> sends synthetic content
 npm run webhooks:smoke                 # isolated real-process HTTPS/retry/crash proof; Node 24+ and OpenSSL; no production access
 npm run dashboard:demo                 # operator dashboard on a synthetic fleet (--scenario, --port, --no-badge, --webhook-receiver); never production data
+npm run privacy:check                  # scan for private values ("Privacy and publishing"); -- --file <notes.md> for PR or release text, -- --commits <range> for commit messages
 ```
 
-CI (`.github/workflows/check.yml`) runs `npm run check` on Node 24 and 26 (Linux) and 26 (macOS); `main` blocks force-pushes and deletion, and pull requests need CI green. No build step: Node 24+ runs `.ts` directly. There is no linter or formatter configured; match the surrounding style (2 spaces, single quotes, semicolons, ~140-column lines).
+CI (`.github/workflows/check.yml`) runs `npm run check` on Node 24 and 26 (Linux) and 26 (macOS); `main` blocks force-pushes and deletion, and pull requests need CI green. `.github/workflows/privacy.yml` re-checks a pull request's title, description and commits whenever they change. No build step: Node 24+ runs `.ts` directly. There is no linter or formatter configured; match the surrounding style (2 spaces, single quotes, semicolons, ~140-column lines).
 
 ## Entrypoints
 
@@ -41,12 +42,48 @@ CI (`.github/workflows/check.yml`) runs `npm run check` on Node 24 and 26 (Linux
 | `test/helpers/` | `workspaceProbe.js` (synthetic probe: the folder name in the request picks the answer), `migrations.ts` (`rowsWithoutV12`), `fakeT3.ts` (fake T3: OAuth, an in-memory thread model driven by tests, with `t3_thread_read`'s two views (`messages`, the default: user and assistant messages and plans only; `activity`: every item; shared positions), activity items (`addActivity`), delegation as T3 coordinators do it (`delegate`, `finishDelegated`, `settleDelegated` for a child that ends with no parent run), reads of one item by `itemId` from `textOffset` (no item when it has none, as a live T3 answers), a record of every read's input (`reads`), a mutable capability catalog (`providers`, `orchestrator_capabilities` with a strict empty input) and project list (`projects`, strict paging input, `projectListStuckCursor`), failure injection, including held answers and launches that start no run; `stop()`/`start()` take the host down and back on the same port, `close()` releases it), `gateway.ts` (full gateway harness), `frontDoor.ts` (holds a test's public URL port in front of the gateway), `serveChild.ts` (runs `serve` in a child process that raises synthetic process errors), `jobs.ts` (gateway + fake T3 + Operate agent; `tick()` drives the engine), `oauthFlow.ts`, `agent.ts` (SDK OAuth provider), `fakeDom.ts` (a DOM with no HTML parser, for rendering the dashboard page in tests), `dashboardApp.ts` (loads `src/dashboard/assets/app.js`, `assertSafeTree`) |
 | `scripts/webhooks-smoke.ts`, `scripts/lib/webhooks-smoke-child.ts` | Opt-in isolated developer smoke: real serve CLI child processes and public MCP, temporary local-CA HTTPS receiver, fake T3, retries and SIGKILL recovery; sanitized JSON receipt. |
 | `scripts/e2e-live.ts` | Live end-to-end check, run by hand only |
+| `scripts/privacy-check.ts`, `scripts/privacy-allow.json`, `.githooks/pre-push` | Privacy scan run by `npm run check`, CI and the optional pre-push hook: generic patterns plus a private denylist (`PRIVACY_DENYLIST` or the gitignored `.privacy-denylist`); prints locations and categories, never matched text; `test/privacy-check.test.ts` |
 | `scripts/dashboard-demo.ts`, `scripts/lib/demo-fleet.ts` | Dashboard demo: a real gateway (temporary data dir) before fake T3 hosts, fictional clients and jobs seeded through public paths in five scenarios; optional local `/accept`, `/reject`, `/timeout` webhook receiver (`--webhook-receiver`), management limited to loopback; also used by `test/dashboard-demo.test.ts` |
 | `scripts/check-t3-compatibility.ts`, `scripts/lib/t3-{contract,probe}.ts` | On-demand developer MCP schema comparison and read-only smoke; separate discovery session, explicitly accepted private baseline, JSON reports; no scheduled/background work |
 
 ## Adding a tool
 
 Define it with `defineTool` (see `src/mcp/fleetStatus.ts`): name, LLM-oriented description, `scope`, zod input and output schemas, and `run` returning `{ structured, summary }`. Add it to `gatewayTools` in `src/gateway.ts`. Throw `GatewayError` for failures; the registry turns it into an `isError` result with the code. Scope enforcement is automatic.
+
+## Privacy and publishing
+
+This repository is public and its history is permanent: removing something later takes a force-push. Keep the owner's private details out of code, tests, fixtures, docs, images (screenshots too), commit messages, PR or issue titles, bodies and comments, and release notes. The owner's name and email are fine. Never write:
+
+- private repository names and their PR or issue numbers;
+- real machine or host names and descriptions (hardware models of the owner's machines, nicknames);
+- Tailscale tailnet names and any real `*.ts.net` hostname;
+- local paths and user names (`/Users/<name>`, home directories);
+- private or tailnet IPs (10/8, 172.16/12, 192.168/16, 100.64/10);
+- webhook URLs, keys, tokens or any credential, even partial;
+- real agent or bot wiring (which accounts or connectors are registered how, production scopes);
+- production deployment specifics (versions installed on a date, counts of live jobs or watchers, retained backups);
+- personal workflow notes and approval chatter ("X approved", "waiting on Y", rate limits), and family or employer details.
+
+Use a placeholder instead:
+
+| For | Write |
+| --- | --- |
+| hosts | `main`, `studio`, `host-a` |
+| public URLs | `https://gateway.example.ts.net`, `<machine>.<tailnet>.ts.net` |
+| repositories | `example-org/example-repo`; `example-org/WidgetWorks` where mixed case matters |
+| paths | `/path/to/t3-fleet-gateway`, `~/.config/...` in generic form |
+| users | `<user>` |
+| IPs | RFC 5737 documentation addresses: `192.0.2.x`, `198.51.100.x`, `203.0.113.x` |
+| agents | "a hosted agent (for example Grok Bot)" |
+| evidence | "measured on a test machine" |
+
+**Required self-check before every commit, PR, PR description edit and release:**
+
+1. Run `npm run privacy:check`. Add `-- --file <notes.md>` for PR or release text you wrote to a file (`--stdin` works too) and `-- --commits origin/main..HEAD` for commit messages. It exits 1 and prints only `path:line` and a category, never the text; fix a finding by writing a placeholder. The summary line shows how many private denylist entries were loaded.
+2. Re-read the diff and the text against the rules above. The check knows generic patterns and the owner's private list (the gitignored `.privacy-denylist`, or the `PRIVACY_DENYLIST` repository secret in CI; never print, quote or copy its entries); it cannot see an image, a nickname or a sentence about a deployment.
+3. Do not paste a real value into a test or doc to show what the check catches: build synthetic ones at run time (`test/privacy-check.test.ts`). A rare intentional fixture carries `privacy-check: allow` on its line, or a justified entry in `scripts/privacy-allow.json`; neither can skip a private denylist entry.
+
+CI runs the check on every pull request, title and description included, and again when the description is edited. An optional local hook runs it before each push: `git config core.hooksPath .githooks`.
 
 ## Invariants
 

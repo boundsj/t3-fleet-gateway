@@ -9,3 +9,5 @@ config.json
 gateway.key
 .env
 .env.*
+# Private values the privacy check must never let into the repo (scripts/privacy-check.ts); never commit this list.
+.privacy-denylist

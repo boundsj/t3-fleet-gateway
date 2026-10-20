@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- A privacy check for the public repository. `npm run privacy:check`, now the last step of `npm run check`, scans tracked and new files for real-looking `*.ts.net` hosts, home-directory paths, private and tailnet IPs and credentials (GitHub, Slack and AWS tokens, `sk-` keys, private key blocks, Slack and Discord webhook URLs), and for the maintainer's own private list (`PRIVACY_DENYLIST`, or the gitignored `.privacy-denylist`: case-insensitive substrings or `re:` regular expressions). It prints only locations and categories, never the text that matched, and withholds a file name that would match. `--file`, `--stdin` and `--commits <range>` also scan release or PR text and commit messages, and in a pull request run the title and description are scanned too. A line can carry `privacy-check: allow` and `scripts/privacy-allow.json` lists whole-file exceptions (the synthetic webhook TLS fixture); neither can skip a private list entry, and an exception that no longer suppresses anything is itself a finding.
+- `.github/workflows/privacy.yml` re-runs the check when a pull request is opened, edited, updated or reopened, `.github/pull_request_template.md` adds a short checklist, and `.githooks/pre-push` is an optional local guard (`git config core.hooksPath .githooks`). The private list reaches CI as the `PRIVACY_DENYLIST` repository secret; pull requests from forks and Dependabot get only the generic patterns.
+- AGENTS.md "Privacy and publishing": what must never appear in the repository, its history, pull requests and releases, the placeholders to use instead, and a required self-check.
+
 ## 0.1.14 (2026-10-20)
 
 ### Fixed

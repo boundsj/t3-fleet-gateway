@@ -1,0 +1,9 @@
+{
+  "files": [
+    {
+      "path": "test/webhooks-tls.test.ts",
+      "categories": ["private-key"],
+      "reason": "Public synthetic TLS fixture for the webhook HTTPS test: a throwaway key for a loopback certificate, trusted only by the isolated child process in that test."
+    }
+  ]
+}
