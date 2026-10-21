@@ -5,15 +5,15 @@ A bounded, isolated live check of opt-in per-host discovery: `fleet_projects`, `
 ## Setup
 
 - Implementation heads checked: `820b8c3` initially and `98f33bb` after the three review fixes, both with the same harness and 28 of 28 checks passing. The review fixes also have synthetic regressions in `test/discovery.test.ts`.
-- One fresh, QA-only T3 Code instance (nightly `0.0.46-nightly.20261014.3118`) with a scratch git repository as its only project. No production T3 instance was used.
-- A separate gateway data directory, OAuth clients and host credentials. The production gateway, its settings, credentials, data and service were not accessed.
+- One fresh, QA-only T3 Code instance with a scratch git repository as its only project. No other T3 instance was used.
+- A separate gateway data directory, OAuth clients and host credentials. No other gateway, its settings, credentials or data were accessed.
 - Driven through the public OAuth and MCP endpoints only, as a hosted agent would be, using text content as well as structured content.
-- The real provider launch used an explicit Codex selection: `instanceId` `codex`, `model` `gpt-6.1-sol`, reasoning effort `high`, passed as `options` and recorded by T3 as its own option form (T3 normalizes record options into an array; the gateway sends the record form, which T3 accepts).
+- The real provider launch used an explicit Codex selection: `instanceId` `codex`, a Codex model id, reasoning effort `high`, passed as `options` and recorded by T3 as its own option form (T3 normalizes record options into an array; the gateway sends the record form, which T3 accepts).
 - The result file holds check names, pass/fail and the saved selection only: no tokens, codes, paths, thread text or worker messages. It stays in the private QA directory.
 
 ## Results
 
-28 of 28 checks passed on both runs. All three jobs created across the initial probe and successful runs were cancelled. The QA gateway and T3 runtime were stopped, and their temporary data and credentials were removed; only sanitized evidence and the private setup harness were retained.
+28 of 28 checks passed on both runs. All three jobs created across the initial probe and successful runs were cancelled. The QA gateway and T3 runtime were stopped, and their temporary data and credentials were removed.
 
 | Area | Check | Result |
 | --- | --- | --- |
@@ -36,7 +36,7 @@ A bounded, isolated live check of opt-in per-host discovery: `fleet_projects`, `
 ## Assumptions and limits
 
 - Single host, single project, single provider: multi-host catalogs, same-named projects across hosts and ambiguous title mappings are covered only by the synthetic two-host tests.
-- Not a production or fleet qualification: no production gateway, no second machine, no long-running or concurrent load.
+- Not a fleet qualification: no second machine, no long-running or concurrent load.
 - No hosted connector (Grok, Notion) drove this run; their text-only reading of catalogs is inferred from the text-content checks, not observed.
 - Questions, approvals and failed runs under a discovered launch were not exercised here.
 - The harness is private to the QA setup and uses the machine's T3 CLI; it is not part of this repository.

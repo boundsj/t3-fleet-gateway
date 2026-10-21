@@ -162,7 +162,7 @@
     <rect x="618" y="40" width="130" height="92" rx="10" fill="#15151b" stroke="#24242c"/>
     <g font-size="11" class="t">
       <rect x="630" y="52" width="12" height="7" rx="2" fill="none" stroke="#8b8b94" stroke-width="1.2"/>
-      <text x="650" y="60">Mac mini</text>
+      <text x="650" y="60">Studio</text>
       <path d="M630 72h4l1.5 2H642v6H630z" fill="none" stroke="#8b8b94" stroke-width="1.2"/>
       <text x="650" y="80" class="mono" font-size="10.5">crumb-exchange</text>
       <rect x="631" y="92" width="10" height="10" rx="2" fill="none" stroke="#8b8b94" stroke-width="1.2"/>

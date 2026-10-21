@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 800" width="1600" height="800" role="img" aria-labelledby="t d">
   <title id="t">t3-fleet-gateway: one bot, one gateway, many machines</title>
-  <desc id="d">A monochrome terminal-style diagram on a dark screen. A phone on the left sends a message to Grok Bot, which talks to a single always-on T3 Fleet Gateway. The gateway fans out to two machines, a Mac mini and an M3 MacBook, and each machine branches into git worktrees and threads named fleet/job, including a chief-of-staff thread. Small green packets travel along the wires.</desc>
+  <desc id="d">A monochrome terminal-style diagram on a dark screen. A phone on the left sends a message to Grok Bot, which talks to a single always-on T3 Fleet Gateway. The gateway fans out to two machines, host A and host B, and each machine branches into git worktrees and threads named fleet/job, including a chief-of-staff thread. Small green packets travel along the wires.</desc>
   <style>
     .mono { font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; }
     .fg1 { fill: #ECE7D6; }
@@ -59,12 +59,12 @@
   <path class="wire" d="M560,400 H680"/>
   <path class="wire" d="M1000,400 H1060 V205 H1090"/>
   <path class="wire" d="M1060,400 V595 H1090"/>
-  <!-- branches: mac mini -->
+  <!-- branches: host a -->
   <path class="wire-thin" d="M1270,205 H1300 V125 H1330"/>
   <path class="wire-thin" d="M1300,205 H1330"/>
   <path class="wire-thin" d="M1300,205 V285 H1330"/>
   <path class="wire-ghost" d="M1300,285 V365 H1330"/>
-  <!-- branches: m3 -->
+  <!-- branches: host b -->
   <path class="wire-thin" d="M1270,595 H1300 V515 H1330"/>
   <path class="wire-thin" d="M1300,595 H1330"/>
   <path class="wire-ghost" d="M1300,595 V675 H1330"/>
@@ -102,18 +102,18 @@
   <rect x="757" y="433" width="12" height="12" fill="#38E25B"/>
   <text class="mono fg3" x="777" y="445" font-size="17" letter-spacing="0.04em"><tspan fill="#38E25B">LIVE</tspan>  ·  jobs.sqlite</text>
   <rect x="724" y="530" width="232" height="30" fill="#0C0C0A"/>
-  <text class="mono fg3" x="840" y="550" font-size="15" text-anchor="middle" letter-spacing="0.08em">ALWAYS-ON MAC MINI</text>
+  <text class="mono fg3" x="840" y="550" font-size="15" text-anchor="middle" letter-spacing="0.08em">ALWAYS-ON HOST</text>
 
   <!-- hosts -->
   <rect class="box" x="1090" y="170" width="180" height="70"/>
-  <text class="mono fg1 cap" x="1180" y="202" font-size="22" text-anchor="middle">MAC MINI</text>
+  <text class="mono fg1 cap" x="1180" y="202" font-size="22" text-anchor="middle">HOST A</text>
   <text class="mono fg3" x="1180" y="227" font-size="14" text-anchor="middle" letter-spacing="0.1em">T3 CODE</text>
 
   <rect class="box" x="1090" y="560" width="180" height="70"/>
-  <text class="mono fg1 cap" x="1180" y="592" font-size="22" text-anchor="middle">M3 MACBOOK</text>
+  <text class="mono fg1 cap" x="1180" y="592" font-size="22" text-anchor="middle">HOST B</text>
   <text class="mono fg3" x="1180" y="617" font-size="14" text-anchor="middle" letter-spacing="0.1em">T3 CODE</text>
 
-  <!-- worktree / thread nodes: mac mini -->
+  <!-- worktree / thread nodes: host a -->
   <rect x="1323" y="118" width="14" height="14" fill="none" stroke="#ECE7D6" stroke-width="3"/>
   <text class="mono fg2" x="1352" y="132" font-size="18">fleet/job-7f3a</text>
   <rect x="1321" y="196" width="18" height="18" fill="#ECE7D6"/>
@@ -122,7 +122,7 @@
   <text class="mono fg2" x="1352" y="292" font-size="18">fleet/job-9c21</text>
   <rect x="1323" y="358" width="14" height="14" fill="none" stroke="#65625A" stroke-width="3"/>
   <text class="mono fg3" x="1352" y="372" font-size="18">fleet/job-…</text>
-  <!-- worktree / thread nodes: m3 -->
+  <!-- worktree / thread nodes: host b -->
   <rect x="1323" y="508" width="14" height="14" fill="none" stroke="#ECE7D6" stroke-width="3"/>
   <text class="mono fg2" x="1352" y="522" font-size="18">fleet/job-b05e</text>
   <rect x="1323" y="588" width="14" height="14" fill="none" stroke="#ECE7D6" stroke-width="3"/>

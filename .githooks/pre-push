@@ -1,0 +1,8 @@
+#!/bin/sh
+# Optional local guard, enabled with: git config core.hooksPath .githooks
+# Runs the privacy check on the work tree and, when the branch has an upstream, on the commits about to be pushed.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+if git rev-parse --verify --quiet '@{u}' >/dev/null; then
+  exec npm run --silent privacy:check -- --commits '@{u}..HEAD'
+fi
+exec npm run --silent privacy:check
