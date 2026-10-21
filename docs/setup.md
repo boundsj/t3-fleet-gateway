@@ -4,7 +4,7 @@ These are the steps behind the [README's setup prompts](../README.md#get-going-w
 
 ## Before you start
 
-- Node.js 24 or newer, a running T3 Code server, and a `t3` CLI that can mint pairing codes for it.
+- Node.js 24.5.0 or newer, a running T3 Code server, and a `t3` CLI that can mint pairing codes for it.
 - A machine that stays on while agents work. macOS and Linux service templates are included.
 - An HTTPS tunnel to the gateway for cloud clients. The gateway listens on loopback; Tailscale Funnel, Cloudflare Tunnel or another tunnel can carry its public MCP endpoint.
 - A separate private route if you enable the operator dashboard. Use a tailnet-only proxy such as Tailscale Serve for that listener, never a public tunnel.

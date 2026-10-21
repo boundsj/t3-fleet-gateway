@@ -7,7 +7,7 @@
   "author": "Jesse Bounds",
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.5.0"
   },
   "bin": {
     "t3-fleet-gateway": "bin/t3-fleet-gateway.js"

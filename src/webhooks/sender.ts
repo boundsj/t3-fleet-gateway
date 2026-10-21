@@ -1,3 +1,4 @@
+import '../tlsTrust.ts';
 import { randomUUID } from 'node:crypto';
 import { request as httpRequest, type ClientRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';

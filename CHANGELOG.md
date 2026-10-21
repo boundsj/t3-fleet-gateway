@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Security
+
+- Temporarily distrust the emSign ECC G3, AAA Certificate Services and direct emSign TLS G3 trust anchors by SHA-256 at startup, including system/extra CA sources, while preserving unrelated extra CAs. This mitigates compromised eMudhra intermediate keys (Mozilla bug 2083449) for fetch, HTTPS and TLS. Removing AAA can also break legitimate Comodo/Sectigo chains; see [compatibility risks and verification](docs/security.md#temporary-outbound-tls-distrust). Requires Node 24.5.0+. Remove the shim once the minimum Node release includes nodejs/node#66871 and verification passes without it.
+
 ### Added
 
 - `work_settle({ jobId, requestId })` lets clients with Operate access settle idle, cancelled, failed or released jobs after a fresh T3 status and delegated-work check. It uses the existing host credential, maps permission and busy refusals to typed errors, confirms settlement by reading it back and emits a `thread_settled` feed event. Durable request-id replay never re-sends settlement after an ambiguous outcome. `work_status` exposes live `settled` / `settledAt` (null when unknown); `work_continue` on a settled idle job resumes it through T3. No migration or configuration change.

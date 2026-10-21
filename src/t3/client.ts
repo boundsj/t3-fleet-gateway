@@ -1,3 +1,4 @@
+import '../tlsTrust.ts';
 import {
   Client,
   SdkError,

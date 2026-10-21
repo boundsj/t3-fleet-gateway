@@ -109,6 +109,33 @@ This automates T3's consent step using **your own access to the machine**: the s
 
 T3 issues no refresh tokens; credentials last 30 days. The renewal loop re-enrolls a host when fewer than `renewWhenDaysLeft` days remain and keeps the old credential until the new one is verified. Old T3 sessions expire on their own; you can revoke them earlier in T3 under Settings → Connections, or with `t3 auth session list` and `t3 auth session revoke <id>`.
 
+## Temporary outbound TLS distrust
+
+The startup shim in `src/tlsTrust.ts` removes these SHA-256 certificate fingerprints from Node's effective default CA list:
+
+| Trust anchor | SHA-256 |
+| --- | --- |
+| emSign ECC Root CA - G3 | `86A1ECBA089C4A8D3BBE2734C612BA341D813E043CF9E8A862CD5C57A36BBE6B` |
+| AAA Certificate Services | `D7A7A0FB5D7E2731D771E9484EBCDEF71D5F0C3E0A2948782BC83EE0EA699EF4` |
+| emSign Root TLS CA - G3 | `7DD78D5F4F13459A83DFF9ABBBA62EDBAF6F2D102BF257FD712F4D9F2746ED8D` |
+
+[Mozilla bug 2083449](https://bugzilla.mozilla.org/show_bug.cgi?id=2083449) confirms compromised **intermediate** keys, including Sectigo cross-signs; it does not report compromised root keys. [Mozilla's announcement](https://blog.mozilla.org/security/2026/10/20/protecting-firefox-users-following-the-compromise-of-emudhra-intermediate-certificates/) describes OneCRL protection and removal of the root from NSS for clients without revocation updates. The [incident tracker's root inventory](https://emudhra.we-have-a-problem.com/roots.json) identifies the fingerprints above. The direct TLS root is included so system or extra stores cannot restore that trust path. The public certificates in `test/fixtures/distrusted-roots.json` come from that inventory; tests verify their fingerprints.
+
+**Compatibility risk:** AAA is a legacy Comodo/Sectigo anchor used by legitimate chains as well as the affected cross-signs. Removing it can break an endpoint that needs AAA and cannot build an alternative chain to a retained root. T3 HTTPS/MCP and its OAuth enrollment/token refresh, webhook deliveries and setup tests, and public-URL/dashboard exposure checks all use this process's TLS defaults. There is no separate outbound identity-provider or GitHub API client in the gateway; GitHub PR links are metadata. Any configured receiver or T3 host may nevertheless depend on AAA. Public GitHub success alone cannot qualify those destinations. HTTP/loopback traffic is unaffected. No configured private destinations have been qualified by the public tests.
+
+Both affected trust paths are blocked by default. A configurable exemption or dropping only emSign was considered, but would restore acceptance of compromised AAA-signed intermediates. For a legitimate endpoint that fails, repair its served chain or replace its certificate; do not restore AAA or disable certificate validation. This deliberately broad workaround should be removed once the minimum supported Node version ships the narrower intermediate-public-key block in [nodejs/node#66871](https://github.com/nodejs/node/pull/66871), and the checks below pass with that runtime without the shim.
+
+The launcher installs the policy before importing the CLI. Outbound transport modules also load it for direct imports. It covers `fetch`/undici, `https` and `tls` using default trust, including `--use-system-ca` and `NODE_EXTRA_CA_CERTS`; unrelated extra/private CAs remain trusted. It changes only this Node thread, not system trust, child executables or remote T3 workers. Explicit per-connection `ca` options, earlier preloads/connections and other worker threads are outside this guarantee. Node 24.5.0 or newer is required; older runtimes fail startup rather than silently omitting protection.
+
+After an operator deploys and restarts, run these from the checkout with the same Node runtime, CA environment and flags as the gateway:
+
+```sh
+TLS_LIVE_TEST=1 nice -n 10 node --test test/tls-trust-live.test.ts
+TLS_LIVE_TEST=1 nice -n 10 node --use-system-ca --test test/tls-trust-live.test.ts
+```
+
+Each of `dv-g3b`, `dv-g3b-aaa`, `ev-g3c`, and `ev-g3c-aaa`, followed by `-emudhra.we-have-a-problem.com`, must fail with a certificate-validation error through fetch, HTTPS and TLS. DNS failures, timeouts and HTTP errors do not count as successful blocking. Normal public TLS at GitHub and nodejs.org must still connect. These tests are skipped unless explicitly enabled and contact only public test sites, with no credentials. Separately run the gateway's read-only host health checks and verify its public metadata route, OAuth refresh/enrollment when next needed, and a synthetic webhook test against each intended destination (a webhook test sends content). Check code-only diagnostics for TLS failures. A standalone check proves the startup policy in a new process; successful gateway operations after restart are also needed to qualify the running service.
+
 ## Revocation
 
 - One agent: `t3-fleet-gateway clients revoke <client id>` revokes the client and every token issued to it, immediately, without a restart.

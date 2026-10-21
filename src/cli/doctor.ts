@@ -1,3 +1,4 @@
+import '../tlsTrust.ts';
 import { mcpResource, type GatewayConfig } from '../config.ts';
 import { checkDataDirPermissions } from '../dataDir.ts';
 import { SCHEMA_VERSION, schemaVersion } from '../db/database.ts';

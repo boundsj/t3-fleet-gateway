@@ -1,3 +1,4 @@
+import '../tlsTrust.ts';
 import { SECOND } from '../time.ts';
 import { API_HEADER } from './server.ts';
 
