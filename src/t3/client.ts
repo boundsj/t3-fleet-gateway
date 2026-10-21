@@ -6,7 +6,7 @@ import {
   StreamableHTTPClientTransport,
   UnauthorizedError,
 } from '@modelcontextprotocol/client';
-import type * as z from 'zod';
+import * as z from 'zod';
 import { pullRequestListSchema } from '../jobs/pullRequests.ts';
 import { GatewayError, type ErrorCode } from '../errors.ts';
 import { isTypeOfServiceRace } from '../processErrors.ts';
@@ -248,6 +248,12 @@ export class T3Client {
   /** Send a message. `clientRequestId` makes T3 deduplicate retries, so callers may repeat it with the same id. */
   sendToThread(input: { threadId: string; message: string; mode?: 'auto' | 'queue' | 'steer'; clientRequestId: string }): Promise<SendResult> {
     return this.callTool('t3_thread_send', withoutNulls(input), sendResultSchema);
+  }
+
+  /** No downstream idempotency key: never retry an ambiguous settlement automatically. */
+  settleThread(threadId: string) {
+    return this.callTool('t3_thread_organize', { threadId, action: 'settle' },
+      z.union([z.looseObject({ sequence: z.number() }), z.looseObject({ settlesWhenTurnEnds: z.literal(true) })]));
   }
 
   /** Request an interrupt of the thread's active turn. Idempotent per `clientRequestId`. */

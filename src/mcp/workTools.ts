@@ -180,6 +180,8 @@ const questionSchema = z.object({
 });
 
 const jobDetailSchema = jobSchema.extend({
+  settled: z.boolean().nullable().describe('Live T3 settlement state; null when unavailable or unsupported'),
+  settledAt: nullableTime,
   stateMeaning: z.string(),
   pendingRequests: z
     .array(z.object({
@@ -408,6 +410,8 @@ export function workTools(jobs: JobService): GatewayTool[] {
       const { job } = detail;
       const view: JobDetailView = {
         ...jobView(job, context),
+        settled: detail.settled,
+        settledAt: detail.settledAt,
         stateMeaning: STATE_MEANINGS[job.state],
         pendingRequests: detail.pendingRequests,
         waitingForApproval: detail.waitingForApproval,
@@ -419,6 +423,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
         recentEvents: detail.recentEvents.map(eventView),
       };
       const lines = [describeJob(job, view), STATE_MEANINGS[job.state]];
+      lines.push(`Thread settled: ${view.settled === null ? 'unknown' : view.settled}${view.settledAt ? ` at ${view.settledAt}` : ''}.`);
       if (view.link) lines.push(`Open in T3: ${view.link}`);
       if (view.pendingRequests.length > 0) {
         lines.push(`Answer with work_respond using jobId ${JSON.stringify(view.jobId)}, the requestId and answers keyed by question id. ` +
@@ -569,6 +574,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'not send (a message would start a competing turn), whatever the reply says; wait for its next turn in work_feed. If it ' +
       'is false, nothing it delegated is still running: send follow-ups when its reply asks for input or the work is done, or ' +
       'when work_feed reports delegated_work_ended (its delegated work ended but it did not resume: ask it to check on that work). ' +
+      'On a settled idle job, sending resumes the thread and T3 clears settlement. Terminal jobs cannot be continued. ' +
       'Idempotent: pass a unique requestId per message; ' +
       'repeating a requestId returns the first result without sending again, and if a call fails with an uncertain outcome, ' +
       'repeating it with the same requestId is safe. Request ids are scoped to this tool, separate from work_start. Not for answering a pending question: use work_respond.',
@@ -672,7 +678,29 @@ export function workTools(jobs: JobService): GatewayTool[] {
     },
   });
 
-  return [workStart, workContinue, workRespond, workCancel, workStatus, workMessages, workList, workFeed];
+  const workSettle = defineTool({
+    name: 'work_settle',
+    title: 'Settle a finished thread',
+    description: "Settle an idle, cancelled, failed or released job's T3 thread after delegated work ends. " +
+      'Checks fresh T3 state; T3 refuses running turns, queued user messages and blocking approvals/questions. ' +
+      'Clears the pin, ends PR watches and detaches provider sessions; does not archive or change the job state. ' +
+      'Use a unique requestId per settlement. Replays return the confirmed result, never settle a resumed thread again. ' +
+      'An uncertain outcome is read back without re-sending. work_status reports current settlement; ' +
+      'work_continue on a settled idle job resumes it and clears settlement.',
+    scope: OPERATE_SCOPE,
+    readOnly: false,
+    inputSchema: z.object({ jobId: jobIdInput, requestId: requestIdInput }),
+    outputSchema: z.object({ job: jobSchema, settled: z.boolean(), settledAt: nullableTime, replayed: z.boolean() }),
+    async run(input, context) {
+      const result = await jobs.settle(context, input);
+      return {
+        structured: { ...result, job: jobView(result.job, context) },
+        summary: `${result.replayed ? 'Already confirmed (same requestId)' : 'Confirmed'}: thread settled. Job state: ${result.job.state}.`,
+      };
+    },
+  });
+
+  return [workStart, workContinue, workRespond, workCancel, workSettle, workStatus, workMessages, workList, workFeed];
 }
 
 const DELEGATED_ENDED =

@@ -68,6 +68,12 @@ review. Don't merge or deploy it.
 
 > **What happens next:** the gateway starts a T3 thread in a fresh worktree, tracks it, and lets your bot read the result. Worker questions can come back through the bot. Permission approvals still need your click in T3; [unattended projects](docs/configuration.md#approvals-and-unattended-projects) can use a different runtime mode.
 
+## Settle finished work
+
+When review is complete, your bot can call `work_settle({ jobId, requestId })` with a unique request ID. It needs Operate access. The job must be idle, cancelled, failed or released, with no running turn, queued user messages or active delegated work. The gateway checks T3 first and confirms settlement by reading it back. `work_status` reports `settled` and `settledAt`; `work_feed` emits `thread_settled`.
+
+Settling parks the thread, clears its pin, ends PR watches and detaches provider sessions. It does not archive the thread or change the job state. `work_continue` can resume a settled idle job; T3 clears settlement when it accepts the message. Terminal jobs keep their existing behavior. If the host credential cannot settle the thread, the tool returns `t3_unauthorized`; ask the operator to review its T3 access. [Settlement checks, retry rules and bounds](docs/design.md#thread-settlement).
+
 ## Give your bot a doorbell 🔔
 
 A webhook tells your bot that something changed, so it can check the job without waiting for its next scheduled poll. The gateway sends a small notification; the bot uses its existing MCP connection to read the details.

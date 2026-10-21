@@ -11,7 +11,7 @@ import { T3ToolError } from '../t3/results.ts';
 import type { ThreadItem, ThreadRead } from '../t3/schemas.ts';
 import { HOUR, SECOND, type Clock } from '../time.ts';
 import { scanActivity } from './activity.ts';
-import { EXCERPT_CHARS, holdsReadPosition, isActiveStatus, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
+import { EXCERPT_CHARS, holdsReadPosition, isActiveStatus, isDelegatedWorkActive, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { newJobId } from './ids.ts';
 import { canonicalSelection, validateSelection, type LaunchSpec, type ModelSelection } from './launchSpec.ts';
 import { workspaceIntent, type WorkspaceSelection } from './workspace.ts';
@@ -148,6 +148,8 @@ export interface QuestionRequest {
 }
 
 export interface JobDetail {
+  settled: boolean | null;
+  settledAt: string | null;
   job: Job;
   recentEvents: JobEvent[];
   /** Questions the worker waits on. `questions` is null when they could not be read from T3. */
@@ -647,6 +649,16 @@ export class JobService {
     if (pendingRequestId !== undefined && !job.pendingRequestIds.includes(pendingRequestId)) {
       throw new GatewayError('not_found', 'That request is not pending on this job. Read work_status without pendingRequestId for the current list.');
     }
+    // State only, messages view: settlement belongs to T3 and is never inferred from the ledger.
+    let settlement: { settled: boolean | null; settledAt: string | null } = { settled: null, settledAt: null };
+    if (job.threadId !== null) {
+      try {
+        const read = await this.#registry.client(job.hostId).readThread({
+          threadId: job.threadId, view: 'messages', limit: 1, runLimit: 1, maxCharsPerItem: 1,
+        });
+        settlement = { settled: read.thread.settled ?? null, settledAt: read.thread.settledAt ?? null };
+      } catch { /* A host that cannot answer leaves settlement unknown; ledger status remains available. */ }
+    }
     const pendingRequests = await Promise.all(
       job.pendingRequestIds.map(async (requestId, index): Promise<QuestionRequest> => {
         if (pendingRequestId !== undefined ? requestId !== pendingRequestId : index >= MAX_QUESTION_READS) {
@@ -658,6 +670,7 @@ export class JobService {
     );
     return {
       job,
+      ...settlement,
       recentEvents: this.store.recentEvents(jobId, 10),
       pendingRequests,
       waitingForApproval: job.state === 'needs_input' && job.pendingRequestIds.length === 0,
@@ -790,6 +803,88 @@ export class JobService {
     }
     const released = this.store.transition(job.id, { from: OPEN_STATES, to: 'released', detail: { reason: 'released' } });
     return released ? { job: released, released: true } : { job: this.store.require(job.id), released: false };
+  }
+
+  /** Settle only a quiet finished thread. T3 remains the final authority at the mutation boundary. */
+  async settle(caller: Caller, input: { jobId: string; requestId: string }): Promise<{
+    job: Job; settled: boolean; settledAt: string | null; replayed: boolean;
+  }> {
+    const job = this.#jobFor(caller, input.jobId, 'operate');
+    const hash = inputHash('work_settle', { jobId: input.jobId });
+    const key = this.store.idempotencyKey(caller.clientId, 'work_settle', input.requestId);
+    if (key && (key.jobId !== job.id || key.inputHash !== hash)) {
+      throw new GatewayError('request_id_conflict', 'This requestId was used for a different work_settle request. Use a new requestId.');
+    }
+    if (key?.response) {
+      const stored = JSON.parse(key.response) as { settled: boolean; settledAt: string | null };
+      return { job, ...stored, replayed: true };
+    }
+    if (job.threadId === null || !['idle', 'cancelled', 'failed', 'released'].includes(job.state)) {
+      throw new GatewayError('job_state_conflict', 'work_settle needs an idle, cancelled, failed or released job with a T3 thread.');
+    }
+    const client = this.#registry.client(job.hostId);
+    // Messages view for thread/run state; delegated work is checked separately in the activity view below.
+    const readState = () => client.readThread({ threadId: job.threadId!, view: 'messages', limit: 1, runLimit: 1, maxCharsPerItem: 1 });
+    const before = await readState();
+    if (key) {
+      // There is no T3 request key for organize. A crash/lost reply must never settle a resumed thread again.
+      if (before.thread.settled !== true) {
+        throw new GatewayError('t3_response_lost', 'The earlier settlement outcome is unknown. Nothing was sent again. Check work_status; use a new requestId only for a new settlement.');
+      }
+    } else {
+      if (before.thread.settled === undefined) {
+        throw new GatewayError('t3_invalid_response', 'This T3 host does not report settlement state; work_settle cannot confirm its result.');
+      }
+      if (before.thread.archived || before.thread.activeRunId !== null || isActiveStatus(before.thread.status) ||
+          before.recentRuns.some((run) => isActiveStatus(run.status))) {
+        throw new GatewayError('job_state_conflict', 'The T3 thread is busy or archived. Finish or cancel its turn and queued messages before settling.');
+      }
+      // Fresh, complete, bounded activity scan, including terminal/released jobs the watcher no longer follows.
+      // A partial scan cannot prove absence of delegated work, so fail closed at 2,000 items.
+      let afterPosition: number | null = null;
+      for (let page = 0; ; page++) {
+        const read = await client.readThread({
+          threadId: job.threadId, view: 'activity', afterPosition, limit: 100, runLimit: 1, maxCharsPerItem: 1,
+        });
+        if (read.items.some(isDelegatedWorkActive)) {
+          throw new GatewayError('job_state_conflict', 'The thread is waiting on delegated work. Wait for it to end before settling.');
+        }
+        if (!read.hasMore) break;
+        if (page >= 19 || read.nextPosition === null || read.nextPosition === afterPosition) {
+          throw new GatewayError('job_state_conflict', 'Delegated work could not be checked completely within the settlement scan limit. Settle this thread in T3.');
+        }
+        afterPosition = read.nextPosition;
+      }
+      if (!this.store.claimSettlement(caller.clientId, input.requestId, { inputHash: hash, jobId: job.id })) {
+        return this.settle(caller, input);
+      }
+      try {
+        await client.settleThread(job.threadId);
+      } catch (error) {
+        const permissionDenied = error instanceof T3ToolError &&
+          ['capability_denied', 'runtime_mode_escalation_denied', 'interaction_mode_escalation_denied'].includes(error.t3Code);
+        const stateRefused = error instanceof T3ToolError && error.t3Code === 'orchestration_error' &&
+          /is still running|has a queued message|is waiting on an approval or question|is archived/.test(error.message);
+        if (permissionDenied || stateRefused || (error instanceof T3TransportError && error.delivery === 'not_delivered')) {
+          this.store.releaseIdempotencyKey(caller.clientId, 'work_settle', input.requestId);
+        }
+        if (permissionDenied) {
+          throw new GatewayError('t3_unauthorized', 'The existing host credential does not permit settling this thread. Ask the operator to review its T3 access.');
+        }
+        if (stateRefused) {
+          throw new GatewayError('job_state_conflict', 'T3 refused settlement: the thread is busy, has queued messages or pending approvals, or is archived. Check it in T3 before retrying.');
+        }
+        if (!(error instanceof T3ToolError) && !(error instanceof T3TransportError && error.delivery === 'unknown')) throw error;
+        // An ambiguous write is read back once, never sent again.
+      }
+    }
+    const after = await readState();
+    if (after.thread.settled !== true) {
+      throw new GatewayError('t3_response_lost', 'T3 has not confirmed settlement. Nothing will be sent again for this requestId. Check work_status.');
+    }
+    const result = { settled: true, settledAt: after.thread.settledAt ?? null };
+    this.store.recordSettlement(job.id, caller.clientId, input.requestId, result);
+    return { job: this.store.require(job.id), ...result, replayed: key !== undefined };
   }
 
   /**
