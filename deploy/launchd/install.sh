@@ -79,9 +79,11 @@ esac
 
 [[ "$(uname -s)" == "Darwin" ]] || die "launchd is macOS only; see deploy/systemd for Linux"
 [[ -x "$NODE_BIN" ]] || die "node not found; set NODE_BIN"
-node_major="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')"
-(( node_major >= 24 )) || die "Node.js 24 or newer is required (found $node_major)"
 [[ -f "$REPO_DIR/bin/t3-fleet-gateway.js" ]] || die "no gateway checkout at $REPO_DIR; set REPO_DIR"
+# The launcher refuses a Node release that does not block the compromised eMudhra/emSign intermediates
+# (src/nodeVersion.ts) and says why on stderr; an install with that Node would only crash-loop.
+"$NODE_BIN" "$REPO_DIR/bin/t3-fleet-gateway.js" --version >/dev/null ||
+  die "$NODE_BIN cannot run the gateway; Node.js 24.22.1 or a later 24.x, or 26.12.1 or newer, is required"
 [[ -n "$T3_BIN" ]] || echo "install.sh: warning: t3 not found on PATH; set T3_BIN if your pairing command uses it" >&2
 # T3 installs each version in its own directory (~/.t3/runtime/versions/<version>/). A service PATH holding
 # one of them keeps running that version's `t3` after T3 updates itself, and loses it if the directory goes.

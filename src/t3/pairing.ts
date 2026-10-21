@@ -1,4 +1,3 @@
-import '../tlsTrust.ts';
 import { execFile } from 'node:child_process';
 import { createServer } from 'node:net';
 import * as z from 'zod';

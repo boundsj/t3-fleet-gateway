@@ -10,7 +10,7 @@ npm run check
 npm run webhooks:smoke -- --receipt ./webhooks-smoke-receipt.json
 ```
 
-The smoke needs Node 24+ and OpenSSL. It takes about 90 seconds because it uses the production retry and lease deadlines. It creates a private temporary gateway directory, an ephemeral CA and HTTPS receiver, a fake T3 host, and real `serve` child processes. CLI enrollment, operator token creation and job actions use the public interfaces. It does not read installed gateway configuration, contact a real T3 runtime, or use hosted-client credentials. Cleanup stops owned children and servers and removes temporary data and keys. The optional receipt contains counts and check names, not secrets, URLs, job content or machine paths.
+The smoke needs a supported Node (24.22.1 or a later 24.x, or 26.12.1 or newer) and OpenSSL. It takes about 90 seconds because it uses the production retry and lease deadlines. It creates a private temporary gateway directory, an ephemeral CA and HTTPS receiver, a fake T3 host, and real `serve` child processes. CLI enrollment, operator token creation and job actions use the public interfaces. It does not read installed gateway configuration, contact a real T3 runtime, or use hosted-client credentials. Cleanup stops owned children and servers and removes temporary data and keys. The optional receipt contains counts and check names, not secrets, URLs, job content or machine paths.
 
 The HTTPS receiver is trusted only by the child processes through their temporary CA. Certificate validation remains enabled; a negative check proves an untrusted receiver is refused before HTTP delivery. Gateway processes are killed with SIGKILL to exercise actual database recovery, not simulated restarts within one process.
 

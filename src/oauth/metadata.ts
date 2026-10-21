@@ -1,4 +1,3 @@
-import '../tlsTrust.ts';
 import { SECOND } from '../time.ts';
 import { SUPPORTED_SCOPES } from './scopes.ts';
 

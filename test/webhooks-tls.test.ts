@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { createServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
@@ -68,13 +68,10 @@ test('HTTPS uses verified TLS and arbitrary authentication; untrusted certificat
   const certificateFile = join(dir, 'synthetic-ca.pem');
   const configFile = join(dir, 'config.json');
   const senderKey = 'synthetic-https-private-sender-key';
-  const roots = JSON.parse(readFileSync(new URL('./fixtures/tls-roots.json', import.meta.url), 'utf8')) as { pem: string }[];
-  // Public roots and the private test CA must all remain trusted.
-  writeFileSync(certificateFile, CERTIFICATE + roots.map((root) => root.pem).join('\n'));
+  writeFileSync(certificateFile, CERTIFICATE);
   writeFileSync(join(dataDir, 'sender.key'), senderKey, { mode: 0o600 });
   const received: { path: string | undefined; key: string | string[] | undefined; payload: Record<string, unknown> }[] = [];
   const server = createServer({ key: KEY, cert: CERTIFICATE }, async (req, res) => {
-    if (req.url === '/trust-check') { res.writeHead(204).end(); return; }
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     received.push({ path: req.url, key: req.headers['x-grok-routine-sender-key'], payload: JSON.parse(Buffer.concat(chunks).toString()) });
@@ -127,45 +124,6 @@ test('HTTPS uses verified TLS and arbitrary authentication; untrusted certificat
   for (const result of [untrusted, trusted, redirect]) {
     for (const secret of [senderKey, origin, 'synthetic-private-routine', certificateFile]) {
       assert.equal((result.stdout + result.stderr).includes(secret), false);
-    }
-  }
-  for (const system of [false, true]) {
-    for (const extra of [false, true]) {
-      const env: NodeJS.ProcessEnv = { ...process.env, NODE_EXTRA_CA_CERTS: extra ? certificateFile : '' };
-      delete env.NODE_TLS_REJECT_UNAUTHORIZED;
-      await promisify(execFile)(process.execPath, [
-        ...(system ? ['--use-system-ca'] : []), '--input-type=module', '-e', `
-        import assert from 'node:assert/strict';
-        import { X509Certificate } from 'node:crypto';
-        import * as tls from 'node:tls';
-        await import('./src/gateway.ts');
-        const extra = tls.getCACertificates('extra');
-        const defaults = new Set(tls.getCACertificates('default').map(pem => new X509Certificate(pem).fingerprint256));
-        if (extra.length) {
-          assert.equal(extra.length, 4);
-          assert.ok(defaults.has(new X509Certificate(extra[0]).fingerprint256));
-          for (const pem of extra.slice(1)) assert.ok(defaults.has(new X509Certificate(pem).fingerprint256));
-        }
-        const checkFetch = async () => {
-          const response = await fetch(${JSON.stringify(`${origin}/trust-check`)}, { signal: AbortSignal.timeout(5000) });
-          assert.equal(response.status, 204);
-          await response.body?.cancel();
-        };
-        const checkTls = () => new Promise((resolve, reject) => {
-          const socket = tls.connect({ host: '127.0.0.1', port: ${String((server.address() as AddressInfo).port)} }, () => {
-            assert.ok(socket.authorized);
-            socket.destroy();
-            resolve();
-          });
-          socket.setTimeout(5000, () => socket.destroy(new Error('timeout')));
-          socket.on('error', reject);
-        });
-        for (const check of [checkFetch, checkTls]) {
-          if (${String(extra)}) await check();
-          else await assert.rejects(check(), error =>
-            (error.cause?.code ?? error.code) === 'DEPTH_ZERO_SELF_SIGNED_CERT');
-        }
-      `], { env, timeout: 15_000, maxBuffer: 100_000 });
     }
   }
 });

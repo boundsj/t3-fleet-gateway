@@ -1,4 +1,3 @@
-import './tlsTrust.ts';
 import { mcpResource, type GatewayConfig } from './config.ts';
 import { DashboardChecks } from './dashboard/checks.ts';
 import { startDashboard, type RunningDashboard } from './dashboard/server.ts';

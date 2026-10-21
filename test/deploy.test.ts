@@ -4,6 +4,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 import { promisify } from 'node:util';
+import { pretendNode } from './helpers/nodeVersion.ts';
 import { tempDir } from './helpers/tmp.ts';
 
 const ROOT = join(import.meta.dirname, '..');
@@ -122,5 +123,20 @@ describe('launchd installer', () => {
     assert.equal(removed.code, 0, removed.stderr);
     assert.deepEqual(stub.calls().slice(-2), ['bootout', 'print']);
     assert.equal(existsSync(stub.plist), false);
+  });
+
+  test('refuses a Node release that does not block the compromised eMudhra/emSign intermediates', async (t) => {
+    const stub = stubs(t, { loadedPrints: 0, failingBootstraps: 0 });
+    const oldNode = join(tempDir(t), 'node');
+    writeFileSync(oldNode, `#!/usr/bin/env bash\nexec "${process.execPath}" --import "${pretendNode('24.22.0')}" "$@"\n`);
+    chmodSync(oldNode, 0o755);
+    const refused = await install({ ...stub.env, NODE_BIN: oldNode }, '--dry-run');
+    assert.notEqual(refused.code, 0);
+    assert.match(refused.stderr, /Node\.js 24\.22\.0 is not supported/);
+    assert.match(refused.stderr, /cannot run the gateway; Node\.js 24\.22\.1 or a later 24\.x, or 26\.12\.1 or newer, is required/);
+    assert.equal(refused.stdout, '', 'no plist is rendered');
+
+    const fixed = await install(stub.env, '--dry-run');
+    assert.equal(fixed.code, 0, fixed.stderr);
   });
 });

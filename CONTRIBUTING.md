@@ -4,14 +4,14 @@ Thanks for helping. Issues and pull requests are welcome.
 
 ## Setup
 
-Node.js 24 or newer. There is no build step: Node runs the TypeScript sources directly (type stripping).
+Node.js 24.22.1 or a later 24.x, or 26.12.1 or newer (`engines`; the launcher refuses older releases, see [docs/security.md](docs/security.md#compromised-emudhra-intermediates)). There is no build step: Node runs the TypeScript sources directly (type stripping).
 
 ```sh
 npm install
 npm run check   # tsc --noEmit, every test, then the privacy check
 ```
 
-CI (`.github/workflows/check.yml`) runs the same `npm run check` on Node 24 and 26 on Linux and Node 26 on macOS for every push to `main` and every pull request. A pull request needs every CI check green to merge. Dependabot opens monthly grouped updates for npm packages and GitHub Actions; they go through CI like any other pull request. `.github/workflows/privacy.yml` re-checks a pull request's title, description and commit messages whenever they change.
+CI (`.github/workflows/check.yml`) runs the same `npm run check` on Node 24.22.1 and 26.12.1 on Linux and Node 26.12.1 on macOS for every push to `main` and every pull request. A pull request needs every CI check green to merge. Dependabot opens monthly grouped updates for npm packages and GitHub Actions; they go through CI like any other pull request. `.github/workflows/privacy.yml` re-checks a pull request's title, description and commit messages whenever they change.
 
 ## Ground rules
 
