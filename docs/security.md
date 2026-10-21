@@ -109,6 +109,37 @@ This automates T3's consent step using **your own access to the machine**: the s
 
 T3 issues no refresh tokens; credentials last 30 days. The renewal loop re-enrolls a host when fewer than `renewWhenDaysLeft` days remain and keeps the old credential until the new one is verified. Old T3 sessions expire on their own; you can revoke them earlier in T3 under Settings → Connections, or with `t3 auth session list` and `t3 auth session revoke <id>`.
 
+## Temporary outbound TLS key block
+
+`src/tlsTrust.ts` blocks the eight compromised eMudhra/emSign intermediate **public keys** (CVE-2026-111943), using SHA-256 of DER SubjectPublicKeyInfo, including cross-signed/reissued certificates with the same keys. It does not remove any root or change any CA store. Unrelated Comodo/Sectigo chains through AAA Certificate Services remain usable, as do system CAs, `NODE_EXTRA_CA_CERTS`, and per-connection private CAs.
+
+[Mozilla bug 2083449](https://bugzilla.mozilla.org/show_bug.cgi?id=2083449) and [Mozilla's announcement](https://blog.mozilla.org/security/2026/10/20/protecting-firefox-users-following-the-compromise-of-emudhra-intermediate-certificates/) confirm compromised intermediate keys, not compromised root keys. The hashes match [Node's native fix at d9a3f3d](https://github.com/nodejs/node/commit/d9a3f3d150f7959f2d448d9a61aa11f5a75aa2b3), Go's CVE-2026-111943 fix and [Electron #55126](https://github.com/electron/electron/pull/55126). The public fixtures in `test/fixtures/compromised-intermediates.json` come from the [disclosure inventory](https://emudhra.we-have-a-problem.com/impacted-intermediates.json); offline tests derive all eight SPKI hashes from all sixteen certificates (original and cross-signed) and prove they are blocked at different chain depths. Root fixtures prove that trust anchors are preserved.
+
+The launcher installs the shim before dynamically importing the CLI; outbound modules also import it for direct use. For another entrypoint, preload it before application/tracing code:
+
+```sh
+node --import ./src/tlsTrust.ts app.js
+```
+
+The shim wraps `tls.connect()` and adds the key block to each connection's existing `checkServerIdentity`. This covers HTTPS, built-in fetch/undici and direct TLS connections, including custom hostname checkers; the caller's checker still runs for unblocked keys, and normal chain validation remains enabled. ESM named exports are synchronized. The approach was reviewed against the dependency-free [atproto preload](https://github.com/bluesky-social/atproto/blob/fc60876949cca1ca28e98273ecfc97a151d3ebfc/packages/internal/fetch-node/src/emudhra-preload.mjs); no package dependency is needed. Blocked keys fail with `CERT_REVOKED`; an unreadable certificate fails closed with `ERR_TLS_CERT_CHAIN_CHECK`. Neither error includes hostname, certificate or credential material.
+
+Limits: resumed TLS sessions skip `checkServerIdentity`, so restart processes and discard sessions saved before installation; installing this after a connection has been established cannot protect that connection or its cached sessions. A custom hostname checker would bypass a plain global-checker replacement; composing at `tls.connect()` avoids that bypass here. `rejectUnauthorized: false` or `NODE_TLS_REJECT_UNAUTHORIZED=0` still permits unauthenticated connections and must not be used. Direct `TLSSocket` construction, alternative TLS libraries, references captured before the shim runs, incoming client certificates, and child processes/worker threads that do not load the shim are outside its coverage. An earlier `--require` preload can capture/open TLS before an `--import` preload runs. The JS check walks Node's exposed issuer chain; it cannot reproduce the native fix's full OpenSSL verification hook and may reject a peer-supplied path containing a blocked key even when another path is possible.
+
+T3 HTTPS/MCP and its OAuth enrollment/token calls, webhook deliveries/setup tests, and public-URL/dashboard exposure checks use these TLS transports. There is no separate outbound identity-provider or GitHub API client in the gateway; GitHub PR links are metadata. HTTP/loopback traffic and child executables are unaffected. Root removal was rejected because it over-blocks legitimate sibling chains; AAA is not in Node's bundled store, though a system or extra store can trust it. No exemptions or CA-store changes are necessary for this key-based workaround.
+
+Remove the shim once the minimum supported Node release includes [nodejs/node#66871](https://github.com/nodejs/node/pull/66871) and verification succeeds without it. That native fix enforces the same eight keys deeper in TLS verification. A merged PR alone does not identify a released version; confirm the release notes before upgrading the minimum.
+
+After an operator deploys and restarts, run these from the checkout with the same Node runtime, CA environment and flags as the gateway:
+
+```sh
+TLS_LIVE_TEST=1 nice -n 10 node --test test/tls-trust-live.test.ts
+TLS_LIVE_TEST=1 nice -n 10 node --use-system-ca --test test/tls-trust-live.test.ts
+```
+
+Each of `dv-g3b`, `dv-g3b-aaa`, `ev-g3c`, and `ev-g3c-aaa`, followed by `-emudhra.we-have-a-problem.com`, must fail with a certificate-validation error through fetch, HTTPS and TLS (including a custom hostname checker), on first and repeated attempts. DNS failures and timeouts do not count. Normal public TLS at GitHub and nodejs.org must still connect. These tests are skipped unless enabled and contact only public test sites, with no credentials. To exercise the key block even when a runtime already lacks an affected root, a private test process may additionally trust the public roots in `test/fixtures/tls-roots.json` through a temporary PEM bundle and `NODE_EXTRA_CA_CERTS`; set `TLS_REQUIRE_KEY_BLOCK=1` to require `CERT_REVOKED` specifically. It must still reject the compromised chains.
+
+Separately verify the running gateway's read-only host health and public metadata, OAuth when next needed, and intended webhook deliveries (a synthetic webhook test sends content). Check code-only TLS diagnostics. Standalone tests prove policy in a new process, not that the running service was restarted with it. Do not publish configured destinations or private verification details in this repository.
+
 ## Revocation
 
 - One agent: `t3-fleet-gateway clients revoke <client id>` revokes the client and every token issued to it, immediately, without a restart.

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Security
+
+- Temporarily block the eight compromised eMudhra/emSign intermediate keys by SPKI SHA-256 (CVE-2026-111943, matching nodejs/node#66871), before outbound TLS. Covers fetch/undici, HTTPS and TLS while retaining all roots and system/extra CAs, and composes with custom hostname checks. See [scope and session caveats](docs/security.md#temporary-outbound-tls-key-block). Remove once the minimum Node release ships the native fix and verification passes without the shim.
+
 ### Added
 
 - `work_settle({ jobId, requestId })` lets clients with Operate access settle idle, cancelled, failed or released jobs after a fresh T3 status and delegated-work check. It uses the existing host credential, maps permission and busy refusals to typed errors, confirms settlement by reading it back and emits a `thread_settled` feed event. Durable request-id replay never re-sends settlement after an ambiguous outcome. `work_status` exposes live `settled` / `settledAt` (null when unknown); `work_continue` on a settled idle job resumes it through T3. No migration or configuration change.
