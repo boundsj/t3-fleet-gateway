@@ -40,7 +40,7 @@ Two credential audiences never mix. Agent tokens are only valid at the gateway. 
 
 ### Runtime
 
-- Node.js ≥ 24.5.0 running TypeScript directly (type stripping, no build step). ES modules, `.ts` import specifiers, erasable syntax only.
+- Node.js ≥ 24 running TypeScript directly (type stripping, no build step). ES modules, `.ts` import specifiers, erasable syntax only.
 - SQLite through `node:sqlite`, WAL mode, `busy_timeout` set, migrations versioned in code (append-only; a migration that must rebuild a table runs with foreign keys off and checks them before committing).
 - The official MCP TypeScript SDK for both the server and the client: the v2 split packages `@modelcontextprotocol/server` and `@modelcontextprotocol/client` (2.3.x). v2 is the SDK's stable, documented line (the v1 `@modelcontextprotocol/sdk` package is the previous generation, and its docs point new work at v2). The split packages are also far lighter: the server needs only `zod` and the shared core, while 1.x pulls in Express, Hono, CORS and rate-limit middleware we would not use. v2 serves 2025-era clients (Grok Bot today) and 2026-07-28 clients from one endpoint. v2 no longer ships authorization-server helpers (they are frozen in a legacy package), so the gateway implements its small OAuth server directly on `node:http`.
 - Runtime dependencies: the two SDK packages and `zod` (the SDK's schema library, also used for config and tool input validation). Nothing else.

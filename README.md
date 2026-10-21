@@ -15,7 +15,7 @@ T3 Fleet Gateway connects Grok Bot, Notion and other MCP clients to your T3 serv
 
 ## Get going with prompts
 
-You need an always-on machine with Node.js 24.5.0+, a running T3 Code server and its `t3` CLI. A coding agent on that machine can do the setup. The gateway runs from a Git checkout; it is not published to npm.
+You need an always-on machine with Node.js 24+, a running T3 Code server and its `t3` CLI. A coding agent on that machine can do the setup. The gateway runs from a Git checkout; it is not published to npm.
 
 ### 1. Ask your coding agent to set up the gateway
 

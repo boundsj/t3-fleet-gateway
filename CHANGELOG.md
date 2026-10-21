@@ -4,7 +4,7 @@
 
 ### Security
 
-- Temporarily distrust the emSign ECC G3, AAA Certificate Services and direct emSign TLS G3 trust anchors by SHA-256 at startup, including system/extra CA sources, while preserving unrelated extra CAs. This mitigates compromised eMudhra intermediate keys (Mozilla bug 2083449) for fetch, HTTPS and TLS. Removing AAA can also break legitimate Comodo/Sectigo chains; see [compatibility risks and verification](docs/security.md#temporary-outbound-tls-distrust). Requires Node 24.5.0+. Remove the shim once the minimum Node release includes nodejs/node#66871 and verification passes without it.
+- Temporarily block the eight compromised eMudhra/emSign intermediate keys by SPKI SHA-256 (CVE-2026-111943, matching nodejs/node#66871), before outbound TLS. Covers fetch/undici, HTTPS and TLS while retaining all roots and system/extra CAs, and composes with custom hostname checks. See [scope and session caveats](docs/security.md#temporary-outbound-tls-key-block). Remove once the minimum Node release ships the native fix and verification passes without the shim.
 
 ### Added
 

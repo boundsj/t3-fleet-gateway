@@ -68,8 +68,8 @@ test('HTTPS uses verified TLS and arbitrary authentication; untrusted certificat
   const certificateFile = join(dir, 'synthetic-ca.pem');
   const configFile = join(dir, 'config.json');
   const senderKey = 'synthetic-https-private-sender-key';
-  const roots = JSON.parse(readFileSync(new URL('./fixtures/distrusted-roots.json', import.meta.url), 'utf8')) as { pem: string }[];
-  // Extra CAs must survive, but must not reintroduce a distrusted public anchor.
+  const roots = JSON.parse(readFileSync(new URL('./fixtures/tls-roots.json', import.meta.url), 'utf8')) as { pem: string }[];
+  // Public roots and the private test CA must all remain trusted.
   writeFileSync(certificateFile, CERTIFICATE + roots.map((root) => root.pem).join('\n'));
   writeFileSync(join(dataDir, 'sender.key'), senderKey, { mode: 0o600 });
   const received: { path: string | undefined; key: string | string[] | undefined; payload: Record<string, unknown> }[] = [];
@@ -144,7 +144,7 @@ test('HTTPS uses verified TLS and arbitrary authentication; untrusted certificat
         if (extra.length) {
           assert.equal(extra.length, 4);
           assert.ok(defaults.has(new X509Certificate(extra[0]).fingerprint256));
-          for (const pem of extra.slice(1)) assert.ok(!defaults.has(new X509Certificate(pem).fingerprint256));
+          for (const pem of extra.slice(1)) assert.ok(defaults.has(new X509Certificate(pem).fingerprint256));
         }
         const checkFetch = async () => {
           const response = await fetch(${JSON.stringify(`${origin}/trust-check`)}, { signal: AbortSignal.timeout(5000) });

@@ -240,7 +240,7 @@ Automated tests use only synthetic hosts (`test/t3-contract.test.ts`, `test/t3-c
 
 ## Run as a service
 
-Requirements: Node.js 24.5.0 or newer; the latest Node 24 or 26 release is recommended. Node 26.0 can raise a spurious `setTypeOfService EINVAL` when T3 resets a new connection (see below).
+Requirements: Node.js 24 or newer; the latest Node 24 or 26 release is recommended. Node 26.0 can raise a spurious `setTypeOfService EINVAL` when T3 resets a new connection (see below).
 
 macOS (launchd, per-user agent with KeepAlive):
 
