@@ -742,6 +742,20 @@ export class FakeT3 {
         });
       return { matches: matches.slice(0, input.limit ?? 10) };
     });
+    tool('t3_thread_organize', z.strictObject({ threadId: z.string(), action: z.literal('settle') }), ({ threadId }) => {
+      const thread = this.#thread(threadId);
+      if (this.#activeRun(thread)) throw new FakeFailure('orchestration_error', 'Thread is still running. Stop it before settling.');
+      if (thread.runs.some((run) => run.status === 'queued')) {
+        throw new FakeFailure('orchestration_error', 'Thread has a queued message. Send it or remove it from the queue before settling.');
+      }
+      if (thread.approvalsPending) {
+        throw new FakeFailure('orchestration_error', 'Thread is waiting on an approval or question. Answer it before settling.');
+      }
+      thread.questions.clear();
+      thread.settled = true;
+      thread.updatedAt = new Date().toISOString();
+      return { sequence: 1 };
+    });
     tool('t3_thread_send', sendInput, (input) => this.#send(input));
     tool('t3_thread_interrupt', interruptInput, (input) => {
       const key = input.clientRequestId ? `${input.threadId}:${input.clientRequestId}` : undefined;
@@ -922,6 +936,7 @@ export class FakeT3 {
     const previous = key ? this.#sendResults.get(key) : undefined;
     if (previous) return previous;
     const thread = this.#thread(input.threadId);
+    thread.settled = false;
     this.sends.push({ threadId: thread.threadId, message: input.message, clientRequestId: input.clientRequestId ?? null });
     const active = this.#activeRun(thread);
     const run = active ?? this.#startRun(thread);

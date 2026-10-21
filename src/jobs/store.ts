@@ -413,7 +413,7 @@ export interface FeedEvent extends JobEvent {
 }
 
 /** Tools whose requestId makes a call idempotent. Keys are scoped per agent and per tool. */
-export type IdempotentTool = 'work_start' | 'work_continue';
+export type IdempotentTool = 'work_start' | 'work_continue' | 'work_settle';
 
 export interface IdempotencyKey {
   inputHash: string;
@@ -872,6 +872,25 @@ export class JobStore {
   /** Record an event that is not a state change (for example a follow-up sent to a running job). */
   appendEvent(id: string, type: string, state: JobState, detail: EventDetail = {}): void {
     transaction(this.#db, () => this.#insertEvent(id, type, state, state, detail, this.#clock()));
+  }
+
+  /** Claim settlement once across concurrent requests/processes. */
+  claimSettlement(clientId: string, requestId: string, key: Omit<IdempotencyKey, 'response'>): boolean {
+    return transaction(this.#db, () => {
+      if (this.idempotencyKey(clientId, 'work_settle', requestId)) return false;
+      this.claimIdempotencyKey(clientId, 'work_settle', requestId, key);
+      return true;
+    });
+  }
+
+  /** Settlement confirmation and its feed event commit together; a concurrent confirmation emits once. */
+  recordSettlement(id: string, clientId: string, requestId: string, result: { settled: boolean; settledAt: string | null }): void {
+    transaction(this.#db, () => {
+      if (this.idempotencyKey(clientId, 'work_settle', requestId)?.response !== null) return;
+      this.completeIdempotencyKey(clientId, 'work_settle', requestId, JSON.stringify(result));
+      const job = this.require(id);
+      this.#insertEvent(id, 'thread_settled', job.state, job.state, {}, this.#clock());
+    });
   }
 
   /** Commit a successful send and its idempotency result together. Only a newly started exact run proves its caller. */

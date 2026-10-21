@@ -567,8 +567,9 @@ describe('standing jobs: delegated work in the activity view', () => {
       [
         ['messages', 3, 100, 2000],
         ...[3, 103, 203, 303, 403, 503, 603].map((after) => ['activity', after, 100, 1]),
+        ['messages', null, 1, 1], // work_status reads live settlement metadata without message content.
       ],
-      'one messages read for the reply; the activity in pages of 100 items of one character',
+      'one messages read for the reply, paged activity, and a status-only read for settlement',
     );
 
     // A quiet check: one read of each view, and the followed item re-read by position.
