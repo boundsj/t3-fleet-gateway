@@ -460,6 +460,15 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
             snap.hosts.length > shownHosts.length ? more(snap.hosts.length - shownHosts.length, '#/hosts', 'hosts') : null))));
   }
 
+  function settleAction(job) {
+    if (!job || !job.link || job.settlementAcknowledged || !['idle', 'failed', 'cancelled', 'released'].includes(job.state)) return null;
+    if (model.settleId === job.id) return h('span', { role: 'group', 'aria-label': 'Confirm settlement' },
+      h('span', null, 'Settle this thread in T3 and clear its attention alert? '),
+      button('Confirm settle', 'check', () => actions.settle(job.id), { busy: Boolean(model.settleBusy) }),
+      button('Keep open', 'x', () => actions.confirmSettle(null), { busy: Boolean(model.settleBusy) }));
+    return button('Settle', 'check', () => actions.confirmSettle(job.id), { busy: Boolean(model.settleBusy) });
+  }
+
   function attentionItem(item) {
     let action = null;
     if (item.action?.kind === 'link') action = threadButton(item.action.href);
@@ -468,7 +477,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     return h('li', { class: 'attention__item' },
       h('span', { class: `attention__icon tone-${item.tone}` }, icon(TONE_ICON[item.tone] ?? 'info')),
       h('div', null, h('p', { class: 'attention__title' }, item.title), h('p', { class: 'attention__detail' }, item.detail)),
-      h('div', { class: 'attention__foot' }, action, item.at ? h('span', { class: 'sub' }, time(item.at)) : null));
+      h('div', { class: 'attention__foot' }, action, item.kind === 'job' ? settleAction(jobIndex.get(item.ref)) : null, item.at ? h('span', { class: 'sub' }, time(item.at)) : null));
   }
 
   function eventItem(event) {
@@ -666,7 +675,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
           h('span', { class: 'ref' }, `job ${job.id}`)),
         flags.length ? h('div', { class: 'job__flags' }, flags) : null,
         job.error?.detail ? h('p', { class: 'sub' }, job.error.detail) : null),
-      h('div', { class: 'job__side' }, h('span', { class: `state st-${job.state}` }, STATE_LABELS[job.state] ?? job.state), threadButton(job.link)));
+      h('div', { class: 'job__side' }, h('span', { class: `state st-${job.state}` }, STATE_LABELS[job.state] ?? job.state), threadButton(job.link), job.settlementAcknowledged ? tag('settled') : settleAction(job)));
   }
 
   // -------------------------------------------------------------- checks
@@ -757,6 +766,7 @@ export function boot(win, doc) {
   const route = parseRoute(win.location.hash);
   const model = {
     snapshot: null, route, error: null, notice: null, loading: false, checking: false, fetchedAt: 0, jobFilter: 'attention',
+    settleId: null, settleRequestId: null, settleBusy: false,
     webhooks: null, webhooksLoading: false, webhookBusy: null, webhookError: null, webhookNotice: null,
     webhookForm: route.view === 'webhooks' ? { mode: 'connect' } : null, disconnectId: null,
   };
@@ -787,6 +797,32 @@ export function boot(win, doc) {
     cache: 'no-store', credentials: 'same-origin', ...init, headers: { [API_HEADER]: '1', ...(init.headers ?? {}) },
   });
   const actions = {
+    confirmSettle(id) {
+      model.settleId = id;
+      model.settleRequestId = id ? win.crypto.randomUUID() : null;
+      draw();
+    },
+    async settle(id) {
+      if (model.settleBusy) return;
+      model.settleBusy = true;
+      draw();
+      try {
+        const response = await request('api/jobs/settle', { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ jobId: id, requestId: model.settleRequestId }) });
+        if (!response.ok) throw new Error(await readError(response));
+        model.snapshot = (await response.json()).snapshot;
+        model.settleId = null;
+        model.error = null;
+        model.notice = 'Thread settled. Its history is still available in Jobs.';
+        announce(model.notice);
+      } catch (error) {
+        model.error = String(error.message ?? error);
+        announce(model.error);
+      } finally {
+        model.settleBusy = false;
+        draw();
+      }
+    },
     async refresh() {
       if (model.loading) return;
       model.loading = true;

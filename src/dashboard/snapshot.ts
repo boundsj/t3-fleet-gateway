@@ -347,6 +347,7 @@ function replacementCommand(client: ClientView): string | null {
 // Jobs and events
 
 export interface JobView {
+  settlementAcknowledged: boolean;
   /** At most MAX_PULL_REQUESTS of the PRs the job follows (`displayPullRequests`): number and state only. */
   pullRequests: { number: number; state: string | null }[] | null;
   id: string;
@@ -371,10 +372,11 @@ export interface JobView {
   link: string | null;
 }
 
-function jobView(job: Job, clientLabels: Map<string, string>): JobView {
+function jobView(job: Job, clientLabels: Map<string, string>, settlementAcknowledged: boolean): JobView {
   const errorCode = safeCode(job.lastErrorCode);
   const isOperator = job.clientId === OPERATOR_CLIENT_ID;
   return {
+    settlementAcknowledged,
     id: job.id,
     pullRequests: job.pullRequests === null ? null : displayPullRequests(job.pullRequests).map(({ number, state }) => ({ number, state })),
     // Launched jobs' titles end with their thread marker; the id is shown on its own.
@@ -500,6 +502,7 @@ function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[
     }
   }
   for (const job of jobs) {
+    if (job.settlementAcknowledged) continue;
     const where = `${job.project} on ${job.hostId}`;
     const link = job.link ? { kind: 'link' as const, label: 'Open in T3', href: job.link } : null;
     if (job.state === 'needs_input') {
@@ -569,10 +572,10 @@ export function buildSnapshot(sources: DashboardSources): DashboardSnapshot {
     Number(a.revokedAt !== null) - Number(b.revokedAt !== null) || (b.lastUsedAt ?? b.createdAt) - (a.lastUsedAt ?? a.createdAt));
   const clients = ordered.slice(0, LIMITS.clients).flatMap((summary) => clientView(sources, summary, now) ?? []);
 
-  const view = (job: Job) => jobView(job, clientLabels);
+  const view = (job: Job) => jobView(job, clientLabels, store.settlementAcknowledged(job.id));
   const open = store.list({ states: OPEN_STATES, limit: LIMITS.openJobs }).map(view);
   const recent = store.list({ states: TERMINAL_STATES, limit: LIMITS.recentJobs }).map(view);
-  const attentionJobs = store.attention(now, DAY, LIMITS.jobAttention).map(view);
+  const attentionJobs = store.attention(now, DAY, LIMITS.jobAttention, {}, true).map(view);
   const openTotal = OPEN_STATES.reduce((sum, state) => sum + totals[state], 0);
 
   const events = store.latestEvents(LIMITS.events).map((event): EventView => {

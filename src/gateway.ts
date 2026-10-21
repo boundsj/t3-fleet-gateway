@@ -181,6 +181,8 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
         checks,
         logger,
         management,
+        jobs: services.jobs,
+        available: () => ready,
         ...(options.dashboardPort === undefined ? {} : { port: options.dashboardPort }),
         sources: {
           config, db: services.db, clock: services.clock, registry: services.registry, store: services.jobs.store, engine, startedAt,
