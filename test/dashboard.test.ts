@@ -677,3 +677,108 @@ describe('dashboard: jobs and privacy', () => {
     assert.equal(snap.attention.some((item) => jobs.includes(item.ref)), false, 'running jobs need nothing from the operator');
   });
 });
+
+test('dashboard settlement uses the protected write boundary, shared service and durable attention acknowledgement', async (t) => {
+  const h = await harness(t);
+  const job = await startJob(h.agent);
+  await h.tick();
+  const threadId = h.gw.services.jobs.store.require(job.jobId).threadId!;
+  h.fake.finishTurn(threadId, 'Synthetic completion');
+  await h.tick();
+  const headers = { ...API, origin: `http://127.0.0.1:${h.port}`, 'content-type': 'application/json' };
+  const body = JSON.stringify({ jobId: job.jobId, requestId: 'dashboard-settle' });
+  const post = (extra: Record<string, string> = {}, payload = body) => raw(h.port,
+    { method: 'POST', path: '/api/jobs/settle', headers: { ...headers, ...extra }, body: payload });
+  for (const extra of [{ 'x-t3fg-dashboard': '' }, { origin: '' }, { origin: 'https://other.example.test' }, { origin: `https://${ALLOWED_HOST}` },
+    { host: ALLOWED_HOST, origin: `http://${ALLOWED_HOST}` },
+    { 'sec-fetch-site': 'cross-site' }, { 'tailscale-funnel-request': '1' }] as Record<string, string>[]) {
+    assert.equal((await post(extra)).status, 403);
+  }
+  assert.equal(h.fake.calls.includes('t3_thread_organize'), false);
+  assert.equal((await post({}, '{}')).status, 400);
+  assert.equal((await post({ 'content-type': 'text/plain' })).status, 415);
+  assert.equal((await post({}, JSON.stringify({ jobId: job.jobId, requestId: 'x', extra: true }))).status, 400);
+  const result = await post();
+  assert.equal(result.status, 200, result.body);
+  const snap = JSON.parse(result.body).snapshot as DashboardSnapshot;
+  assert.equal(snap.attention.some((item) => item.kind === 'job' && item.ref === job.jobId), false);
+  assert.equal(snap.jobs.attention.some((item) => item.id === job.jobId), false);
+  assert.equal(snap.jobs.open.find((item) => item.id === job.jobId)?.settlementAcknowledged, true);
+  assert.equal(h.fake.threads.get(threadId)!.settled, true);
+  assert.equal((await post()).status, 200);
+  assert.equal(h.fake.calls.filter((name) => name === 't3_thread_organize').length, 1);
+  await h.agent.call('work_continue', { jobId: job.jobId, requestId: 'resume-settled', message: 'Synthetic follow-up' });
+  h.fake.finishTurn(threadId, 'Synthetic new completion');
+  await h.tick();
+  assert.equal((await snapshot(h.port)).jobs.open.find((item) => item.id === job.jobId)?.settlementAcknowledged, false);
+});
+
+test('dashboard reports settlement failure without suppressing the job or exposing downstream text', async (t) => {
+  const h = await harness(t);
+  const job = await startJob(h.agent);
+  await h.tick();
+  const threadId = h.gw.services.jobs.store.require(job.jobId).threadId!;
+  h.fake.finishTurn(threadId, 'Synthetic completion');
+  await h.tick();
+  h.fake.delegate(threadId, 'SECRET-DELEGATED-TITLE');
+  const result = await raw(h.port, { method: 'POST', path: '/api/jobs/settle',
+    headers: { ...API, origin: `http://127.0.0.1:${h.port}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ jobId: job.jobId, requestId: 'refused-settle' }) });
+  assert.equal(result.status, 409);
+  assert.match(result.body, /job_state_conflict/);
+  assert.doesNotMatch(result.body, /SECRET/);
+  assert.equal(h.gw.services.jobs.store.settlementAcknowledged(job.jobId), false);
+  assert.equal(h.fake.calls.includes('t3_thread_organize'), false);
+});
+
+test('same-title later completion never hides a failed job without a reliable retry link', async (t) => {
+  const h = await harness(t);
+  const failed = await startJob(h.agent, 'Synthetic repeated task', { title: 'Synthetic repeated task' });
+  await h.tick();
+  h.fake.finishTurn(h.gw.services.jobs.store.require(failed.jobId).threadId!, 'Synthetic unsuccessful turn');
+  h.gw.services.jobs.store.transition(failed.jobId, { from: ['running'], to: 'failed', detail: { reason: 'synthetic' } });
+  const later = await startJob(h.agent, 'Synthetic repeated task', { title: 'Synthetic repeated task', requestId: 'later-task' });
+  await h.tick();
+  h.fake.finishTurn(h.gw.services.jobs.store.require(later.jobId).threadId!, 'Synthetic completion');
+  await h.tick();
+  const snap = await snapshot(h.port);
+  assert.ok(snap.attention.some((item) => item.kind === 'job' && item.ref === failed.jobId));
+  const result = await raw(h.port, { method: 'POST', path: '/api/jobs/settle',
+    headers: { ...API, origin: `http://127.0.0.1:${h.port}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ jobId: failed.jobId, requestId: 'settle-failure' }) });
+  assert.equal(result.status, 200, result.body);
+  assert.equal((await snapshot(h.port)).attention.some((item) => item.kind === 'job' && item.ref === failed.jobId), false);
+  assert.equal(h.gw.services.jobs.store.require(failed.jobId).state, 'failed', 'history retains the failure');
+});
+
+test('dashboard settlement refuses threads beyond the shared activity scan limit', async (t) => {
+  const h = await harness(t);
+  const job = await startJob(h.agent);
+  await h.tick();
+  const threadId = h.gw.services.jobs.store.require(job.jobId).threadId!;
+  h.fake.finishTurn(threadId, 'Synthetic completion');
+  await h.tick();
+  h.gw.services.jobs.store.transition(job.jobId, { from: ['idle'], to: 'failed', detail: { reason: 'synthetic' } });
+  h.fake.addActivity(threadId, 'reasoning', 2001);
+  const result = await raw(h.port, { method: 'POST', path: '/api/jobs/settle',
+    headers: { ...API, origin: `http://127.0.0.1:${h.port}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ jobId: job.jobId, requestId: 'scan-limit' }) });
+  assert.equal(result.status, 409);
+  assert.match(result.body, /scan limit/);
+  assert.equal(h.fake.calls.includes('t3_thread_organize'), false);
+  assert.ok((await snapshot(h.port)).attention.some((item) => item.kind === 'job' && item.ref === job.jobId));
+});
+
+test('settled jobs do not fill the dashboard attention window; MCP settlement has the same effect', async (t) => {
+  const h = await harness(t);
+  const earlier = await startJob(h.agent);
+  const later = await startJob(h.agent);
+  await h.tick();
+  for (const job of [earlier, later]) h.fake.finishTurn(h.gw.services.jobs.store.require(job.jobId).threadId!, 'Synthetic completion');
+  await h.tick();
+  await h.agent.call('work_settle', { jobId: later.jobId, requestId: 'mcp-settle' });
+  const store = h.gw.services.jobs.store;
+  assert.equal(store.attention(h.gw.clock(), DAY, 1, {}, true)[0]?.id, earlier.jobId);
+  assert.equal((await snapshot(h.port)).attention.some((item) => item.kind === 'job' && item.ref === later.jobId), false);
+  assert.equal(store.attention(h.gw.clock(), DAY, 1)[0]?.id, later.jobId, 'agent feed semantics stay unchanged');
+});

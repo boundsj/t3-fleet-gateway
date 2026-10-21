@@ -874,6 +874,13 @@ export class JobStore {
     transaction(this.#db, () => this.#insertEvent(id, type, state, state, detail, this.#clock()));
   }
 
+  /** A confirmed settlement remains acknowledged until subsequent job activity, ordered by event id (not clock). */
+  settlementAcknowledged(id: string): boolean {
+    const row = this.#db.prepare(`SELECT type FROM job_events WHERE job_id = ?
+      AND type NOT IN ('pull_request_opened', 'pull_request_merged') ORDER BY id DESC LIMIT 1`).get(id) as { type: string } | undefined;
+    return row?.type === 'thread_settled';
+  }
+
   /** Claim settlement once across concurrent requests/processes. */
   claimSettlement(clientId: string, requestId: string, key: Omit<IdempotencyKey, 'response'>): boolean {
     return transaction(this.#db, () => {
@@ -980,7 +987,7 @@ export class JobStore {
    * age, and jobs that went idle or failed, or whose delegated work ended while idle, within `recentMs`.
    * `scope`: see JobScope.
    */
-  attention(now: number, recentMs: number, limit: number, scope: JobScope = {}): Job[] {
+  attention(now: number, recentMs: number, limit: number, scope: JobScope = {}, excludeSettled = false): Job[] {
     const filter = scopeClause(scope);
     const since = now - recentMs;
     const rows = this.#db
@@ -988,6 +995,8 @@ export class JobStore {
         `SELECT * FROM jobs
           WHERE (state IN ('needs_input', 'unknown') OR (state IN ('idle', 'failed') AND state_changed_at >= ?)
             OR (state = 'idle' AND delegated_ended_at >= ?)) ${filter.sql}
+          ${excludeSettled ? `AND (SELECT type FROM job_events WHERE job_id = jobs.id
+            AND type NOT IN ('pull_request_opened', 'pull_request_merged') ORDER BY id DESC LIMIT 1) IS NOT 'thread_settled'` : ''}
           ORDER BY MAX(state_changed_at, COALESCE(delegated_ended_at, 0)) DESC, rowid DESC LIMIT ?`,
       )
       .all(since, since, ...filter.params, limit) as unknown as JobRow[];

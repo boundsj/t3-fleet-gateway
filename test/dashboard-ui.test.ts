@@ -456,3 +456,44 @@ test('job PR badges show number and state without adding arbitrary links', async
   assert.match(root.textContent, /PR #22 merged/);
   assertSafeTree(root);
 });
+
+test('settlement browser action confirms, retains request id on error, then updates attention', async () => {
+  const app = await loadApp();
+  const doc = new FakeDocument();
+  const root = doc.createElement('main');
+  root.setAttribute('id', 'app');
+  doc.body.append(root);
+  const snap = hostileSnapshot();
+  snap.attention = [{ tone: 'bad', kind: 'job', ref: 'j2', title: 'Synthetic failed job', detail: 'Run failed', at: NOW, action: null }];
+  const posts: { jobId: string; requestId: string }[] = [];
+  const win = new FakeWindow(async (url, init) => {
+    if (url === 'api/snapshot') return Response.json(snap);
+    assert.equal(url, 'api/jobs/settle');
+    assert.equal((init?.headers as Record<string, string>)['x-t3fg-dashboard'], '1');
+    posts.push(JSON.parse(String(init?.body)));
+    if (posts.length === 1) return Response.json({ error: 'job_state_conflict', detail: 'Settlement scan limit reached.' }, { status: 409 });
+    return Response.json({ snapshot: { ...snap, attention: [], jobs: { ...snap.jobs, attention: [] } } });
+  });
+  win.location.hash = '#/overview';
+  await app.boot(win, doc).ready;
+  const click = async (label: string) => {
+    const node = root.elements('button').find((item) => item.textContent === label);
+    assert.ok(node, label);
+    await node.dispatch('click');
+  };
+  await click('Settle');
+  assert.equal(posts.length, 0, 'confirmation does not write');
+  await click('Keep open');
+  assert.equal(posts.length, 0);
+  await click('Settle');
+  await click('Confirm settle');
+  assert.match(root.textContent, /Settlement scan limit/);
+  assert.match(root.textContent, /Synthetic failed job/);
+  await click('Confirm settle');
+  assert.equal(posts.length, 2);
+  assert.equal(posts[0]!.requestId, posts[1]!.requestId);
+  assert.equal(posts[0]!.jobId, 'j2');
+  assert.doesNotMatch(root.textContent, /Synthetic failed job/);
+  assert.match(root.textContent, /Thread settled/);
+  assertSafeTree(root);
+});
