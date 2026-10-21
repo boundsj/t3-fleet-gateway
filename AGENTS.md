@@ -19,7 +19,7 @@ npm run dashboard:demo                 # operator dashboard on a synthetic fleet
 npm run privacy:check                  # scan for private values ("Privacy and publishing"); -- --file <notes.md> for PR or release text, -- --commits <range> for commit messages
 ```
 
-CI (`.github/workflows/check.yml`) runs `npm run check` on Node 24 and 26 (Linux) and 26 (macOS); `main` blocks force-pushes and deletion, and pull requests need CI green. `.github/workflows/privacy.yml` re-checks a pull request's title, description and commits whenever they change. No build step: Node 24+ runs `.ts` directly. There is no linter or formatter configured; match the surrounding style (2 spaces, single quotes, semicolons, ~140-column lines).
+CI (`.github/workflows/check.yml`) runs `npm run check` on Node 24 and 26 (Linux) and 26 (macOS); `main` blocks force-pushes and deletion, and pull requests need the three CI legs and `privacy check` green (all four are required checks). `.github/workflows/privacy.yml` re-checks a pull request's title, description and commits whenever they change. No build step: Node 24+ runs `.ts` directly. There is no linter or formatter configured; match the surrounding style (2 spaces, single quotes, semicolons, ~140-column lines).
 
 ## Entrypoints
 
@@ -84,6 +84,15 @@ Use a placeholder instead:
 3. Do not paste a real value into a test or doc to show what the check catches: build synthetic ones at run time (`test/privacy-check.test.ts`). A rare intentional fixture carries `privacy-check: allow` on its line, or a justified entry in `scripts/privacy-allow.json`; neither can skip a private denylist entry.
 
 CI runs the check on every pull request, title and description included, and again when the description is edited. An optional local hook runs it before each push: `git config core.hooksPath .githooks`.
+
+## Deploying and releasing
+
+The live gateway runs from a checkout of its own, separate from any checkout you develop in (docs/operations.md, "Run as a service"), so merging to `main` changes nothing until someone deploys.
+
+- Do not deploy, restart or reconfigure a running gateway, and do not touch its data directory, credentials, tunnel or host settings, unless the operator asks for exactly that. A job in this repository works on code and docs.
+- When asked to deploy, follow "Run as a service" in order: stop the service (with launchd, wait until `launchctl print` no longer finds it); back up `gateway.db`, `gateway.key` and the config into a new timestamped folder; update the service checkout (`git pull --ff-only`, `npm ci --omit=dev`); run `doctor` from it, which applies migrations, and stop if it fails; reinstall with `deploy/launchd/install.sh`, passing the `T3_BIN` the service already uses (compare `--dry-run` with the installed plist first); then confirm `doctor` passes and every host is reachable. Migrations are one-way: going back means restoring the backup.
+- A configuration change takes effect only after a restart, done the same way without the update step.
+- Releases: bump the version in `package.json` and `package-lock.json`, add a dated `CHANGELOG.md` section, and merge through a pull request (squash). Then run `npm run privacy:check -- --file <notes.md>` on that section and publish it with `gh release create v<version> --target <merge commit>`. Merging does not publish a release.
 
 ## Invariants
 
