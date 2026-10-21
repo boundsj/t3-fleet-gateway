@@ -15,7 +15,7 @@ T3 Fleet Gateway connects Grok Bot, Notion and other MCP clients to your T3 serv
 
 ## Get going with prompts
 
-You need an always-on machine with Node.js 24+, a running T3 Code server and its `t3` CLI. A coding agent on that machine can do the setup. The gateway runs from a Git checkout; it is not published to npm.
+You need an always-on machine with Node.js 24.22.1+ on 24.x or 26.12.1+ (older releases do not block the [compromised eMudhra intermediates](docs/security.md#compromised-emudhra-intermediates)), a running T3 Code server and its `t3` CLI. A coding agent on that machine can do the setup. The gateway runs from a Git checkout; it is not published to npm.
 
 ### 1. Ask your coding agent to set up the gateway
 
@@ -219,7 +219,7 @@ npm run dashboard:demo    # try the dashboard with made-up hosts and jobs
 npm run webhooks:smoke    # isolated HTTPS, retries and process-crash checks
 ```
 
-CI checks Node 24 and 26 on Linux, and Node 26 on macOS. The webhook smoke needs OpenSSL; see its [evidence and instructions](docs/evidence/webhooks.md). The optional [compatibility check](docs/operations.md#developer-compatibility-check) compares T3's MCP schemas and runs read-only probes; it installs no schedule.
+CI checks Node 24.22.1 and 26.12.1 on Linux, and Node 26.12.1 on macOS. The webhook smoke needs OpenSSL; see its [evidence and instructions](docs/evidence/webhooks.md). The optional [compatibility check](docs/operations.md#developer-compatibility-check) compares T3's MCP schemas and runs read-only probes; it installs no schedule.
 
 Contributing? Start with [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
 

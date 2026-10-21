@@ -1,10 +1,12 @@
-import '../src/tlsTrust.ts';
 import assert from 'node:assert/strict';
 import { get } from 'node:https';
 import { connect } from 'node:tls';
 import { test } from 'node:test';
+import { nodeVersionProblem } from '../src/nodeVersion.ts';
 
-// Opt-in public-network check; never contacts configured gateway hosts or receivers.
+// Opt-in public-network check that Node itself blocks the compromised eMudhra/emSign intermediates
+// (CVE-2026-111943, nodejs/node#66871); never contacts configured gateway hosts or receivers. Run it
+// with and without --use-system-ca (docs/security.md, "Compromised eMudhra intermediates").
 const options = { skip: process.env.TLS_LIVE_TEST !== '1' };
 const tlsClient = (host: string, customIdentity = false) => new Promise<void>((resolve, reject) => {
   const socket = connect({ host, port: 443, servername: host,
@@ -31,20 +33,23 @@ const clients = {
   tls: (host: string) => tlsClient(host),
   'tls-custom-identity': (host: string) => tlsClient(host, true),
 };
-const certificateFailure = (error: unknown): boolean => {
+// Node's key block reports CERT_REVOKED. Any other failure (a missing root, DNS, a timeout) proves nothing.
+const keyBlocked = (error: unknown): boolean => {
   const e = error as { code?: string; cause?: unknown };
-  const codes = process.env.TLS_REQUIRE_KEY_BLOCK === '1' ? ['CERT_REVOKED']
-    : ['UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'SELF_SIGNED_CERT_IN_CHAIN',
-      'CERT_REVOKED', 'CERT_SIGNATURE_FAILURE'];
-  return codes.includes(e.code ?? '') || (e.cause !== undefined && certificateFailure(e.cause));
+  return e.code === 'CERT_REVOKED' || (e.cause !== undefined && keyBlocked(e.cause));
 };
+
+test('runs on a fixed Node with nothing preloaded', options, () => {
+  assert.equal(nodeVersionProblem(process.versions.node), undefined);
+  assert.deepEqual(process.execArgv.filter((arg) => /^--(import|require|loader|experimental-loader)\b|^-r$/.test(arg)), []);
+});
 
 for (const [name, client] of Object.entries(clients)) {
   for (const prefix of ['dv-g3b', 'dv-g3b-aaa', 'ev-g3c', 'ev-g3c-aaa']) {
     test(`${name} rejects compromised ${prefix} chain`, options, async () => {
       // Rejected handshakes must stay rejected on a repeat (no accepted session to cache).
       for (let attempt = 0; attempt < 2; attempt++) {
-        await assert.rejects(client(`${prefix}-emudhra.we-have-a-problem.com`), certificateFailure);
+        await assert.rejects(client(`${prefix}-emudhra.we-have-a-problem.com`), keyBlocked);
       }
     });
   }

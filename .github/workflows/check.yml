@@ -20,11 +20,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The oldest releases on each line that block the compromised eMudhra/emSign intermediates (src/nodeVersion.ts).
+        # Exact versions: a bare 24 or 26 can resolve to an older release cached on the runner image.
         include:
-          - { os: ubuntu-latest, node: 24 }
-          - { os: ubuntu-latest, node: 26 }
+          - { os: ubuntu-latest, node: '24.22.1' }
+          - { os: ubuntu-latest, node: '26.12.1' }
           # The service runs on macOS (launchd), and some tests cover macOS behavior.
-          - { os: macos-latest, node: 26 }
+          - { os: macos-latest, node: '26.12.1' }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

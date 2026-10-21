@@ -4,7 +4,7 @@
 
 ### Security
 
-- Temporarily block the eight compromised eMudhra/emSign intermediate keys by SPKI SHA-256 (CVE-2026-111943, matching nodejs/node#66871), before outbound TLS. Covers fetch/undici, HTTPS and TLS while retaining all roots and system/extra CAs, and composes with custom hostname checks. See [scope and session caveats](docs/security.md#temporary-outbound-tls-key-block). Remove once the minimum Node release ships the native fix and verification passes without the shim.
+- Node 24.22.1 or a later 24.x, or Node 26.12.1 or newer, is now required (`engines`: `^24.22.1 || >=26.12.1`). These releases ship [nodejs/node#66871](https://github.com/nodejs/node/pull/66871), which blocks the eight compromised eMudhra/emSign intermediate keys (CVE-2026-111943) inside Node's own TLS verification, for fetch/undici, HTTPS and TLS alike, with the bundled CA list and with `--use-system-ca`, and keeps every root. The launcher refuses to start on an older release (including 25.x and 26.0 to 26.12.0) with a message naming the minimums, and `deploy/launchd/install.sh` refuses to install with one. The temporary preload added earlier in this cycle (`src/tlsTrust.ts`, its imports and its offline tests) is removed; `CERT_REVOKED` still counts as a webhook `tls_error`. CI runs on exactly 24.22.1 and 26.12.1. **Upgrade Node on a deployed gateway before deploying this build.** The opt-in live test (`test/tls-trust-live.test.ts`) now requires `CERT_REVOKED` from Node itself with nothing preloaded. See [docs/security.md](docs/security.md#compromised-emudhra-intermediates).
 
 ### Added
 
