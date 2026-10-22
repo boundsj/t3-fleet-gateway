@@ -73,6 +73,7 @@ export interface ClaimedDelivery {
   lease: string; attempt: number; expiresAt: number; route: WebhookRoute;
 }
 function eventType(event: JobEvent): WebhookEventType | undefined {
+  if ((event.type === 'state_changed' || event.type === 'turn_finished') && event.detail?.reason === 'run_failed') return 'failed';
   if (event.type === 'pull_request_opened' || event.type === 'pull_request_merged') return event.type;
   if (event.type === 'delegated_work_ended') return 'delegated_work_ended';
   if (event.type === 'turn_finished') return 'idle';

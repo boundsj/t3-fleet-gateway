@@ -756,6 +756,11 @@ export class JobEngine {
       } catch { /* Missing tool, malformed output or transport error: retain the last known snapshot. */ }
     }
     const seen = observe(job, read, questions, activity);
+    // A later turn may start and finish entirely between idle polls. A repeated failed snapshot
+    // is not recovery, nor is metadata activity (PRs, settlement) on the same failed run.
+    const recovered = job.lastErrorCode === 't3_run_failed' && !seen.errorCode &&
+      (seen.state === 'running' || seen.state === 'needs_input' || seen.anotherTurnFinished);
+    const recoveryEvents = recovered ? [{ type: 'job_recovered', detail: { reason: 'worker_resumed' } }] : [];
     // An idle job's delegated work ended (finished, failed or cancelled) and no turn followed: T3 starts
     // one by itself when a child finishes, but not always (a failed or cancelled child, say), and the job
     // would otherwise sit waiting with nothing to tell the agent.
@@ -778,7 +783,7 @@ export class JobEngine {
       ...(seen.errorCode
         ? { lastErrorCode: seen.errorCode, lastErrorMessage: 'The T3 run failed. Open the thread in T3 for details.' }
         : // A valid observation clears a prior shape error; a failed run clears only once a new turn runs.
-          job.lastErrorCode === 't3_invalid_response' || (seen.state === 'running' && job.lastErrorCode === 't3_run_failed')
+          job.lastErrorCode === 't3_invalid_response' || recovered
           ? { lastErrorCode: null, lastErrorMessage: null }
           : {}),
     };
@@ -790,6 +795,7 @@ export class JobEngine {
         turnRunId: read.thread.activeRunId ?? read.thread.latestRunId,
         events: [
           ...prEvents,
+          ...recoveryEvents,
           ...(seen.anotherTurnFinished ? [{ type: 'turn_finished', detail: { reason: seen.reason } }] : []),
           ...(delegatedEnded ? [{ type: 'delegated_work_ended', detail: { reason: 'no_turn_started' } }] : []),
         ],
@@ -807,7 +813,7 @@ export class JobEngine {
       expected: job,
       turnRunId: read.thread.activeRunId ?? read.thread.latestRunId,
       changes,
-      events: prEvents,
+      events: [...prEvents, ...recoveryEvents],
       detail: { reason: seen.reason, ...(seen.errorCode ? { code: seen.errorCode } : {}) },
     });
   }

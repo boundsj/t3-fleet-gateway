@@ -392,6 +392,14 @@ CREATE TRIGGER thread_action_events_no_delete BEFORE DELETE ON thread_action_eve
     // The version barrier prevents an older sender from ignoring the new filter and broadcasting it.
     sql: 'SELECT 1;',
   },
+  {
+    version: 16,
+    name: 'recoverable worker turn failures',
+    // Reclassify the old representation, not a new worker event. Preserve errors, timestamps,
+    // settlement acknowledgments and immutable outbox payloads. Older builds refuse this ledger.
+    sql: `UPDATE jobs SET state = 'idle', finished_at = NULL
+      WHERE state = 'failed' AND last_error_code = 't3_run_failed' AND t3_thread_id IS NOT NULL;`,
+  },
 ];
 
 /**

@@ -962,6 +962,9 @@ export class JobStore {
       this.#write(job, { lastRunId: sent.runId, ...(next !== job.state ? { lastErrorCode: null, lastErrorMessage: null } : {}) }, now, next, outcome);
       this.#insertEvent(id, next !== job.state ? 'state_changed' : 'followup_sent', job.state, next,
         { reason: next !== job.state ? 'followup' : sent.delivery }, now);
+      if (next !== job.state && job.lastErrorCode === 't3_run_failed') {
+        this.#insertEvent(id, 'job_recovered', job.state, next, { reason: 'worker_resumed' }, now, sent.runId);
+      }
       if (outcome.contended) this.#insertContended(id, next, now);
       if (next !== job.state) this.#logger.info('job.state_changed', { jobId: id, from: job.state, to: next, reason: 'followup' });
       if (resumeToken !== undefined) this.#settleResume(id, resumeToken);

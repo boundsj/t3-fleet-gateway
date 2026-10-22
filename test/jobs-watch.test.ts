@@ -79,7 +79,7 @@ describe('watcher', () => {
     assert.equal(status.latestMessageExcerpt, full.slice(0, 2000), 'the settled message is read again and bounded');
   });
 
-  test('a question or an approval puts the job in needs_input; a failed run fails it', async (t) => {
+  test('a question or an approval puts the job in needs_input; a failed run leaves it recoverable', async (t) => {
     const { fake, agent, tick } = await startJobHarness(t);
     const asking = await startJob(agent);
     const approving = await startJob(agent);
@@ -104,7 +104,7 @@ describe('watcher', () => {
     fake.failRun(fake.threadForJob(approving.jobId).threadId);
     await tick();
     const failed = await agent.call<Status>('work_status', { jobId: approving.jobId });
-    assert.equal(failed.state, 'failed');
+    assert.equal(failed.state, 'idle');
     assert.equal(failed.lastError?.code, 't3_run_failed');
   });
 

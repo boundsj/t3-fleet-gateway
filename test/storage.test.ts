@@ -122,7 +122,7 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 15);
+    assert.equal(SCHEMA_VERSION, 16);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
       after.map(
@@ -551,7 +551,7 @@ CREATE TABLE jobs (
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 15);
+    assert.equal(SCHEMA_VERSION, 16);
     assert.deepEqual(['jobs', 'job_events', 'idempotency_keys'].map((table) => rowsWithoutV12(db, table)), before, 'no existing column changes');
     const added = db.prepare('SELECT workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at FROM jobs ORDER BY rowid').all().map((row) => ({ ...row }));
     assert.deepEqual(added, Array(2).fill({ workspace_kind: null, workspace_root_key: null, workspace_root_held_at: null, workspace_resume_tokens: '[]', probe_attempts: 0, probe_retry_at: null }));
@@ -566,7 +566,7 @@ CREATE TABLE jobs (
     db.prepare("UPDATE jobs SET host_id = 'other' WHERE id = 'legacy0002'").run();
     hold('legacy0002', 'other', 'folder-a');
     assert.throws(() => db.prepare("UPDATE jobs SET workspace_kind = 'checkout' WHERE id = 'legacy0001'").run(), /CHECK/);
-    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 11)), /schema version 15 is newer than this build supports \(11\)/);
+    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 11)), /schema version 16 is newer than this build supports \(11\)/);
     assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
     const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
     t.after(() => fresh.close());
@@ -768,5 +768,32 @@ INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task
   assert.deepEqual(db.prepare('SELECT * FROM operator_scope_events').all(), []);
   assert.throws(() => db.exec("INSERT INTO client_thread_scopes VALUES ('client-a', 'threads:unknown')"), /CHECK/);
   assert.throws(() => migrate(db, MIGRATIONS.slice(0, 13)), /newer than this build supports/);
+  assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
+});
+
+test('migration 16 reopens only worker failures with threads and preserves settlement and history', (t) => {
+  const db = new DatabaseSync(join(tempDir(t), 'recovery-migration.db'));
+  t.after(() => db.close());
+  migrate(db, MIGRATIONS.slice(0, 15));
+  const insert = db.prepare(`INSERT INTO jobs
+    (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode,
+     created_at, updated_at, state_changed_at, finished_at, t3_thread_id, last_error_code)
+    VALUES (?, 'client-a', ?, 'pilot', 'main', ?, 'Synthetic', 'Synthetic', 'b', 'auto', 1, 2, 2, 2, ?, ?)`);
+  insert.run('recover', 'r1', 'failed', 'thread-a', 't3_run_failed');
+  insert.run('missing', 'r2', 'failed', 'thread-b', 'thread_missing');
+  insert.run('cancelled', 'r3', 'cancelled', 'thread-c', 't3_run_failed');
+  insert.run('no-thread', 'r4', 'failed', null, 't3_run_failed');
+  db.exec(`INSERT INTO job_events (job_id, type, from_state, to_state, created_at)
+    VALUES ('recover', 'thread_settled', 'failed', 'failed', 3);`);
+  const history = db.prepare('SELECT * FROM job_events').all();
+  migrate(db);
+  assert.deepEqual(db.prepare('SELECT state, finished_at, last_error_code, updated_at FROM jobs WHERE id = ?').get('recover'),
+    Object.assign(Object.create(null), { state: 'idle', finished_at: null, last_error_code: 't3_run_failed', updated_at: 2 }));
+  assert.deepEqual(db.prepare("SELECT state FROM jobs WHERE id <> 'recover' ORDER BY id").all().map((r) => r.state),
+    ['cancelled', 'failed', 'failed']);
+  assert.deepEqual(db.prepare('SELECT * FROM job_events').all(), history);
+  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 15)), /newer than this build supports/);
+  migrate(db);
+  assert.deepEqual(db.prepare('SELECT * FROM job_events').all(), history);
   assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
 });
