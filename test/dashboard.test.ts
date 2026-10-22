@@ -782,3 +782,132 @@ test('settled jobs do not fill the dashboard attention window; MCP settlement ha
   assert.equal((await snapshot(h.port)).attention.some((item) => item.kind === 'job' && item.ref === later.jobId), false);
   assert.equal(store.attention(h.gw.clock(), DAY, 1)[0]?.id, later.jobId, 'agent feed semantics stay unchanged');
 });
+
+test('observed model failures reach the protected API and both views, and clear only on a successful fetch', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } }, dashboard: { enabled: true } });
+  const port = dashboardPort(h.gw);
+  const { catalog, registry } = h.gw.services;
+  const initial = await snapshot(port);
+  assert.equal(initial.hosts[0]!.signals.some((signal) => signal.kind === 'models'), false);
+  const original = h.fake.providers;
+  h.fake.providers = [{ ...original[0]!, providerInstanceId: 123 } as unknown as typeof original[number]];
+  for (let i = 0; i < 2; i++) {
+    await assert.rejects(catalog.models('main', { refresh: true }), { code: 't3_invalid_response' });
+    h.gw.clock.advance(1000);
+  }
+  await registry.health('main', { fresh: true });
+  let snap = await snapshot(port);
+  const problem = snap.hosts[0]!.signals.find((signal) => signal.kind === 'models')!;
+  assert.equal(problem.code, 't3_invalid_response');
+  assert.equal(problem.problem!.count, 2);
+  assert.equal(snap.hosts[0]!.status.tone, 'bad');
+  const card = snap.attention.find((item) => item.title === 'Model catalog failing on main')!;
+  assert.ok(card);
+  assert.match(card.detail, /First seen:.*Last seen:.*Count: 2/);
+  const app = await loadApp();
+  for (const view of ['overview', 'hosts']) {
+    const doc = new FakeDocument();
+    const root = doc.createElement('div');
+    app.render(doc, root, { snapshot: snap, route: { view, id: null }, error: null, notice: null, loading: false,
+      checking: false, fetchedAt: Date.now(), jobFilter: 'attention' }, { refresh() {}, runChecks() {}, setJobFilter() {}, copy() {} });
+    assert.match(root.textContent, /t3_invalid_response/);
+    assert.match(root.textContent, /Count: 2/);
+  }
+  h.fake.providers = original;
+  await catalog.models('main', { refresh: true });
+  h.fake.failures.set('orchestrator_capabilities', { code: 'synthetic_error', message: 'SYNTHETIC-CREDENTIAL'.repeat(500) });
+  await assert.rejects(catalog.models('main', { refresh: true }));
+  await catalog.models('main'); // A cached success is not a new successful observation.
+  snap = await snapshot(port);
+  assert.equal(snap.hosts[0]!.signals.find((signal) => signal.kind === 'models')!.code, 't3_tool_failed');
+  assert.doesNotMatch(JSON.stringify(snap), /SYNTHETIC-CREDENTIAL/);
+  h.fake.failures.delete('orchestrator_capabilities');
+  await catalog.models('main', { refresh: true });
+  snap = await snapshot(port);
+  assert.equal(snap.attention.some((item) => item.title === 'Model catalog failing on main'), false);
+  assert.equal(snap.hosts[0]!.signals.find((signal) => signal.kind === 'models')!.code, null);
+  assert.equal(snap.hosts[0]!.status.tone, 'good');
+  const denied = await raw(port, { path: '/api/snapshot' });
+  assert.notEqual(denied.status, 200);
+});
+
+test('work start and dispatch failures accumulate per host and recover independently', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } }, dashboard: { enabled: true } });
+  const port = dashboardPort(h.gw);
+  const selection = { instanceId: 'synthetic-provider', model: 'synthetic-model' };
+  h.fake.failures.set('orchestrator_capabilities', { code: 'synthetic_error', message: 'SYNTHETIC-PRIVATE' });
+  for (let i = 0; i < 2; i++) await h.agent.callError('work_start', {
+    project: 'pilot', task: 'Synthetic task', requestId: `bad-start-${i}`, modelSelection: selection,
+  });
+  let snap = await snapshot(port);
+  assert.equal(snap.hosts[0]!.signals.find((signal) => signal.kind === 'start')!.problem!.count, 2);
+  h.fake.failures.delete('orchestrator_capabilities');
+  await startJob(h.agent, 'Synthetic task', { modelSelection: selection });
+  await h.tick();
+  snap = await snapshot(port);
+  assert.equal(snap.hosts[0]!.signals.find((signal) => signal.kind === 'start')!.problem, null);
+  h.fake.failures.set('t3_thread_launch', { code: 'invalid_request', message: 'SYNTHETIC-PRIVATE' });
+  await startJob(h.agent);
+  await h.tick();
+  snap = await snapshot(port);
+  assert.equal(snap.hosts[0]!.signals.find((signal) => signal.kind === 't3_thread_launch')!.problem!.count, 1);
+  h.fake.failures.delete('t3_thread_launch');
+  await startJob(h.agent);
+  await h.tick();
+  snap = await snapshot(port);
+  assert.equal(snap.hosts[0]!.signals.find((signal) => signal.kind === 't3_thread_launch')!.problem, null);
+  assert.doesNotMatch(JSON.stringify(snap), /SYNTHETIC-PRIVATE/);
+});
+
+test('dispatch policy failures are visible without a running job and a later launch clears them', async (t) => {
+  const h = await startJobHarness(t, { maxConcurrentJobs: 4, host: { discovery: { enabled: true } }, dashboard: { enabled: true } });
+  const selection = { instanceId: 'synthetic-provider', model: 'synthetic-model' };
+  await startJob(h.agent, 'Synthetic task one', { modelSelection: selection });
+  await startJob(h.agent, 'Synthetic task two', { modelSelection: selection });
+  const original = h.fake.providers;
+  h.fake.providers = [];
+  await h.tick();
+  let snap = await snapshot(dashboardPort(h.gw));
+  const signal = snap.hosts[0]!.signals.find((entry) => entry.kind === 'dispatch')!;
+  assert.equal(signal.code, 'model_selection_invalid');
+  assert.equal(signal.problem!.count, 2);
+  assert.equal(snap.hosts[0]!.capacity.used, 0);
+  assert.ok(snap.attention.some((entry) => entry.title === 'Dispatch failing on main'));
+  h.fake.providers = original;
+  await startJob(h.agent);
+  await h.tick();
+  snap = await snapshot(dashboardPort(h.gw));
+  assert.equal(snap.hosts[0]!.signals.find((entry) => entry.kind === 'dispatch')!.problem, null);
+});
+
+test('failed project enumeration and unreachable calls keep their own signals until matching recovery', async (t) => {
+  const h = await harness(t);
+  const { catalog, registry } = h.gw.services;
+  h.fake.projectListStuckCursor = 0;
+  await assert.rejects(catalog.projects('main', { refresh: true }), { code: 't3_invalid_response' });
+  assert.equal(registry.signals('main').snapshot().find((entry) => entry.kind === 'projects')!.code, 't3_invalid_response');
+  h.fake.projectListStuckCursor = null;
+  await catalog.projects('main', { refresh: true });
+  await h.fake.stop();
+  await registry.health('main', { fresh: true });
+  let snap = await snapshot(h.port);
+  assert.equal(snap.hosts[0]!.signals.find((entry) => entry.kind === 't3_environment_read')!.code, 'host_unreachable');
+  await h.fake.start();
+  await registry.health('main', { fresh: true });
+  snap = await snapshot(h.port);
+  assert.equal(snap.hosts[0]!.signals.find((entry) => entry.kind === 't3_environment_read')!.problem, null);
+});
+
+test('concurrent catalog callers share one observation and snapshot reads do not discover', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } }, dashboard: { enabled: true } });
+  h.fake.failures.set('orchestrator_capabilities', { code: 'synthetic_error', message: 'Synthetic failure' });
+  const results = await Promise.allSettled(Array.from({ length: 20 }, () => h.gw.services.catalog.models('main', { refresh: true })));
+  assert.ok(results.every((result) => result.status === 'rejected'));
+  assert.equal(h.fake.calls.filter((call) => call === 'orchestrator_capabilities').length, 1);
+  const before = h.fake.calls.length;
+  h.gw.clock.advance(60 * MINUTE);
+  const snap = await snapshot(dashboardPort(h.gw));
+  await snapshot(dashboardPort(h.gw));
+  assert.equal(h.fake.calls.length, before);
+  assert.equal(snap.hosts[0]!.signals.find((signal) => signal.kind === 'models')!.problem!.count, 1);
+});

@@ -1,5 +1,6 @@
 import { configuredModel, isLoopbackHostname, mcpResource, type GatewayConfig, type HostConfig } from '../config.ts';
 import { SCHEMA_VERSION, schemaVersion, type Database } from '../db/database.ts';
+import { SIGNAL_LABELS, type HostSignal } from '../hosts/signals.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import type { EngineStatus } from '../jobs/engine.ts';
 import { displayPullRequests } from '../jobs/pullRequests.ts';
@@ -77,6 +78,7 @@ export interface HostView {
   id: string;
   label: string;
   transportNote: string | null;
+  signals: HostSignal[];
   t3Url: string;
   loopback: boolean;
   status: { tone: Tone; label: string };
@@ -151,6 +153,7 @@ function hostView(sources: DashboardSources, host: HostConfig, counts: Map<strin
   const renewalCode = credential.renewalError ? safeCode(credential.renewalError.code) : null;
   const view: HostView = {
     id: host.id,
+    signals: registry.signals(host.id).snapshot(),
     label: clip(host.label ?? host.id, 80),
     transportNote: host.transportNote ? clip(host.transportNote, 80) : null,
     t3Url: host.t3Url,
@@ -204,6 +207,7 @@ function hostStatus(host: HostView): { tone: Tone; label: string } {
   if (host.reachability.state === 'not_enrolled') return { tone: 'warn', label: 'Not enrolled' };
   if (host.credential.state === 'expired') return { tone: 'bad', label: 'Credential expired' };
   if (host.reachability.state === 'unreachable' || host.engine) return { tone: 'bad', label: 'Unreachable' };
+  if (host.signals.some((signal) => signal.problem)) return { tone: 'bad', label: 'Host problems' };
   if (host.reachability.state === 'unchecked') return { tone: 'unknown', label: 'Not checked' };
   if (host.credential.state === 'renewal_due' || host.credential.renewalError) return { tone: 'warn', label: 'Answering · renewal due' };
   return { tone: 'good', label: 'Answering' };
@@ -436,7 +440,7 @@ function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[
   /** Hosts whose T3 answer is already shown, from a health result at least as new as the last check run, or as an item. */
   const answerShown = new Set<string>();
   for (const host of hosts) {
-    const name = host.label;
+    const name = host.id;
     const checkedAt = host.reachability.checkedAt === null ? null : Date.parse(host.reachability.checkedAt);
     if (checks && checkedAt !== null && checkedAt >= Date.parse(checks.startedAt)) answerShown.add(host.id);
     if (host.reachability.state === 'credential_rejected') {
@@ -459,6 +463,14 @@ function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[
     } else if (host.credential.renewalError) {
       items.push({ tone: 'warn', kind: 'host', ref: host.id, title: `Credential renewal failed for ${name}`, detail: host.credential.renewalError.detail,
         at: host.credential.renewalError.at, action: { kind: 'command', label: 'Diagnose', command: 't3-fleet-gateway doctor' } });
+    }
+    for (const signal of host.signals) {
+      if (!signal.problem) continue;
+      const { firstSeen, lastSeen, count } = signal.problem;
+      items.push({ tone: 'bad', kind: 'host', ref: host.id,
+        title: `${SIGNAL_LABELS[signal.kind]} failing on ${host.id}`,
+        detail: `${signal.code}: ${signal.message} First seen: ${iso(firstSeen)}. Last seen: ${iso(lastSeen)}. Count: ${count}.`,
+        at: iso(lastSeen), action: { kind: 'view', label: 'Host details', view: `hosts/${host.id}` } });
     }
   }
   // The last manual check run's failures and warnings, except what the snapshot shows live: a host's credential and

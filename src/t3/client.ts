@@ -49,6 +49,8 @@ export interface T3ClientOptions {
   /** Current bearer credential for this host, read before every request so renewals apply at once. */
   token: () => string | undefined;
   timeoutMs?: number;
+  /** Completed logical calls only, after retries; no input or response content. */
+  observe?: (name: string, error?: unknown) => void;
 }
 
 export interface CallOptions {
@@ -126,8 +128,10 @@ export class T3Client {
   readonly #timeoutMs: number;
   #connection: Connection | undefined;
   #generation = 0;
+  readonly #observe: T3ClientOptions['observe'];
 
   constructor(options: T3ClientOptions) {
+    this.#observe = options.observe;
     this.hostId = options.hostId;
     this.#url = new URL('/mcp', options.t3Url);
     this.#token = options.token;
@@ -142,6 +146,19 @@ export class T3Client {
    * Only session-level failures replace the connection; a timeout leaves other calls on it running.
    */
   async callTool<T>(name: string, args: Record<string, unknown>, schema: z.ZodType<T>, options: CallOptions = {}): Promise<T> {
+    // CatalogService observes complete catalog validation; optional PR reads are not host-health requirements.
+    const observe = name === 'list_thread_pull_requests' || name === 'orchestrator_capabilities' ? undefined : this.#observe;
+    try {
+      const value = await this.#callTool(name, args, schema, options);
+      observe?.(name);
+      return value;
+    } catch (error) {
+      observe?.(name, error);
+      throw error;
+    }
+  }
+
+  async #callTool<T>(name: string, args: Record<string, unknown>, schema: z.ZodType<T>, options: CallOptions): Promise<T> {
     const timeout = options.timeoutMs ?? this.#timeoutMs;
     for (let attempt = 0; ; attempt++) {
       let sent = false;

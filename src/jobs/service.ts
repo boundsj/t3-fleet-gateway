@@ -411,9 +411,18 @@ export class JobService {
       if (result.created) this.wake();
       return result;
     }
-    const { spec, branchPrefix } = project?.workspaceMode === 'scratch' && input.target?.projectId === undefined
-      ? await this.#scratchLaunch(caller, host, project, input)
-      : await this.#resolveLaunch(caller, host, project, input);
+    const { spec, branchPrefix } = await (async () => {
+      try {
+        const plan = project?.workspaceMode === 'scratch' && input.target?.projectId === undefined
+          ? await this.#scratchLaunch(caller, host, project, input)
+          : await this.#resolveLaunch(caller, host, project, input);
+        this.#registry.signals(host.id).record('start');
+        return plan;
+      } catch (error) {
+        this.#registry.signals(host.id).record('start', error);
+        throw error;
+      }
+    })();
     const id = newJobId();
     const result = this.store.create({
       id,

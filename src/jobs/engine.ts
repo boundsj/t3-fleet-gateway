@@ -517,12 +517,13 @@ export class JobEngine {
   }
 
   #failQueued(job: Job, code: string, message: string): void {
-    this.#options.store.transition(job.id, {
+    const failed = this.#options.store.transition(job.id, {
       from: ['queued'],
       to: 'failed',
       changes: { lastErrorCode: code, lastErrorMessage: message },
       detail: { reason: code, code },
     });
+    if (failed) this.#options.registry.signals(job.hostId).recordCode('dispatch', code);
   }
 
   /** Launch one job's thread. Returns false when no further job should be launched this tick. */
@@ -872,6 +873,7 @@ export class JobEngine {
       store.transition(jobId, { from: ['cancel_requested'], to: 'cancelled', changes, detail });
       return;
     }
+    registry.signals(store.require(jobId).hostId).record('dispatch');
     const changes = { pullRequests: [], ...rest, ...(threadLink ? { threadLink } : {}), lastErrorCode: null, lastErrorMessage: null };
     const gatewayTurn = via === 'launched' && thread.lastRunId !== null
       ? { runId: thread.lastRunId, clientId: store.require(jobId).clientId } : undefined;

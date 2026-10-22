@@ -211,13 +211,13 @@ export class CatalogService {
   }
 
   projects(hostId: string, options: { refresh?: boolean } = {}): Promise<Snapshot<CatalogProject[]>> {
-    return this.#read(this.#projects, hostId, options.refresh === true, async () =>
+    return this.#read(this.#projects, hostId, 'projects', options.refresh === true, async () =>
       sanitizeProjects(hostId, await this.#registry.client(hostId).listProjects()),
     );
   }
 
   models(hostId: string, options: { refresh?: boolean } = {}): Promise<Snapshot<CatalogProvider[]>> {
-    return this.#read(this.#models, hostId, options.refresh === true, async () =>
+    return this.#read(this.#models, hostId, 'models', options.refresh === true, async () =>
       sanitizeCapabilities(hostId, await this.#registry.client(hostId).readCapabilities(), this.#logger),
     );
   }
@@ -227,7 +227,7 @@ export class CatalogService {
     return kind === 'projects' ? this.#projects.get(hostId)?.snapshot : this.#models.get(hostId)?.snapshot;
   }
 
-  #read<T>(entries: Map<string, Entry<T>>, hostId: string, refresh: boolean, fetch: () => Promise<T>): Promise<Snapshot<T>> {
+  #read<T>(entries: Map<string, Entry<T>>, hostId: string, kind: CatalogKind, refresh: boolean, fetch: () => Promise<T>): Promise<Snapshot<T>> {
     this.#registry.host(hostId);
     let entry = entries.get(hostId);
     if (!entry) {
@@ -241,8 +241,13 @@ export class CatalogService {
     const inflight = fetch()
       .then((value) => {
         const snapshot: Snapshot<T> = { id: snapshotId(), fetchedAt: this.#clock(), value };
+        this.#registry.signals(hostId).record(kind);
         current.snapshot = snapshot;
         return snapshot;
+      })
+      .catch((error: unknown) => {
+        this.#registry.signals(hostId).record(kind, error);
+        throw error;
       })
       .finally(() => {
         if (current.inflight === inflight) current.inflight = undefined;
