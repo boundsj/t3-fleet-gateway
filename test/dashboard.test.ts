@@ -850,7 +850,7 @@ test('work start and dispatch failures accumulate per host and recover independe
   await startJob(h.agent);
   await h.tick();
   snap = await snapshot(port);
-  assert.equal(snap.hosts[0]!.signals.find((signal) => signal.kind === 't3_thread_launch')!.problem!.count, 1);
+  assert.equal(snap.hosts[0]!.signals.find((signal) => signal.kind === 't3_thread_launch')!.problem, null);
   h.fake.failures.delete('t3_thread_launch');
   await startJob(h.agent);
   await h.tick();
@@ -910,4 +910,107 @@ test('concurrent catalog callers share one observation and snapshot reads do not
   await snapshot(dashboardPort(h.gw));
   assert.equal(h.fake.calls.length, before);
   assert.equal(snap.hosts[0]!.signals.find((signal) => signal.kind === 'models')!.problem!.count, 1);
+});
+
+test('bad model selections do not create host attention or clear a previous start failure', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } }, dashboard: { enabled: true } });
+  const input = { project: 'pilot', task: 'Synthetic task', modelSelection: { instanceId: 'synthetic-provider', model: 'absent-model' } };
+  await h.agent.callError('work_start', { ...input, requestId: 'bad-selection-1' });
+  let snap = await snapshot(dashboardPort(h.gw));
+  assert.equal(snap.hosts[0]!.signals.some((signal) => signal.kind === 'start'), false);
+  assert.equal(snap.attention.some((item) => item.title.startsWith('Work start failing')), false);
+  h.gw.services.registry.signals('main').recordCode('start', 't3_timeout');
+  const before = h.gw.services.registry.signals('main').snapshot().find((signal) => signal.kind === 'start');
+  h.gw.clock.advance(MINUTE);
+  await h.agent.callError('work_start', { ...input, requestId: 'bad-selection-2' });
+  snap = await snapshot(dashboardPort(h.gw));
+  assert.deepEqual(h.gw.services.registry.signals('main').snapshot().find((signal) => signal.kind === 'start'), before);
+  assert.ok(snap.attention.some((item) => item.title.startsWith('Work start failing')));
+});
+
+test('thread application errors do not flag a host or clear a protocol failure', async (t) => {
+  const h = await harness(t);
+  const client = h.gw.services.registry.client('main');
+  h.fake.failures.set('t3_thread_send', { code: 'not_found', message: 'Synthetic deleted thread' });
+  const send = () => client.sendToThread({ threadId: 'deleted-thread', message: 'Synthetic message', clientRequestId: 'synthetic-send' });
+  await assert.rejects(send());
+  assert.equal(h.gw.services.registry.signals('main').snapshot().some((signal) => signal.kind === 't3_thread_send'), false);
+  h.gw.services.registry.signals('main').recordCode('t3_thread_send', 't3_invalid_response');
+  const before = h.gw.services.registry.signals('main').snapshot().find((signal) => signal.kind === 't3_thread_send');
+  h.gw.clock.advance(MINUTE);
+  await assert.rejects(send());
+  assert.deepEqual(h.gw.services.registry.signals('main').snapshot().find((signal) => signal.kind === 't3_thread_send'), before);
+});
+
+test('reachability cards suppress matching per-call cards but retain catalog and start problems and labels', async (t) => {
+  const label = 'Synthetic\nstudio';
+  const shownLabel = 'Synthetic studio';
+  const h = await startJobHarness(t, { host: { label }, dashboard: { enabled: true } });
+  await h.fake.stop();
+  await h.gw.services.registry.health('main', { fresh: true });
+  h.gw.services.registry.signals('main').recordCode('models', 'host_unreachable');
+  h.gw.services.registry.signals('main').recordCode('start', 'host_unreachable');
+  const snap = await snapshot(dashboardPort(h.gw));
+  assert.ok(snap.attention.some((item) => item.title === `Can't reach ${shownLabel}`));
+  assert.equal(snap.attention.some((item) => item.title.startsWith('Environment read failing')), false);
+  assert.ok(snap.attention.some((item) => item.title === `Model catalog failing on ${shownLabel}`));
+  assert.ok(snap.attention.some((item) => item.title === `Work start failing on ${shownLabel}`));
+});
+
+test('problems older than 24 hours leave Overview and red status but stay muted on Hosts', async (t) => {
+  const h = await harness(t);
+  await h.gw.services.registry.health('main', { fresh: true });
+  const signals = h.gw.services.registry.signals('main');
+  signals.recordCode('t3_thread_interrupt', 't3_timeout');
+  h.gw.clock.advance(DAY);
+  let snap = await snapshot(h.port);
+  assert.ok(snap.attention.some((item) => item.title.startsWith('Thread interrupt failing')));
+  assert.equal(snap.hosts[0]!.status.tone, 'bad');
+  h.gw.clock.advance(1);
+  snap = await snapshot(h.port);
+  assert.equal(snap.attention.some((item) => item.title.startsWith('Thread interrupt failing')), false);
+  assert.equal(snap.hosts[0]!.status.tone, 'good');
+  const stale = snap.hosts[0]!.signals.find((signal) => signal.kind === 't3_thread_interrupt')!;
+  assert.equal(stale.stale, true);
+  assert.equal(stale.problem!.count, 1);
+  const app = await loadApp();
+  const doc = new FakeDocument();
+  const root = doc.createElement('div');
+  app.render(doc, root, { snapshot: snap, route: { view: 'hosts', id: null }, error: null, notice: null, loading: false,
+    checking: false, fetchedAt: Date.now(), jobFilter: 'attention' }, { refresh() {}, runChecks() {}, setJobFilter() {}, copy() {} });
+  assert.ok(root.elements().some((node) => node.attributes.get('class') === 'muted' && /t3_timeout.*Last seen:/.test(node.textContent)));
+  signals.recordCode('t3_thread_interrupt', 't3_timeout');
+  snap = await snapshot(h.port);
+  assert.equal(snap.hosts[0]!.status.tone, 'bad');
+  assert.equal(snap.hosts[0]!.signals.find((signal) => signal.kind === 't3_thread_interrupt')!.stale, false);
+  assert.ok(snap.attention.some((item) => item.title.startsWith('Thread interrupt failing')));
+});
+
+test('credential attention suppresses matching per-call failures while keeping catalog attention', async (t) => {
+  const h = await harness(t);
+  const { registry, db } = h.gw.services;
+  h.fake.revokeAllTokens();
+  await registry.health('main', { fresh: true });
+  registry.signals('main').recordCode('models', 't3_unauthorized');
+  let snap = await snapshot(h.port);
+  assert.equal(snap.hosts[0]!.reachability.state, 'credential_rejected');
+  assert.ok(snap.attention.some((item) => item.title.includes('refuses the gateway')));
+  assert.equal(snap.attention.some((item) => item.title.startsWith('Environment read failing')), false);
+  assert.ok(snap.attention.some((item) => item.title.startsWith('Model catalog failing')));
+
+  await registry.enroll('main');
+  await registry.health('main', { fresh: true });
+  db.prepare('UPDATE host_credentials SET expires_at = ? WHERE host_id = ?').run(h.gw.clock() - 1, 'main');
+  registry.signals('main').recordCode('t3_thread_read', 't3_unauthorized');
+  snap = await snapshot(h.port);
+  assert.ok(snap.attention.some((item) => item.title.includes('credential has expired')));
+  assert.equal(snap.attention.some((item) => item.title.startsWith('Thread read failing')), false);
+
+  db.prepare('DELETE FROM host_credentials WHERE host_id = ?').run('main');
+  await registry.health('main', { fresh: true });
+  registry.signals('main').recordCode('projects', 'host_not_enrolled');
+  snap = await snapshot(h.port);
+  assert.ok(snap.attention.some((item) => item.title.endsWith('is not enrolled')));
+  assert.equal(snap.attention.some((item) => item.title.startsWith('Environment read failing')), false);
+  assert.ok(snap.attention.some((item) => item.title.startsWith('Project catalog failing')));
 });

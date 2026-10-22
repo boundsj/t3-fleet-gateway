@@ -16,6 +16,13 @@ const SIGNAL_CODES = new Set(['host_unreachable', 'host_not_enrolled', 't3_unaut
   'not_found', 'project_not_configured', 'project_not_found', 'model_selection_invalid', 'launch_policy_changed',
   'workspace_probe_failed', 'workspace_probe_unavailable']);
 
+const START_FAILURE_CODES = new Set(['host_unreachable', 'host_not_enrolled', 't3_unauthorized', 't3_timeout',
+  't3_response_lost', 't3_invalid_response', 't3_tool_failed', 'catalog_limit', 'internal_error', 'database_error',
+  'workspace_probe_failed', 'workspace_probe_unavailable']);
+const CALL_FAILURE_CODES = new Set(['host_unreachable', 't3_unauthorized', 't3_timeout', 't3_response_lost', 't3_invalid_response']);
+
+export function isCallSignal(kind: SignalKind): boolean { return kind.startsWith('t3_'); }
+
 export type SignalKind = keyof typeof SIGNAL_LABELS;
 export interface HostSignal {
   kind: SignalKind;
@@ -36,6 +43,9 @@ export class HostSignals {
   }
 
   recordCode(kind: SignalKind, candidate: string | null): void {
+    // Ignored application/caller errors leave the prior observation untouched, including its age and count.
+    if (candidate !== null && ((kind === 'start' && !START_FAILURE_CODES.has(candidate))
+      || (isCallSignal(kind) && !CALL_FAILURE_CODES.has(candidate)))) return;
     const now = this.#clock();
     const previous = this.#values.get(kind);
     const code = candidate === null ? null : SIGNAL_CODES.has(candidate) ? candidate : 'internal_error';

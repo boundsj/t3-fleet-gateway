@@ -36,3 +36,21 @@ test('unknown or hostile codes are replaced, never truncated into display text',
   assert.equal(signals.snapshot()[0]!.code, 'internal_error');
   assert.doesNotMatch(JSON.stringify(signals.snapshot()), /SYNTHETIC-SECRET/);
 });
+
+test('start caller errors and per-call application errors neither create nor clear problems', () => {
+  const clock = testClock();
+  const signals = new HostSignals(clock);
+  const startIgnored = ['model_selection_invalid', 'project_not_found', 'not_found', 'project_not_configured', 'invalid_argument'];
+  const callIgnored = ['not_found', 'invalid_argument', 't3_tool_failed', 'host_not_enrolled', 'internal_error'];
+  for (const [kind, codes] of [['start', startIgnored], ['t3_thread_send', callIgnored]] as const) {
+    for (const code of codes) signals.recordCode(kind, code);
+    assert.equal(signals.snapshot().find((signal) => signal.kind === kind), undefined);
+    signals.recordCode(kind, 't3_timeout');
+    const before = signals.snapshot().find((signal) => signal.kind === kind);
+    clock.advance(1000);
+    for (const code of codes) signals.recordCode(kind, code);
+    assert.deepEqual(signals.snapshot().find((signal) => signal.kind === kind), before);
+    signals.record(kind);
+    assert.equal(signals.snapshot().find((signal) => signal.kind === kind)!.problem, null);
+  }
+});

@@ -1,6 +1,6 @@
 import { configuredModel, isLoopbackHostname, mcpResource, type GatewayConfig, type HostConfig } from '../config.ts';
 import { SCHEMA_VERSION, schemaVersion, type Database } from '../db/database.ts';
-import { SIGNAL_LABELS, type HostSignal } from '../hosts/signals.ts';
+import { isCallSignal, SIGNAL_LABELS, type HostSignal } from '../hosts/signals.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import type { EngineStatus } from '../jobs/engine.ts';
 import { displayPullRequests } from '../jobs/pullRequests.ts';
@@ -78,7 +78,7 @@ export interface HostView {
   id: string;
   label: string;
   transportNote: string | null;
-  signals: HostSignal[];
+  signals: (HostSignal & { stale: boolean })[];
   t3Url: string;
   loopback: boolean;
   status: { tone: Tone; label: string };
@@ -153,7 +153,9 @@ function hostView(sources: DashboardSources, host: HostConfig, counts: Map<strin
   const renewalCode = credential.renewalError ? safeCode(credential.renewalError.code) : null;
   const view: HostView = {
     id: host.id,
-    signals: registry.signals(host.id).snapshot(),
+    signals: registry.signals(host.id).snapshot().map((signal) => ({
+      ...signal, stale: signal.problem !== null && sources.clock() - signal.problem.lastSeen > DAY,
+    })),
     label: clip(host.label ?? host.id, 80),
     transportNote: host.transportNote ? clip(host.transportNote, 80) : null,
     t3Url: host.t3Url,
@@ -207,7 +209,7 @@ function hostStatus(host: HostView): { tone: Tone; label: string } {
   if (host.reachability.state === 'not_enrolled') return { tone: 'warn', label: 'Not enrolled' };
   if (host.credential.state === 'expired') return { tone: 'bad', label: 'Credential expired' };
   if (host.reachability.state === 'unreachable' || host.engine) return { tone: 'bad', label: 'Unreachable' };
-  if (host.signals.some((signal) => signal.problem)) return { tone: 'bad', label: 'Host problems' };
+  if (host.signals.some((signal) => signal.problem && !signal.stale)) return { tone: 'bad', label: 'Host problems' };
   if (host.reachability.state === 'unchecked') return { tone: 'unknown', label: 'Not checked' };
   if (host.credential.state === 'renewal_due' || host.credential.renewalError) return { tone: 'warn', label: 'Answering · renewal due' };
   return { tone: 'good', label: 'Answering' };
@@ -440,7 +442,7 @@ function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[
   /** Hosts whose T3 answer is already shown, from a health result at least as new as the last check run, or as an item. */
   const answerShown = new Set<string>();
   for (const host of hosts) {
-    const name = host.id;
+    const name = host.label;
     const checkedAt = host.reachability.checkedAt === null ? null : Date.parse(host.reachability.checkedAt);
     if (checks && checkedAt !== null && checkedAt >= Date.parse(checks.startedAt)) answerShown.add(host.id);
     if (host.reachability.state === 'credential_rejected') {
@@ -464,11 +466,18 @@ function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[
       items.push({ tone: 'warn', kind: 'host', ref: host.id, title: `Credential renewal failed for ${name}`, detail: host.credential.renewalError.detail,
         at: host.credential.renewalError.at, action: { kind: 'command', label: 'Diagnose', command: 't3-fleet-gateway doctor' } });
     }
+    const coveredCodes = new Set<string>();
+    if (host.reachability.state === 'unreachable' || host.engine) {
+      const code = host.reachability.errorCode ?? host.engine?.errorCode;
+      if (code) coveredCodes.add(code);
+    }
+    if (host.reachability.state === 'credential_rejected' || host.credential.state === 'expired') coveredCodes.add('t3_unauthorized');
+    if (host.reachability.state === 'not_enrolled') coveredCodes.add('host_not_enrolled');
     for (const signal of host.signals) {
-      if (!signal.problem) continue;
+      if (!signal.problem || signal.stale || (isCallSignal(signal.kind) && signal.code && coveredCodes.has(signal.code))) continue;
       const { firstSeen, lastSeen, count } = signal.problem;
       items.push({ tone: 'bad', kind: 'host', ref: host.id,
-        title: `${SIGNAL_LABELS[signal.kind]} failing on ${host.id}`,
+        title: `${SIGNAL_LABELS[signal.kind]} failing on ${host.label}`,
         detail: `${signal.code}: ${signal.message} First seen: ${iso(firstSeen)}. Last seen: ${iso(lastSeen)}. Count: ${count}.`,
         at: iso(lastSeen), action: { kind: 'view', label: 'Host details', view: `hosts/${host.id}` } });
     }
