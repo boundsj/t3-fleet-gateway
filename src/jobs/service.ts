@@ -168,6 +168,17 @@ function rootBusy(job: Job): GatewayError {
   );
 }
 
+/** Client imports/resumes need positive evidence that this is a normal, unarchived conversation. */
+function requireExternalEligibility(thread: ThreadRead['thread']): void {
+  const relation = thread.relationshipToParent;
+  if (thread.archived === undefined || (relation !== null && relation !== 'fork' && relation !== 'subagent')) {
+    throw new GatewayError('t3_invalid_response', 'T3 did not report known archive and lineage metadata. Client adoption/resume is unavailable for this thread.');
+  }
+  if (thread.archived || relation === 'subagent') {
+    throw new GatewayError('job_state_conflict', 'Archived and delegated child threads cannot be adopted or resumed; use the parent thread in T3.');
+  }
+}
+
 /** A stable hash of a tool's meaningful input, for request-id idempotency. */
 export function inputHash(tool: string, input: Record<string, unknown>): string {
   const keys = Object.keys(input).sort();
@@ -336,7 +347,8 @@ export class JobService {
     const { thread } = await this.#registry.client(job.hostId).readThread({
       threadId: job.threadId, view: 'messages', limit: 1, runLimit: 1, maxCharsPerItem: 1,
     });
-    if (thread.threadId !== job.threadId || thread.projectId !== job.t3ProjectId || thread.archived || thread.relationshipToParent === 'subagent') {
+    requireExternalEligibility(thread);
+    if (thread.threadId !== job.threadId || thread.projectId !== job.t3ProjectId) {
       throw new GatewayError('job_state_conflict', 'The imported thread changed project or is no longer a resumable thread. Check it in T3.');
     }
     const projects = (await this.#catalog.projects(job.hostId, { refresh: true })).value;
@@ -797,9 +809,7 @@ export class JobService {
     if (adoption && (thread.threadId !== input.threadId || thread.projectId !== projectId)) {
       throw new GatewayError('not_found', 'No thread in that project.');
     }
-    if (adoption && (thread.archived || thread.relationshipToParent === 'subagent')) {
-      throw new GatewayError('job_state_conflict', 'Archived and delegated child threads cannot be adopted; use the parent thread in T3.');
-    }
+    if (adoption) requireExternalEligibility(thread);
     if (thread.projectId !== projectId) {
       throw new GatewayError(
         'invalid_argument',
@@ -1078,6 +1088,9 @@ export class JobService {
             ? 'The job is waiting for a permission approval, which only the operator can give in T3.'
             : 'The job has no pending questions.';
       throw new GatewayError('not_found', `That request is not pending on job ${job.id}. ${hint}`);
+    }
+    if (job.origin === 'adopted' && isTerminal(this.store.require(job.id).state)) {
+      throw new GatewayError('job_state_conflict', 'The adopted job was released while its question was being checked. Nothing was sent.');
     }
     // An answer starts the worker again: an idle root job takes its folder back first (see continue).
     const attempt = job.state === 'idle' ? this.store.reserveRoot(job.id, `respond:${input.requestId}`) : ({ kind: 'not_needed' } as const);

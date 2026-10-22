@@ -704,7 +704,9 @@ export class JobStore {
       }
       const existing = adoption ? this.jobForThread(job.hostId, job.threadId) : this.openJobForThread(job.threadId, job.hostId);
       if (existing) {
-        if (existing.standing && existing.projectAlias === job.projectAlias && (!adoption || existing.origin === 'adopted')) {
+        if (existing.standing && (adoption
+          ? existing.origin === 'adopted' && existing.t3ProjectId === job.t3ProjectId
+          : existing.projectAlias === job.projectAlias)) {
           if (adoption) this.claimIdempotencyKey(adoption.clientId, 'work_adopt', adoption.requestId, { inputHash: adoption.inputHash, jobId: existing.id });
           return { job: existing, created: false };
         }

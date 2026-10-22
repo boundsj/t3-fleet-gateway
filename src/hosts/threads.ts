@@ -85,7 +85,7 @@ export class ThreadCatalog {
           throw new GatewayError('t3_invalid_response', 'The thread catalog contains duplicate or invalid ids. Refresh it.');
         }
         ids.add(thread.threadId);
-        threads.push({ threadId: thread.threadId, title: cleanThreadTitle(thread.title), state: thread.status.slice(0, 80),
+        threads.push({ threadId: thread.threadId, title: cleanThreadTitle(thread.title), state: cleanThreadTitle(thread.status).slice(0, 80),
           lastActivityAt: isoDate(thread.updatedAt), settled: thread.settled ?? null, settledAt: isoDate(thread.settledAt), archived: thread.archived ?? null });
       }
       if (JSON.stringify(threads).length > MAX_CATALOG_CHARS) throw limit();

@@ -295,3 +295,40 @@ test('release during an adopted resume preflight prevents the later send', async
   assert.equal((await sending).code, 'job_state_conflict');
   assert.equal(h.fake.sends.length, 0);
 });
+
+test('overlapping adoptions deduplicate by host/thread even if project-to-alias mapping changes during their reads', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } },
+    pilot: { t3ProjectId: undefined, t3ProjectTitle: 'Synthetic project 1' } });
+  grant(h);
+  const threadId = external(h);
+  h.fake.holdResponses.add('t3_thread_read');
+  const first = h.agent.call<Adoption>('work_adopt', { ...target, threadId, requestId: 'adopt-before-rename' });
+  await h.fake.whenHeld('t3_thread_read');
+  // The first adopter classified the alias already; the second sees the same project with a changed title.
+  h.fake.projects[0]!.title = 'Synthetic renamed project';
+  h.fake.holdResponses.delete('t3_thread_read');
+  const second = await h.agent.call<Adoption>('work_adopt', { ...target, threadId, requestId: 'adopt-after-rename' });
+  h.fake.releaseHeld();
+  const replay = await first;
+  assert.equal(second.created, true);
+  assert.equal(replay.created, false);
+  assert.equal(replay.job.jobId, second.job.jobId);
+  assert.equal(h.gw.services.jobs.store.list({ limit: 10 }).length, 1);
+});
+
+test('client adoption/resume fails closed when archive or lineage metadata is missing or unfamiliar', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } } });
+  grant(h);
+  const threadId = external(h);
+  for (const metadata of [{ archived: undefined }, { relationshipToParent: undefined }, { relationshipToParent: 'synthetic-future-lineage' }]) {
+    h.fake.threadDetailOverrides.set(threadId, metadata);
+    assert.equal((await h.agent.callError('work_adopt', { ...target, threadId, requestId: 'metadata' })).code, 't3_invalid_response');
+    assert.equal(h.gw.services.jobs.store.list({ limit: 10 }).length, 0);
+  }
+  h.fake.threadDetailOverrides.delete(threadId);
+  const { job } = await h.agent.call<Adoption>('work_adopt', { ...target, threadId, requestId: 'metadata' });
+  h.fake.threadDetailOverrides.set(threadId, { archived: undefined });
+  assert.equal((await h.agent.callError('work_continue', { jobId: job.jobId, message: 'Synthetic', requestId: 'missing-metadata' })).code, 't3_invalid_response');
+  assert.equal(h.fake.sends.length, 0);
+  await h.agent.call('work_status', { jobId: job.jobId });
+});

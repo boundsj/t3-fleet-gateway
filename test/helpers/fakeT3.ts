@@ -252,6 +252,8 @@ export class FakeT3 {
   readonly statusOnce = new Map<string, number>();
   /** Threads whose t3_thread_read answers in a shape that does not match T3's schema. */
   readonly brokenReads = new Set<string>();
+  /** Synthetic older/malformed detail fields, applied before the MCP result is serialized. */
+  readonly threadDetailOverrides = new Map<string, Record<string, unknown>>();
   /** Thread id to a T3 failure returned by t3_thread_read for that thread only. */
   readonly readFailures = new Map<string, { code: string; message: string }>();
   /**
@@ -1014,6 +1016,7 @@ export class FakeT3 {
         runCount: thread.runs.length,
         pendingRequestCount: thread.questions.size + thread.approvalsPending,
         archived: thread.archived ?? false,
+        ...this.threadDetailOverrides.get(thread.threadId),
       },
       recentRuns: thread.runs.slice(-(input.runLimit ?? 10)).reverse(),
       items: page.map((item) => ({
