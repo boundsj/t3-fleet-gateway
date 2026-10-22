@@ -138,7 +138,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   const { config, logger } = services;
   const management = new WebhookManagement(services.webhooks, config, services.clock, logger, () => {
     if (options.webhookSender?.autoStart !== false) webhooks.start();
-  }, options.webhookManagement);
+  }, options.webhookManagement, { catalog: services.catalog, registry: services.registry });
   const mcp = createMcpEndpoint({
     publicUrl: config.publicUrl,
     allowedOrigins: config.allowedOrigins,

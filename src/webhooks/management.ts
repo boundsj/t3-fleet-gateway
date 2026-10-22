@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { validateHeaderValue } from 'node:http';
 import * as z from 'zod';
 import type { GatewayConfig } from '../config.ts';
+import type { CatalogService } from '../hosts/catalog.ts';
+import type { HostRegistry } from '../hosts/registry.ts';
 import type { Logger } from '../log.ts';
 import type { Clock } from '../time.ts';
 import { authHeaderAllowed, destinationAllowed, type WebhookRoute } from './config.ts';
@@ -10,12 +12,11 @@ import { WebhookConnectionError, type AttemptResult, type WebhookStore } from '.
 
 const MAX_OPERATIONS = 128;
 const MAX_IN_FLIGHT = 4;
-const MAX_PROJECTS = 100;
 const common = { session: z.uuid(), requestId: z.uuid() };
 const target = { id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), revision: z.uuid() };
 const destination = { url: z.string().min(1).max(4096), authHeader: z.string().min(1).max(8322) };
 const inputs = {
-  connect: z.strictObject({ ...common, ...destination, project: z.string().min(1).max(300) }),
+  connect: z.strictObject({ ...common, ...destination, project: z.string().min(1).max(1000) }),
   replace: z.strictObject({ ...common, ...target, ...destination, url: destination.url.optional() }),
   test: z.strictObject({ ...common, ...target }),
   disconnect: z.strictObject({ ...common, ...target }),
@@ -58,6 +59,7 @@ export class WebhookManagement {
   readonly #logger: Logger;
   readonly #wake: () => void;
   readonly #options: ManagementOptions;
+  readonly #discovery?: { catalog: CatalogService; registry: HostRegistry };
   readonly #abort = new AbortController();
   readonly #operations = new Map<string, { digest: string; result: Promise<ManagementResult> }>();
   readonly #pending = new Set<Promise<ManagementResult>>();
@@ -65,7 +67,9 @@ export class WebhookManagement {
   #ready = false;
   #network = 0;
 
-  constructor(store: WebhookStore, config: GatewayConfig, clock: Clock, logger: Logger, wake: () => void, options: ManagementOptions = {}) {
+  constructor(store: WebhookStore, config: GatewayConfig, clock: Clock, logger: Logger, wake: () => void, options: ManagementOptions = {},
+    discovery?: { catalog: CatalogService; registry: HostRegistry }) {
+    this.#discovery = discovery;
     this.#store = store; this.#config = config; this.#clock = clock; this.#logger = logger; this.#wake = wake; this.#options = options;
   }
   ready(): void { if (!this.#abort.signal.aborted) this.#ready = true; }
@@ -80,9 +84,29 @@ export class WebhookManagement {
     }
     return {
       session: this.#session,
-      projects: this.#config.projects.slice(0, MAX_PROJECTS).map(({ alias, host }) => ({ alias, host })),
+      projects: this.#config.projects.map(({ alias, host }) => ({ alias, host })),
       connections: this.#store.listConnections(),
     };
+  }
+
+  /** Operator-requested discovery only. A failed host never discards another host's projects. */
+  async discoverList() {
+    const base = this.list();
+    const projects: { alias: string; host: string; projectId?: string; name?: string }[] = [...base.projects];
+    const hosts = await Promise.all(this.#config.hosts.map(async (host) => {
+      if (!host.discovery.enabled || !this.#discovery) return { host: host.id, status: 'discovery_disabled' };
+      if (this.#discovery.registry.credentialStatus(host.id).state === 'missing') return { host: host.id, status: 'unavailable' };
+      try {
+        const snapshot = await this.#discovery.catalog.projects(host.id);
+        return { host: host.id, status: 'available', projects: snapshot.value };
+      } catch { return { host: host.id, status: 'unavailable' }; }
+    }));
+    for (const host of hosts) {
+      for (const project of host.projects ?? []) {
+        projects.push({ alias: JSON.stringify([host.host, project.id]), host: host.host, projectId: project.id, name: project.name });
+      }
+    }
+    return { ...base, projects, hosts: hosts.map(({ host, status }) => ({ host, status })) };
   }
 
   execute(action: WebhookAction, input: unknown): Promise<ManagementResult> {
@@ -125,10 +149,11 @@ export class WebhookManagement {
       return { status: 200, body: { ok: true, code: 'disconnected' } };
     }
     let route: WebhookRoute;
-    let project: { alias: string; host: string } | undefined;
+    let project: { alias: string; host: string; projectId?: string } | undefined;
     let id: string;
     if (action === 'connect' && 'project' in data) {
-      project = this.#config.projects.slice(0, MAX_PROJECTS).find((p) => p.alias === data.project);
+      project = this.#config.projects.find((p) => p.alias === data.project);
+      if (!project) project = (await this.discoverList()).projects.find((p) => p.alias === data.project);
       if (!project) return failure(400, 'project_not_found');
       id = `ui-${data.requestId}`;
       if (this.#config.webhooks.subscriptions.some((s) => s.id === id)) return failure(409, 'file_managed');
@@ -157,7 +182,7 @@ export class WebhookManagement {
       // Preserve the existing route and its revision; a failed replacement is never activated.
       return failure(502, 'ping_failed', test);
     } else if (action === 'connect' && project) {
-      this.#store.connectDashboard(id, project.alias, project.host, route, record);
+      this.#store.connectDashboard(id, project.alias, project.host, route, record, project.projectId);
       this.#wake();
     } else if (action === 'replace' && 'revision' in data) {
       this.#store.replaceDashboard(id, data.revision, route, record);

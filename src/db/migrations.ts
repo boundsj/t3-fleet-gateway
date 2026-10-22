@@ -349,6 +349,13 @@ CREATE UNIQUE INDEX jobs_workspace_root_held ON jobs(host_id, workspace_root_key
     sql: `ALTER TABLE jobs ADD COLUMN pull_requests TEXT;
 ALTER TABLE jobs ADD COLUMN pull_requests_checked_at INTEGER;`,
   },
+  {
+    version: 14,
+    name: 'host and project webhook targets',
+    // Settings gain optional paired targets. Existing alias filters, routes, revisions and queues stay byte-for-byte intact.
+    // The version barrier prevents an older sender from ignoring the new filter and broadcasting it.
+    sql: 'SELECT 1;',
+  },
 ];
 
 /**

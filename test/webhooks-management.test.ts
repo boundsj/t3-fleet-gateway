@@ -357,3 +357,56 @@ describe('private webhook connection management', () => {
     assert.equal(f.target.receipts.length, 0);
   });
 });
+
+test('all enrolled discovery hosts are listed; a remote alias and direct target deliver only to their host/project connections', async (t) => {
+  const { startFakeT3 } = await import('./helpers/fakeT3.ts');
+  const { connectAgent } = await import('./helpers/jobs.ts');
+  const hostA = await startFakeT3(); t.after(() => hostA.close());
+  const hostB = await startFakeT3(); t.after(() => hostB.close());
+  const sink = await receiver(t);
+  const gw = await startTestGateway(t, {
+    config: { ...CONFIG,
+      hosts: [
+        { id: 'host-a', t3Url: hostA.url, mintPairingCode: hostA.mintCommand(), discovery: { enabled: true, allowWorkStart: true } },
+        { id: 'host-b', t3Url: hostB.url, mintPairingCode: hostB.mintCommand(), discovery: { enabled: true, allowWorkStart: true } },
+        { id: 'host-c', t3Url: 'http://127.0.0.1:9', discovery: { enabled: true } },
+      ],
+      projects: [{ alias: 'remote', host: 'host-b', t3ProjectId: 'project-1' }],
+    }, jobEngine: { autoStart: false }, webhookSender: { autoStart: false }, webhookManagement: { allowLoopbackHttp: true },
+  });
+  await gw.services.registry.enroll('host-a');
+  await gw.services.registry.enroll('host-b');
+  const api = access(gw);
+  const list = await api.list();
+  const discovered = list.projects as { alias: string; host: string; projectId?: string }[];
+  assert.ok(discovered.some((p) => p.alias === 'remote'));
+  for (const host of ['host-a', 'host-b']) {
+    for (const projectId of ['project-1', 'project-2']) {
+      const choice = discovered.find((p) => p.host === host && p.projectId === projectId)!;
+      assert.ok(choice);
+      const connected = await api.post('connect', { session: list.session, requestId: randomUUID(), project: choice.alias,
+        url: `${sink.origin}/${host}/${projectId}`, authHeader: HEADER });
+      assert.equal(connected.status, 200, connected.text);
+    }
+  }
+  const rawList = JSON.parse((await raw(api.port, '/fleet/api/webhooks', 'GET', API)).text);
+  assert.deepEqual(rawList.hosts.find((h: { host: string }) => h.host === 'host-c'), { host: 'host-c', status: 'unavailable' });
+  const agent = await connectAgent(t, gw);
+  const alias = await agent.call<{ job: { jobId: string } }>('work_start', { project: 'remote', task: 'Synthetic alias task', requestId: 'alias-start' });
+  const direct = await agent.call<{ job: { jobId: string } }>('work_start', { target: { host: 'host-b', projectId: 'project-2' },
+    task: 'Synthetic discovered task', requestId: 'direct-start' });
+  await gw.gateway.engine.tick();
+  for (const job of [alias.job, direct.job]) hostB.finishTurn(hostB.threadForJob(job.jobId).threadId, 'Synthetic result');
+  await gw.gateway.engine.tick();
+  await gw.gateway.webhooks.tick();
+  const events = sink.receipts.filter((r) => r.payload.type !== 'ping');
+  assert.deepEqual(events.map((r) => r.path).sort(), ['/host-b/project-1', '/host-b/project-2']);
+  assert.deepEqual(events.map((r) => r.payload.jobId).sort(), [alias.job.jobId, direct.job.jobId].sort());
+  assert.ok(events.every((r) => r.payload.host === 'host-b' && r.payload.type === 'idle'));
+  await hostA.stop();
+  gw.clock.advance(31_000);
+  const degraded = JSON.parse((await raw(api.port, '/fleet/api/webhooks', 'GET', API)).text);
+  assert.equal(degraded.hosts.find((h: { host: string }) => h.host === 'host-a').status, 'unavailable');
+  assert.ok(degraded.projects.some((p: { host: string; projectId?: string }) => p.host === 'host-b' && p.projectId === 'project-2'));
+  assert.ok(degraded.projects.some((p: { alias: string }) => p.alias === 'remote'));
+});

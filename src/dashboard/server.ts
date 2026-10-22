@@ -169,9 +169,9 @@ export function dashboardHandler(options: DashboardOptions, port: () => number):
   ];
   if (options.management) {
     const management = options.management;
-    routes.push({ path: `${base}/api/webhooks`, methods: { GET: (req, res) => {
+    routes.push({ path: `${base}/api/webhooks`, methods: { GET: async (req, res) => {
       if (!apiRequest(req, res)) return;
-      sendJson(res, 200, management.list(), { 'cache-control': 'no-store' });
+      sendJson(res, 200, await management.discoverList(), { 'cache-control': 'no-store' });
     } } });
     for (const action of ['connect', 'replace', 'test', 'disconnect'] as const) {
       routes.push({ path: `${base}/api/webhooks/${action}`, methods: { POST: async (req, res) => {
