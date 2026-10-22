@@ -591,6 +591,16 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
           kv([
             ['Last check', r.checkedAt ? time(r.checkedAt) : h('span', { class: 'muted' }, 'none yet')],
             ['Result', pill(reachTone, REACH_LABELS[r.state] ?? r.state)],
+            ['Model catalog', (() => {
+              const signal = host.signals?.find((entry) => entry.kind === 'models');
+              if (!signal) return h('span', { class: 'muted' }, 'not observed');
+              const tone = signal.stale ? 'unknown' : signal.problem ? 'bad' : 'good';
+              const label = signal.stale ? `Last failure: ${signal.code}` : signal.code ?? 'OK';
+              return [pill(tone, label), ' checked ', time(new Date(signal.checkedAt).toISOString())];
+            })()],
+            ...(host.signals ?? []).filter((signal) => signal.problem).map((signal) =>
+              [signal.kind, h('span', { class: signal.stale ? 'muted' : '' }, tag(signal.code, true), ` ${signal.message} Count: ${signal.problem.count}. First seen: `,
+                time(new Date(signal.problem.firstSeen).toISOString()), ' Last seen: ', time(new Date(signal.problem.lastSeen).toISOString()))]),
             r.t3Version ? ['T3 version', r.t3Version] : null,
             r.errorCode ? ['Code', tag(r.errorCode, true)] : null,
             host.engine ? ['Engine retries', ['next ', time(host.engine.nextAttemptAt)]] : null,
