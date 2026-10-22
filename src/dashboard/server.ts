@@ -57,13 +57,14 @@ interface Asset {
 const ASSET_TYPES: Record<string, string> = {
   'index.html': 'text/html; charset=utf-8',
   'app.js': 'text/javascript; charset=utf-8',
+  'threadId.js': 'text/javascript; charset=utf-8',
   'app.css': 'text/css; charset=utf-8',
   'mark.svg': 'image/svg+xml',
 };
 
 function loadAssets(): Map<string, Asset> {
   return new Map(Object.entries(ASSET_TYPES).map(([name, type]) => {
-    const body = readFileSync(new URL(`./assets/${name}`, import.meta.url));
+    const body = readFileSync(new URL(name === 'threadId.js' ? '../threadId.js' : `./assets/${name}`, import.meta.url));
     return [name, { body, type, etag: `"${createHash('sha256').update(body).digest('base64url').slice(0, 22)}"` }];
   }));
 }
@@ -163,6 +164,7 @@ export function dashboardHandler(
   const routes: Route[] = [
     { path: `${base}/`, methods: page('index.html', 'no-store') },
     { path: `${base}/assets/app.js`, methods: page('app.js', 'no-cache') },
+    { path: `${base}/assets/threadId.js`, methods: page('threadId.js', 'no-cache') },
     { path: `${base}/assets/app.css`, methods: page('app.css', 'no-cache') },
     { path: `${base}/assets/mark.svg`, methods: page('mark.svg', 'no-cache') },
     {

@@ -1,3 +1,4 @@
+import { isThreadLink } from '../threadId.js';
 import { ACTIVE_RUN_STATUSES, THREAD_STATUSES, type ThreadItem, type ThreadRead } from '../t3/schemas.ts';
 import type { JobState } from './states.ts';
 import type { Job } from './store.ts';
@@ -151,6 +152,7 @@ export interface Observation {
 export function threadLinkTarget(link: string): string | null {
   const text = link.trim();
   const target = /\]\(([^()\s]+)\)$/.exec(text)?.[1] ?? text;
+  if (isThreadLink(target)) return target;
   if (target.length > MAX_LINK_CHARS) return null;
   try {
     return LINK_SCHEMES.has(new URL(target).protocol) ? target : null;

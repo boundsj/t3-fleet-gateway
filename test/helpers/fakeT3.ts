@@ -269,6 +269,8 @@ export class FakeT3 {
   scratchProjectId = 'project-1';
   /** When set, t3_thread_launch creates the thread but starts no run on it (thread `idle`, no runs). */
   launchWithoutRun = false;
+  /** A synthetic T3-minted id for the next launch. */
+  nextThreadId: string | undefined;
   /** Older T3 versions supplied links; current published thread tools omit them. */
   legacyThreadLinks = false;
   /** When set, interrupts are accepted but take effect only on completeInterrupts(). */
@@ -276,6 +278,8 @@ export class FakeT3 {
   /** When set, an interrupt leaves the thread's pending questions listed (T3 may keep them). */
   keepQuestionsOnInterrupt = false;
   readonly threads = new Map<string, FakeThread>();
+  /** Synthetic raw pages, including malformed entries and offset-page movement. */
+  readonly threadListPages = new Map<number, Record<string, unknown>>();
   readonly sends: { threadId: string; message: string; clientRequestId: string | null }[] = [];
   readonly responses: { threadId: string; requestId: string; answers: Record<string, unknown> }[] = [];
   #sequence = 0;
@@ -719,6 +723,8 @@ export class FakeT3 {
       return this.brokenReads.has(input.threadId) ? { thread: { threadId: input.threadId } } : this.#read(input);
     });
     tool('t3_thread_list', listInput, (input) => {
+      const overridden = this.threadListPages.get(input.cursor ?? 0);
+      if (overridden) return overridden;
       const projectId = this.#target(input.projectId);
       const matching = [...this.threads.values()]
         .filter(
@@ -902,7 +908,8 @@ export class FakeT3 {
     if (!input.modelSelection && !project.defaultModelSelection) {
       throw new FakeFailure('invalid_request', 'Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.');
     }
-    const threadId = `thread-${this.threads.size + 1}`;
+    const threadId = this.nextThreadId ?? `thread-${this.threads.size + 1}`;
+    this.nextThreadId = undefined;
     const now = new Date().toISOString();
     const strategy = input.workspaceStrategy;
     const thread: FakeThread = {

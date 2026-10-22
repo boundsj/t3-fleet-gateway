@@ -38,11 +38,11 @@ const LAUNCH = {
 describe('T3 result parsing', () => {
   const schema = z.object({ value: z.number() });
 
-  test('builds a link from an opaque thread id without URL encoding and still rejects invalid fields', () => {
+  test('encodes an opaque thread id in generated links and still rejects invalid fields', () => {
     const result = { threadId: 'mcp:synthetic-thread', projectId: 'project-1', runId: null, status: 'preparing' };
     for (const payload of [result, { ...result, link: null }]) {
       for (const response of [{ structuredContent: payload }, { content: [{ type: 'text', text: JSON.stringify(payload) }] }]) {
-        assert.equal(parseToolResult('t3_thread_launch', response, launchResultSchema).link, 't3-thread://v1/mcp:synthetic-thread');
+        assert.equal(parseToolResult('t3_thread_launch', response, launchResultSchema).link, 't3-thread://v1/mcp%3Asynthetic-thread');
       }
     }
     for (const payload of [{ ...result, projectId: null }, { ...result, link: 42 }]) {

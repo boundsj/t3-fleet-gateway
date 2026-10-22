@@ -1,3 +1,4 @@
+import { isThreadId } from '../threadId.js';
 import { configuredModel, RUNTIME_MODES, runtimeModeAllowed, type GatewayConfig, type HostConfig, type ProjectConfig } from '../config.ts';
 import { sha256Hex } from '../crypto.ts';
 import { describeError, GatewayError } from '../errors.ts';
@@ -784,6 +785,7 @@ export class JobService {
    * (`created: false`).
    */
   async adopt(input: AdoptInput): Promise<{ job: Job; created: boolean }> {
+    if (!isThreadId(input.threadId)) throw new GatewayError('invalid_argument', 'Invalid T3 thread id.');
     const project = this.project(input.project);
     const existing = this.store.openJobForThread(input.threadId, project.host);
     if (existing?.standing && existing.projectAlias === project.alias) return { job: existing, created: false };
@@ -873,6 +875,7 @@ export class JobService {
   async adoptExternal(caller: Caller, input: { host: string; projectId: string; threadId: string; requestId: string }): Promise<{ job: Job; created: boolean }> {
     this.#requireThreadScope(caller, 'operate');
     const host = this.#hostFor(caller, input.host, 'operate');
+    if (!isThreadId(input.threadId)) throw new GatewayError('invalid_argument', 'Invalid T3 thread id.');
     const hash = inputHash('work_adopt', { host: input.host, projectId: input.projectId, threadId: input.threadId });
     const key = this.store.idempotencyKey(caller.clientId, 'work_adopt', input.requestId);
     if (key) {

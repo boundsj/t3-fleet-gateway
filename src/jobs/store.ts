@@ -632,7 +632,7 @@ export class JobStore {
     if (job.origin === 'gateway' || job.threadId === null) return;
     this.#db.prepare('INSERT INTO thread_action_events (client_id, host_id, thread_id, job_id, action, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(clientId, job.hostId, job.threadId, job.id, action, this.#clock());
-    this.#logger.info('threads.control', { clientId, hostId: job.hostId, threadId: job.threadId, jobId: job.id, action });
+    this.#logger.info('threads.control', { clientId, hostId: job.hostId, jobId: job.id, action });
   }
 
   /** Open standing jobs, oldest first; all of them, or one project's. */

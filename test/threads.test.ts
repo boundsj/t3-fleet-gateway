@@ -1,3 +1,4 @@
+import { threadLink } from '../src/threadId.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { runCli } from '../src/cli/main.ts';
@@ -143,7 +144,7 @@ test('adopted threads use uniform control, messages and feed; cancel interrupts 
   }
   const audits = h.gw.logs.map((line) => JSON.parse(line)).filter((entry) => entry.event === 'threads.control');
   for (const action of ['adopt', 'continue', 'respond', 'settle', 'interrupt']) {
-    assert.ok(audits.some((entry) => entry.action === action && entry.clientId === h.agent.clientId && entry.hostId === 'main' && entry.threadId === threadId), action);
+    assert.ok(audits.some((entry) => entry.action === action && entry.clientId === h.agent.clientId && entry.hostId === 'main' && entry.jobId === job.jobId), action);
   }
   const calls = h.fake.calls.length;
   assert.equal(h.gw.services.jobs.release(job.jobId).job.state, 'released');
@@ -398,4 +399,121 @@ test('client adoption/resume fails closed when archive or lineage metadata is mi
   assert.equal((await h.agent.callError('work_continue', { jobId: job.jobId, message: 'Synthetic', requestId: 'missing-metadata' })).code, 't3_invalid_response');
   assert.equal(h.fake.sends.length, 0);
   await h.agent.call('work_status', { jobId: job.jobId });
+});
+
+const uuid = '11111111-2222-4333-8444-555555555555';
+const realisticIds = [uuid, `mcp:${uuid}`, `thread:provider:codex:native-thread:${uuid}`,
+  `thread:provider:claudeAgent:native-thread:provider-thread%3Apending%253Arun%253A${uuid}`,
+  `thread:delegated-task:command%3Amcp%3A${uuid}%3Adelegate-task%3Asynthetic`,
+  'thread:mcp:synthetic%3Anamespace:synthetic-key:0'];
+function summary(threadId: string, title = 'Synthetic thread', updatedAt = '2026-01-01T00:00:00Z') {
+  return { threadId, title, updatedAt, status: 'idle', latestRunId: null, createdAt: '2026-01-01T00:00:00Z' };
+}
+
+test('thread catalog accepts T3 minted ids and skips malformed entries with one content-free warning', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } } });
+  grant(h);
+  const malformed = [null, {}, summary('bad/id'), summary('bad\nvalue'), { ...summary('missing-title'), title: undefined },
+    { ...summary('bad-status'), status: 42 }];
+  const threads = [...realisticIds.map((id) => summary(id)), ...malformed];
+  h.fake.threadListPages.set(0, { projectId: target.projectId, threads, total: threads.length, nextCursor: null });
+  const page = await h.agent.call<Page>('fleet_threads', target);
+  assert.deepEqual(page.threads.map((thread) => thread.threadId), realisticIds);
+  assert.equal(page.total, realisticIds.length);
+  const warnings = h.gw.logs.map((line) => JSON.parse(line)).filter((line) => line.event === 'catalog.threads_skipped');
+  assert.deepEqual(warnings.map(({ time, ...line }) => line), [{ level: 'warn', event: 'catalog.threads_skipped', hostId: 'main', count: malformed.length }]);
+  assertNotLogged(h.gw, [...realisticIds, 'missing-title', 'bad-status', 'Synthetic thread']);
+});
+
+test('offset page duplicates keep the newest copy, with an order-independent tie-break and raw page accounting', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } } });
+  grant(h);
+  const newer = summary(`mcp:${uuid}`, 'Synthetic newer', '2026-01-02T00:00:00Z');
+  const older = summary(newer.threadId, 'Synthetic older');
+  const tiedA = summary(uuid, 'Synthetic A');
+  const tiedZ = summary(uuid, 'Synthetic Z');
+  const first = [older, tiedA, ...Array.from({ length: 98 }, (_, i) => summary(`synthetic-${i}`))];
+  const last = [newer, tiedZ, null];
+  const setPages = (a: unknown[], b: unknown[]) => {
+    h.fake.threadListPages.set(0, { projectId: target.projectId, threads: a, total: 103, nextCursor: 100 });
+    h.fake.threadListPages.set(100, { projectId: target.projectId, threads: b, total: 103, nextCursor: null });
+  };
+  setPages(first, last);
+  const page = await h.agent.call<Page>('fleet_threads', { ...target, limit: 100 });
+  assert.equal(page.total, 100);
+  assert.equal(page.threads.find((thread) => thread.threadId === newer.threadId)?.title, newer.title);
+  assert.equal(page.threads.find((thread) => thread.threadId === uuid)?.title, tiedZ.title);
+  setPages([newer, tiedZ, ...first.slice(2)], [older, tiedA, null]);
+  const refreshed = await h.agent.call<Page>('fleet_threads', { ...target, refresh: true, limit: 100 });
+  assert.deepEqual(refreshed.threads, page.threads);
+});
+
+test('work_adopt accepts an MCP id through persistence, watcher, feed and dashboard and rejects dangerous ids', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } }, dashboard: { enabled: true } });
+  grant(h);
+  const oldId = external(h);
+  const thread = h.fake.threads.get(oldId)!;
+  h.fake.threads.delete(oldId);
+  thread.threadId = `mcp:${uuid}`;
+  h.fake.threads.set(thread.threadId, thread);
+  const { job } = await h.agent.call<Adoption>('work_adopt', { ...target, threadId: thread.threadId, requestId: 'mcp-adopt' });
+  assert.equal(h.gw.services.jobs.store.require(job.jobId).threadId, thread.threadId);
+  await h.tick();
+  const status = await h.agent.call<{ threadId: string }>('work_status', { jobId: job.jobId });
+  assert.equal(status.threadId, thread.threadId);
+  const feed = await h.agent.call<{ attention: { threadId: string }[]; events: { jobId: string }[] }>('work_feed', {});
+  assert.ok(feed.events.some((event) => event.jobId === job.jobId));
+  const dashboard = await fetch(`http://127.0.0.1:${h.gw.gateway.dashboard!.port}/api/snapshot`, { headers: { 'x-t3fg-dashboard': '1' } });
+  assert.equal(dashboard.status, 200);
+  const snapshot = await dashboard.json() as { jobs: { open: { id: string; link: string }[] } };
+  assert.equal(snapshot.jobs.open.find((entry) => entry.id === job.jobId)?.link, threadLink(thread.threadId));
+  assert.equal(threadLink(thread.threadId), `t3-thread://v1/mcp%3A${uuid}`);
+  const calls = h.fake.calls.length;
+  for (const threadId of ['bad/id', '../bad', 'bad\\id', 'bad id', 'bad\nvalue', 'bad?x', 'bad#x', 'bad%xx', '<bad>']) {
+    assert.equal((await h.agent.callError('work_adopt', { ...target, threadId, requestId: 'invalid-id' })).code, 'Input validation error');
+  }
+  assert.equal(h.fake.calls.length, calls);
+});
+
+test('gateway launches and follows T3 branded ids through job reads and discovery', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } } });
+  grant(h);
+  for (const threadId of [`mcp:${uuid}`, realisticIds[3]!]) {
+    h.fake.nextThreadId = threadId;
+    const job = await startJob(h.agent);
+    await h.tick();
+    assert.equal(h.gw.services.jobs.store.require(job.jobId).threadId, threadId);
+    h.fake.finishTurn(threadId, 'Synthetic completed work');
+    await h.tick();
+    const status = await h.agent.call<{ threadId: string; link: string; state: string }>('work_status', { jobId: job.jobId });
+    assert.equal(status.state, 'idle');
+    assert.equal(status.threadId, threadId);
+    assert.equal(status.link, threadLink(threadId));
+    const page = await h.agent.call<Page>('fleet_threads', { ...target, refresh: true });
+    assert.equal(page.threads.find((entry) => entry.threadId === threadId)?.gatewayOwned, true);
+  }
+});
+
+test('thread page and text limits still fail closed even with skipped and duplicate entries', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } } });
+  grant(h);
+  const page = (threads: unknown[], total: number, nextCursor: number | null) => ({ projectId: target.projectId, threads, total, nextCursor });
+  for (const invalid of [page([summary(uuid)], 2, null), page([null], 1, 0), page([null], 1, 2),
+    page(Array(101).fill(null), 101, null), { ...page([], 0, null), projectId: 'wrong-project' }]) {
+    h.fake.threadListPages.set(0, invalid);
+    assert.equal((await h.agent.callError('fleet_threads', { ...target, refresh: true })).code, 't3_invalid_response');
+  }
+  h.fake.threadListPages.set(0, page([null], 2001, null));
+  assert.equal((await h.agent.callError('fleet_threads', { ...target, refresh: true })).code, 'catalog_limit');
+  // Twenty full pages are still a hard bound even when every row is the same valid id.
+  for (let offset = 0; offset < 2000; offset += 100) {
+    h.fake.threadListPages.set(offset, page(Array(100).fill(summary(uuid)), 2000, offset + 100));
+  }
+  assert.equal((await h.agent.callError('fleet_threads', { ...target, refresh: true })).code, 'catalog_limit');
+  // Sanitized text budget applies to distinct valid entries, independently of the page count.
+  for (let offset = 0; offset < 600; offset += 100) {
+    h.fake.threadListPages.set(offset, page(Array.from({ length: 100 }, (_, i) => summary(`synthetic-${offset + i}-${'a'.repeat(2000)}`)),
+      600, offset === 500 ? null : offset + 100));
+  }
+  assert.equal((await h.agent.callError('fleet_threads', { ...target, refresh: true })).code, 'catalog_limit');
 });
