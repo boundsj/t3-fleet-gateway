@@ -1,14 +1,15 @@
-import { configuredModel, type GatewayConfig, type HostConfig, type ProjectConfig } from '../config.ts';
+import { configuredModel, RUNTIME_MODES, runtimeModeAllowed, type GatewayConfig, type HostConfig, type ProjectConfig } from '../config.ts';
 import { sha256Hex } from '../crypto.ts';
 import { describeError, GatewayError } from '../errors.ts';
 import type { CatalogProject, CatalogService } from '../hosts/catalog.ts';
 import { resolveProjectId } from '../hosts/projects.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import type { Logger } from '../log.ts';
-import { permits, permittedHosts, type AccessLevel, type Scope } from '../oauth/scopes.ts';
+import { THREAD_READ_SCOPE, THREAD_CONTROL_SCOPE, permits, permittedHosts, type AccessLevel, type Scope } from '../oauth/scopes.ts';
 import { T3TransportError, type T3Client } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
 import type { ThreadItem, ThreadRead } from '../t3/schemas.ts';
+import { cleanThreadTitle } from '../hosts/threads.ts';
 import { HOUR, SECOND, type Clock } from '../time.ts';
 import { scanActivity } from './activity.ts';
 import { EXCERPT_CHARS, holdsReadPosition, isActiveStatus, isDelegatedWorkActive, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
@@ -167,6 +168,17 @@ function rootBusy(job: Job): GatewayError {
   );
 }
 
+/** Client imports/resumes need positive evidence that this is a normal, unarchived conversation. */
+function requireExternalEligibility(thread: ThreadRead['thread']): void {
+  const relation = thread.relationshipToParent;
+  if (thread.archived === undefined || (relation !== null && relation !== 'fork' && relation !== 'subagent')) {
+    throw new GatewayError('t3_invalid_response', 'T3 did not report known archive and lineage metadata. Client adoption/resume is unavailable for this thread.');
+  }
+  if (thread.archived || relation === 'subagent') {
+    throw new GatewayError('job_state_conflict', 'Archived and delegated child threads cannot be adopted or resumed; use the parent thread in T3.');
+  }
+}
+
 /** A stable hash of a tool's meaningful input, for request-id idempotency. */
 export function inputHash(tool: string, input: Record<string, unknown>): string {
   const keys = Object.keys(input).sort();
@@ -294,7 +306,12 @@ export class JobService {
     const scope = requestedHosts === 'all' || readableHosts === 'all'
       ? {} : { hostIds: [...new Set([...requestedHosts, ...readableHosts])] };
     const job = this.store.get(jobId, scope);
-    if (job && permits(caller.scopes, level, job.hostId)) return job;
+    if (job && permits(caller.scopes, level, job.hostId)) {
+      if (job.origin === 'adopted') {
+        this.#requireThreadScope(caller, level);
+      }
+      return job;
+    }
     if (job && permits(caller.scopes, 'read', job.hostId)) {
       throw new GatewayError(
         'insufficient_scope',
@@ -307,7 +324,46 @@ export class JobService {
   /** The rows of the ledger an agent may read: its grant's hosts, unless it covers all. */
   #visible(caller: Caller, mine = false): JobScope {
     const hosts = permittedHosts(caller.scopes, 'read');
-    return { ...(mine ? { clientId: caller.clientId } : {}), ...(hosts === 'all' ? {} : { hostIds: hosts }) };
+    return { includeAdopted: caller.scopes.includes(THREAD_READ_SCOPE), ...(mine ? { clientId: caller.clientId } : {}), ...(hosts === 'all' ? {} : { hostIds: hosts }) };
+  }
+
+  #requireThreadScope(caller: Caller, level: AccessLevel): void {
+    if (!caller.scopes.includes(THREAD_READ_SCOPE)) throw new GatewayError('insufficient_scope', 'External threads require threads:read. Ask the operator to grant it with clients grant.');
+    if (level === 'operate' && !caller.scopes.includes(THREAD_CONTROL_SCOPE)) {
+      throw new GatewayError('insufficient_scope', 'Controlling external threads requires threads:control. Ask the operator to grant it with clients grant.');
+    }
+  }
+
+  #auditThread(caller: Caller, job: Job, action: Parameters<JobStore['auditThread']>[2]): void {
+    this.store.auditThread(job, caller.clientId, action);
+  }
+
+  /** Imported threads can be reconfigured in T3. Resuming must not bypass the current project or host ceiling. */
+  async #validateAdoptedResume(job: Job): Promise<void> {
+    if (job.origin !== 'adopted' || job.threadId === null) return;
+    const host = this.#config.hosts.find((candidate) => candidate.id === job.hostId);
+    if (!host) throw new GatewayError('not_found', 'The adopted thread host is no longer configured.');
+    // State only, messages view; no history is needed to validate the resume policy.
+    const { thread } = await this.#registry.client(job.hostId).readThread({
+      threadId: job.threadId, view: 'messages', limit: 1, runLimit: 1, maxCharsPerItem: 1,
+    });
+    requireExternalEligibility(thread);
+    if (thread.threadId !== job.threadId || thread.projectId !== job.t3ProjectId) {
+      throw new GatewayError('job_state_conflict', 'The imported thread changed project or is no longer a resumable thread. Check it in T3.');
+    }
+    const projects = (await this.#catalog.projects(job.hostId, { refresh: true })).value;
+    const mapping = mapProjects(this.#config, job.hostId, projects).get(thread.projectId);
+    if (!mapping) throw new GatewayError('not_found', 'The adopted thread project is no longer available.');
+    const policy = launchPolicy(host, mapping);
+    if (policy.kind === 'ambiguous') throw new GatewayError('job_state_conflict', 'The adopted thread project has ambiguous configured aliases.');
+    const ceiling = policy.kind === 'alias' ? policy.project.runtimeMode : host.discovery.runtimeMode;
+    const mode = RUNTIME_MODES.find((candidate) => candidate === thread.runtimeMode);
+    if (!mode || !runtimeModeAllowed(mode, host.access) || RUNTIME_MODES.indexOf(mode) > RUNTIME_MODES.indexOf(ceiling)) {
+      throw new GatewayError('job_state_conflict', 'The imported thread runtime mode is unknown or exceeds its current project/host ceiling. Nothing was sent. Review it in T3.');
+    }
+    if (isTerminal(this.store.require(job.id).state)) {
+      throw new GatewayError('job_state_conflict', 'The adopted job was released while its resume was being checked. Nothing was sent.');
+    }
   }
 
   /**
@@ -463,7 +519,8 @@ export class JobService {
   }
 
   #startDisabled(caller: Caller, project: ProjectConfig): GatewayError {
-    const standing = this.store.standingJobs(project.alias).filter((job) => permits(caller.scopes, 'read', job.hostId));
+    const standing = this.store.standingJobs(project.alias).filter((job) =>
+      permits(caller.scopes, 'read', job.hostId) && (job.origin !== 'adopted' || caller.scopes.includes(THREAD_READ_SCOPE)));
     return new GatewayError('start_disabled', startDisabledMessage(project.alias, standing));
   }
 
@@ -728,10 +785,14 @@ export class JobService {
    */
   async adopt(input: AdoptInput): Promise<{ job: Job; created: boolean }> {
     const project = this.project(input.project);
-    const existing = this.store.openJobForThread(input.threadId);
+    const existing = this.store.openJobForThread(input.threadId, project.host);
     if (existing?.standing && existing.projectAlias === project.alias) return { job: existing, created: false };
+    return this.#adoptThread(project, await resolveProjectId(this.#registry, project), input);
+  }
+
+  async #adoptThread(project: { alias: string; host: string }, projectId: string, input: AdoptInput,
+    adoption?: { clientId: string; requestId: string; inputHash: string }): Promise<{ job: Job; created: boolean }> {
     const client = this.#registry.client(project.host);
-    const projectId = await resolveProjectId(this.#registry, project);
     let read: ThreadRead;
     let questions: string[];
     let activity: ActivityRead;
@@ -746,11 +807,21 @@ export class JobService {
       throw error;
     }
     const { thread } = read;
+    if (adoption && (thread.threadId !== input.threadId || thread.projectId !== projectId)) {
+      throw new GatewayError('not_found', 'No thread in that project.');
+    }
+    if (adoption) requireExternalEligibility(thread);
     if (thread.projectId !== projectId) {
       throw new GatewayError(
         'invalid_argument',
         `Thread ${input.threadId} belongs to T3 project ${thread.projectId}, not to project "${project.alias}" (T3 project ${projectId}).`,
       );
+    }
+    // A launch with a lost response may not have bound its thread id yet. Its gateway marker still owns the thread.
+    if (adoption) {
+      const marker = /\[job:([a-z0-9]{10})\]/.exec(thread.title)?.[1];
+      const owner = marker && this.store.get(marker, { hostIds: [project.host] });
+      if (owner && owner.origin === 'gateway') throw new GatewayError('job_state_conflict', 'This thread belongs to a gateway launch. Use its existing job.');
     }
     const lastRunId = thread.activeRunId ?? thread.latestRunId;
     const seen = observe(
@@ -777,11 +848,11 @@ export class JobService {
       hostId: project.host,
       t3ProjectId: projectId,
       state: seen.state,
-      title: input.title ?? thread.title,
+      title: cleanThreadTitle(input.title ?? thread.title),
       branch: thread.branch ?? '',
       runtimeMode: typeof runtimeMode === 'string' ? runtimeMode : '',
       threadId: thread.threadId,
-      threadTitle: thread.title,
+      threadTitle: cleanThreadTitle(thread.title),
       threadLink: threadLinkTarget(thread.link),
       lastRunId: seen.lastRunId,
       pendingRequestIds: seen.pendingRequestIds,
@@ -795,7 +866,43 @@ export class JobService {
       delegatedWork: seen.delegatedWork,
       delegatedUntracked: seen.delegatedUntracked,
       delegatedUntrackedRunId: seen.delegatedUntrackedRunId,
-    });
+    }, adoption);
+  }
+
+  /** Client adoption never launches, sends, configures or organizes the T3 thread. */
+  async adoptExternal(caller: Caller, input: { host: string; projectId: string; threadId: string; requestId: string }): Promise<{ job: Job; created: boolean }> {
+    this.#requireThreadScope(caller, 'operate');
+    const host = this.#hostFor(caller, input.host, 'operate');
+    const hash = inputHash('work_adopt', { host: input.host, projectId: input.projectId, threadId: input.threadId });
+    const key = this.store.idempotencyKey(caller.clientId, 'work_adopt', input.requestId);
+    if (key) {
+      const job = this.#jobFor(caller, key.jobId, 'operate');
+      if (key.inputHash !== hash) throw new GatewayError('request_id_conflict', 'This requestId was used for a different adoption.');
+      this.#auditThread(caller, job, 'adopt_replayed');
+      return { job, created: false };
+    }
+    if (!host.discovery.enabled) throw new GatewayError('discovery_disabled', 'Thread adoption needs discovery.enabled on this host.');
+    const existing = this.store.jobForThread(host.id, input.threadId);
+    if (existing && (existing.origin !== 'adopted' || existing.t3ProjectId !== input.projectId)) {
+      throw new GatewayError('job_state_conflict', 'This thread already has a gateway or operator-owned job. Use that job with the appropriate scopes.');
+    }
+    if (existing) {
+      const replay = this.store.adopt({ ...existing, threadId: input.threadId, threadTitle: existing.threadTitle ?? existing.title, t3ProjectId: input.projectId },
+        { clientId: caller.clientId, requestId: input.requestId, inputHash: hash });
+      this.#auditThread(caller, replay.job, 'adopt_replayed');
+      return replay;
+    }
+    const projects = (await this.#catalog.projects(host.id, { refresh: true })).value;
+    if (!projects.some((project) => project.id === input.projectId)) throw new GatewayError('not_found', 'No project with that id on this host.');
+    const mapping = mapProjects(this.#config, host.id, projects).get(input.projectId)!;
+    const policy = launchPolicy(host, mapping);
+    if (policy.kind === 'ambiguous') throw new GatewayError('invalid_argument', 'This project has ambiguous configured aliases. Ask the operator to resolve them.');
+    const project = { alias: policy.kind === 'alias' ? policy.project.alias : projectRef(host.id, input.projectId), host: host.id };
+    const result = await this.#adoptThread(project, input.projectId, { project: project.alias, threadId: input.threadId },
+      { clientId: caller.clientId, requestId: input.requestId, inputHash: hash });
+    if (!result.created) this.#auditThread(caller, result.job, 'adopt_replayed');
+    this.wake();
+    return result;
   }
 
   /**
@@ -810,6 +917,7 @@ export class JobService {
         `Job ${job.id} was started by an agent, not adopted; only standing jobs are released. Stop it with work_cancel instead.`,
       );
     }
+    this.store.auditThread(job, 'operator', 'release');
     const released = this.store.transition(job.id, { from: OPEN_STATES, to: 'released', detail: { reason: 'released' } });
     return released ? { job: released, released: true } : { job: this.store.require(job.id), released: false };
   }
@@ -819,6 +927,7 @@ export class JobService {
     job: Job; settled: boolean; settledAt: string | null; replayed: boolean;
   }> {
     const job = this.#jobFor(caller, input.jobId, 'operate');
+    this.#auditThread(caller, job, 'settle');
     const hash = inputHash('work_settle', { jobId: input.jobId });
     const key = this.store.idempotencyKey(caller.clientId, 'work_settle', input.requestId);
     if (key && (key.jobId !== job.id || key.inputHash !== hash)) {
@@ -904,6 +1013,7 @@ export class JobService {
   async continue(caller: Caller, input: ContinueInput): Promise<ContinueResult> {
     // Before the request id is looked up, so a replay never returns a stored result for a job the agent may not operate.
     let job = this.#jobFor(caller, input.jobId, 'operate');
+    this.#auditThread(caller, job, 'continue');
     const hash = inputHash('work_continue', { jobId: input.jobId, message: input.message });
     const key = this.store.idempotencyKey(caller.clientId, 'work_continue', input.requestId);
     if (key) {
@@ -922,6 +1032,12 @@ export class JobService {
     }
     const threadId = job.threadId;
     if (threadId === null) throw new GatewayError('job_state_conflict', `Job ${job.id} has no thread.`);
+    try {
+      await this.#validateAdoptedResume(job);
+    } catch (error) {
+      if (!key) this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
+      throw error;
+    }
     // Resuming an idle job that works in the project's own folder takes the folder back first, before anything is sent: while
     // another job holds it the follow-up waits, and the same requestId may be sent again later.
     const attempt = job.state === 'idle' ? this.store.reserveRoot(job.id, `continue:${caller.clientId}:${input.requestId}`) : ({ kind: 'not_needed' } as const);
@@ -958,9 +1074,11 @@ export class JobService {
   /** Answer one of the job's pending questions. Only requests T3 lists for the job's own thread are accepted. */
   async respond(caller: Caller, input: RespondInput): Promise<Job> {
     const job = this.#jobFor(caller, input.jobId, 'operate');
+    this.#auditThread(caller, job, 'respond');
     if (job.threadId === null || isTerminal(job.state)) {
       throw new GatewayError('job_state_conflict', `Job ${job.id} is ${job.state}; it has no question to answer.`);
     }
+    await this.#validateAdoptedResume(job);
     const client = this.#registry.client(job.hostId);
     const pending = await client.listPendingRequests(job.threadId);
     if (!pending.includes(input.requestId)) {
@@ -971,6 +1089,9 @@ export class JobService {
             ? 'The job is waiting for a permission approval, which only the operator can give in T3.'
             : 'The job has no pending questions.';
       throw new GatewayError('not_found', `That request is not pending on job ${job.id}. ${hint}`);
+    }
+    if (job.origin === 'adopted' && isTerminal(this.store.require(job.id).state)) {
+      throw new GatewayError('job_state_conflict', 'The adopted job was released while its question was being checked. Nothing was sent.');
     }
     // An answer starts the worker again: an idle root job takes its folder back first (see continue).
     const attempt = job.state === 'idle' ? this.store.reserveRoot(job.id, `respond:${input.requestId}`) : ({ kind: 'not_needed' } as const);
@@ -1008,6 +1129,7 @@ export class JobService {
    */
   async cancel(caller: Caller, input: { jobId: string }): Promise<CancelResult> {
     const job = this.#jobFor(caller, input.jobId, 'operate');
+    this.#auditThread(caller, job, 'interrupt');
     if (job.standing) return this.#interruptStanding(job);
     if (job.state === 'queued') {
       const cancelled = this.store.transition(job.id, { from: ['queued'], to: 'cancelled', detail: { reason: 'cancelled_before_launch' } });

@@ -61,6 +61,9 @@ export interface Job {
    * launched or reconciled, holds no concurrency slot, and stays open until the operator releases it.
    */
   standing: boolean;
+  origin: 'gateway' | 'standing' | 'adopted';
+  adoptedBy: string | null;
+  adoptedAt: number | null;
   /**
    * Work the thread delegated to other threads (T3 subagents) that is still running, from its timeline.
    * A coordinator is idle while it waits for such work, and T3 starts its next turn when the work is done.
@@ -241,6 +244,9 @@ interface JobRow {
   dispatch_started_at: number | null;
   finished_at: number | null;
   standing: number;
+  origin: Job['origin'];
+  adopted_by: string | null;
+  adopted_at: number | null;
   delegated_work: string;
   delegated_untracked: number;
   delegated_untracked_run_id: string | null;
@@ -278,6 +284,8 @@ const MINE = '(jobs.client_id = ? OR jobs.standing = 1)';
  */
 export interface JobScope {
   clientId?: string | undefined;
+  /** Operator standing jobs retain host-grant access; only client imports require the extra read opt-in. */
+  includeAdopted?: boolean | undefined;
   hostIds?: readonly string[] | undefined;
   /** Only jobs in one T3 project of one host (`work_list.target`); a queued alias-only job has no project id yet. */
   target?: { hostId: string; projectId: string } | undefined;
@@ -286,6 +294,7 @@ export interface JobScope {
 function scopeClause(scope: JobScope): { sql: string; params: string[] } {
   const parts: string[] = [];
   const params: string[] = [];
+  if (scope.includeAdopted === false) parts.push("jobs.origin <> 'adopted'");
   if (scope.clientId !== undefined) {
     parts.push(MINE);
     params.push(scope.clientId);
@@ -370,6 +379,9 @@ function toJob(row: JobRow): Job {
     dispatchStartedAt: row.dispatch_started_at,
     finishedAt: row.finished_at,
     standing: row.standing === 1,
+    origin: row.origin,
+    adoptedBy: row.adopted_by,
+    adoptedAt: row.adopted_at,
     delegatedWork: parseDelegated(row.delegated_work),
     delegatedUntracked: row.delegated_untracked,
     delegatedUntrackedRunId: row.delegated_untracked_run_id,
@@ -413,7 +425,7 @@ export interface FeedEvent extends JobEvent {
 }
 
 /** Tools whose requestId makes a call idempotent. Keys are scoped per agent and per tool. */
-export type IdempotentTool = 'work_start' | 'work_continue' | 'work_settle';
+export type IdempotentTool = 'work_start' | 'work_continue' | 'work_settle' | 'work_adopt';
 
 export interface IdempotencyKey {
   inputHash: string;
@@ -601,11 +613,26 @@ export class JobStore {
   }
 
   /** The open job following a T3 thread, if any. */
-  openJobForThread(threadId: string): Job | undefined {
+  openJobForThread(threadId: string, hostId?: string): Job | undefined {
     const row = this.#db
-      .prepare(`SELECT * FROM jobs WHERE t3_thread_id = ? AND state NOT IN (${NOT_OPEN}) ORDER BY created_at, rowid LIMIT 1`)
-      .get(threadId, ...TERMINAL_STATES) as JobRow | undefined;
+      .prepare(`SELECT * FROM jobs WHERE t3_thread_id = ? AND state NOT IN (${NOT_OPEN}) ${hostId === undefined ? '' : 'AND host_id = ?'} ORDER BY created_at, rowid LIMIT 1`)
+      .get(threadId, ...TERMINAL_STATES, ...(hostId === undefined ? [] : [hostId])) as JobRow | undefined;
     return row && this.#job(row);
+  }
+
+  /** Any recorded owner, including finished gateway jobs and released adoptions; thread ids are host-local. */
+  jobForThread(hostId: string, threadId: string): Job | undefined {
+    const row = this.#db.prepare('SELECT * FROM jobs WHERE host_id = ? AND t3_thread_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1')
+      .get(hostId, threadId) as JobRow | undefined;
+    return row && this.#job(row);
+  }
+
+  /** Durable content-free audit of accepted adoptions and authorized control attempts, including replays. */
+  auditThread(job: Job, clientId: string, action: 'adopt' | 'adopt_replayed' | 'continue' | 'respond' | 'settle' | 'interrupt' | 'release'): void {
+    if (job.origin === 'gateway' || job.threadId === null) return;
+    this.#db.prepare('INSERT INTO thread_action_events (client_id, host_id, thread_id, job_id, action, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(clientId, job.hostId, job.threadId, job.id, action, this.#clock());
+    this.#logger.info('threads.control', { clientId, hostId: job.hostId, threadId: job.threadId, jobId: job.id, action });
   }
 
   /** Open standing jobs, oldest first; all of them, or one project's. */
@@ -665,11 +692,25 @@ export class JobStore {
    * first state. Adopting a thread that an open standing job of the same project already follows
    * returns that job; a thread followed by any other open job is refused.
    */
-  adopt(job: NewStandingJob): { job: Job; created: boolean } {
+  adopt(job: NewStandingJob, adoption?: { clientId: string; requestId: string; inputHash: string }): { job: Job; created: boolean } {
     return transaction(this.#db, () => {
-      const existing = this.openJobForThread(job.threadId);
+      if (adoption) {
+        const key = this.idempotencyKey(adoption.clientId, 'work_adopt', adoption.requestId);
+        if (key) {
+          if (key.inputHash !== adoption.inputHash) throw new GatewayError('request_id_conflict', 'This requestId was used for a different adoption.');
+          const replay = this.require(key.jobId);
+          if (replay.hostId !== job.hostId) throw new GatewayError('insufficient_scope', 'The earlier adoption is on a different host.');
+          return { job: replay, created: false };
+        }
+      }
+      const existing = adoption ? this.jobForThread(job.hostId, job.threadId) : this.openJobForThread(job.threadId, job.hostId);
       if (existing) {
-        if (existing.standing && existing.projectAlias === job.projectAlias) return { job: existing, created: false };
+        if (existing.standing && (adoption
+          ? existing.origin === 'adopted' && existing.t3ProjectId === job.t3ProjectId
+          : existing.projectAlias === job.projectAlias)) {
+          if (adoption) this.claimIdempotencyKey(adoption.clientId, 'work_adopt', adoption.requestId, { inputHash: adoption.inputHash, jobId: existing.id });
+          return { job: existing, created: false };
+        }
         const what = existing.standing ? `standing job ${existing.id} in project "${existing.projectAlias}"` : `job ${existing.id}, which the gateway launched`;
         throw new GatewayError('job_state_conflict', `Thread ${job.threadId} is already followed by ${what} (${existing.state}).`);
       }
@@ -684,8 +725,8 @@ export class JobStore {
         )
         .run(
           job.id,
-          OPERATOR_CLIENT_ID,
-          'adopted',
+          adoption?.clientId ?? OPERATOR_CLIENT_ID,
+          adoption?.requestId ?? 'adopted',
           job.projectAlias,
           job.hostId,
           job.t3ProjectId,
@@ -713,7 +754,11 @@ export class JobStore {
           job.delegatedUntrackedRunId,
           job.latestMessageTruncated ? 1 : 0,
         );
+      this.#db.prepare('UPDATE jobs SET origin = ?, adopted_by = ?, adopted_at = ? WHERE id = ?')
+        .run(adoption ? 'adopted' : 'standing', adoption?.clientId ?? OPERATOR_CLIENT_ID, now, job.id);
+      if (adoption) this.claimIdempotencyKey(adoption.clientId, 'work_adopt', adoption.requestId, { inputHash: adoption.inputHash, jobId: job.id });
       this.#insertEvent(job.id, 'created', null, job.state, { reason: 'adopted' }, now);
+      this.auditThread(this.require(job.id), adoption?.clientId ?? OPERATOR_CLIENT_ID, 'adopt');
       this.#logger.info('job.adopted', { jobId: job.id, project: job.projectAlias, hostId: job.hostId, state: job.state });
       return { job: this.require(job.id), created: true };
     });

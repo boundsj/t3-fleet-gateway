@@ -8,7 +8,7 @@ import type { Logger } from '../log.ts';
 import { GatewayError } from '../errors.ts';
 import type { JobService } from '../jobs/service.ts';
 import { OPERATOR_CLIENT_ID } from '../jobs/store.ts';
-import { OPERATE_SCOPE } from '../oauth/scopes.ts';
+import { OPERATE_SCOPE, THREAD_READ_SCOPE, THREAD_CONTROL_SCOPE } from '../oauth/scopes.ts';
 import type { WebhookManagement } from '../webhooks/management.ts';
 import type { DashboardChecks } from './checks.ts';
 import { buildSnapshot, type DashboardSources } from './snapshot.ts';
@@ -204,7 +204,7 @@ export function dashboardHandler(
       }
       if (!options.available?.()) { sendJson(res, 503, { error: 'unavailable' }); return; }
       try {
-        const operation = jobs.settle({ clientId: OPERATOR_CLIENT_ID, scopes: [OPERATE_SCOPE] },
+        const operation = jobs.settle({ clientId: OPERATOR_CLIENT_ID, scopes: [OPERATE_SCOPE, THREAD_READ_SCOPE, THREAD_CONTROL_SCOPE] },
           { jobId: body.jobId, requestId: body.requestId });
         settlements.add(operation);
         try { await operation; } finally { settlements.delete(operation); }

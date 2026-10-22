@@ -85,6 +85,9 @@ const jobSchema = z.object({
     ),
   pullRequestsCheckedAt: nullableTime,
   jobId: z.string(),
+  origin: z.enum(['gateway', 'standing', 'adopted']),
+  adoptedBy: z.string().nullable(),
+  adoptedAt: nullableTime,
   state: z.enum(JOB_STATES),
   project: z
     .string()
@@ -273,6 +276,9 @@ export function jobView(job: Job, context: ToolContext): JobView {
     workspaceMode: workspaceModeOf(job),
     branch: job.branch,
     standing: job.standing,
+    origin: job.origin,
+    adoptedBy: job.adoptedBy,
+    adoptedAt: job.adoptedAt === null ? null : isoTime(job.adoptedAt),
     waitingOnDelegatedWork: job.delegatedWork.length > 0 || job.delegatedUntracked > 0,
     delegatedTasks: job.delegatedWork.map((task) => task.title),
     delegatedTasksUntracked: job.delegatedUntracked,
@@ -308,10 +314,26 @@ function describeJob(job: Job, view: JobView): string {
     : `PRs${followed > MAX_PULL_REQUESTS ? ` (${MAX_PULL_REQUESTS} of ${count} shown; open ones first, then the newest)` : ''}: ` +
       view.pullRequests.map((pr) => `${pr.repository}#${pr.number} ${pr.state ?? 'unknown'} ${pr.url}`).join(', ');
   const waiting = view.waitingOnDelegatedWork ? ', waiting on delegated work' : '';
-  return `${view.jobId} [${view.state}${view.standing ? ', standing' : ''}${waiting}] ${view.project}: ${view.title} | ${prs} (checked ${view.pullRequestsCheckedAt ?? 'never'})`;
+  return `${view.jobId} [${view.state}${view.origin === 'adopted' ? ', adopted' : view.standing ? ', standing' : ''}${waiting}] ${view.project}: ${view.title} | ${prs} (checked ${view.pullRequestsCheckedAt ?? 'never'})`;
 }
 
 export function workTools(jobs: JobService): GatewayTool[] {
+  const workAdopt = defineTool({
+    name: 'work_adopt', title: 'Adopt an existing T3 thread', scope: OPERATE_SCOPE, readOnly: false,
+    description: 'Import an existing external T3 thread as an adopted job, using host/projectId from fleet_projects and threadId from fleet_threads. ' +
+      'Requires threads:read, threads:control, Operate on that host and discovery.enabled. Adoption only reads T3; it never sends or changes the thread. ' +
+      'Use work_status/feed/messages/continue/respond/settle/cancel on the returned jobId. Cancel interrupts only the active turn. ' +
+      'No launch slot is used. requestId deduplicates retries; adopting the same host/thread again returns its job. ' +
+      'Threads already owned by a gateway launch or an operator standing job are refused. An operator can stop following with jobs release; a released adoption stays released.',
+    inputSchema: z.object({ host: z.string().min(1).max(32), projectId: z.string().min(1).max(256),
+      threadId: z.string().regex(/^[A-Za-z0-9_-]{1,256}$/), requestId: requestIdInput }),
+    outputSchema: z.object({ job: jobSchema, created: z.boolean() }),
+    async run(input, context) {
+      const result = await jobs.adoptExternal(context, input);
+      const view = jobView(result.job, context);
+      return { structured: { job: view, created: result.created }, summary: `${result.created ? 'Adopted' : 'Already adopted'}: ${describeJob(result.job, view)}` };
+    },
+  });
   const workStart = defineTool({
     name: 'work_start',
     title: 'Start work',
@@ -700,7 +722,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
     },
   });
 
-  return [workStart, workContinue, workRespond, workCancel, workSettle, workStatus, workMessages, workList, workFeed];
+  return [workStart, workAdopt, workContinue, workRespond, workCancel, workSettle, workStatus, workMessages, workList, workFeed];
 }
 
 const DELEGATED_ENDED =
