@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { isThreadId, isThreadLink, MAX_THREAD_ID_CHARS, threadLink } from '../src/threadId.js';
-import { threadIdSchema } from '../src/t3/threadId.ts';
+import { responseThreadIdSchema, threadIdSchema } from '../src/t3/threadId.ts';
 import { threadLinkTarget } from '../src/jobs/derive.ts';
 import { loadApp } from './helpers/dashboardApp.ts';
 
@@ -37,4 +37,24 @@ test('shared thread identity and URI boundaries preserve opaque T3 ids without d
     assert.equal(isThreadLink(link), false);
     assert.equal(app.safeHref(link), false);
   }
+});
+
+
+test('response ids allow unfamiliar formats within a nonblank control-free bound', () => {
+  for (const id of ['synthetic/future-thread', 'synthetic future thread', 'synthetic%future', 'synthetic-λ']) {
+    assert.equal(responseThreadIdSchema.parse(id), id);
+    assert.equal(threadIdSchema.safeParse(id).success, false);
+    assert.equal(threadLink(id), null);
+  }
+  for (const id of ['', ' ', '\t', 'bad\nvalue', 'bad\u0000value', 'bad\u0085value', 'a'.repeat(MAX_THREAD_ID_CHARS + 1)]) {
+    assert.equal(responseThreadIdSchema.safeParse(id).success, false);
+  }
+});
+
+test('MCP link delimiters stay byte-identical and existing percent escapes remain opaque', () => {
+  assert.equal(threadLink(`mcp:${uuid}`), `t3-thread://v1/mcp:${uuid}`);
+  assert.equal(threadLink('thread:provider:synthetic:native-thread:synthetic%2Ffolder'),
+    't3-thread://v1/thread:provider:synthetic:native-thread:synthetic%252Ffolder');
+  assert.equal(threadLinkTarget(null), null);
+  assert.equal(threadLinkTarget(undefined), null);
 });

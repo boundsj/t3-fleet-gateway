@@ -1,6 +1,6 @@
 import * as z from 'zod';
 import { threadLink } from '../threadId.js';
-import { threadIdSchema } from './threadId.ts';
+import { responseThreadIdSchema } from './threadId.ts';
 
 /** The fields of `t3_environment_read` the gateway relies on. Extra fields are kept, not validated. */
 export const environmentSchema = z.looseObject({
@@ -105,11 +105,12 @@ export type LaunchThreadInput = {
 
 /** Current T3 omits links. Keep older supplied links and normalize newer responses at the boundary. */
 function withThreadLink<T extends { threadId: string; link?: string | null }>(thread: T) {
-  return { ...thread, link: thread.link ?? threadLink(thread.threadId)! };
+  const canonical = threadLink(thread.threadId);
+  return { ...thread, link: canonical === null ? null : thread.link ?? canonical };
 }
 
 export const launchResultSchema = z.looseObject({
-  threadId: threadIdSchema,
+  threadId: responseThreadIdSchema,
   link: z.string().nullish(),
   projectId: z.string(),
   runId: z.string().nullable(),
@@ -118,7 +119,7 @@ export const launchResultSchema = z.looseObject({
 export type LaunchResult = z.infer<typeof launchResultSchema>;
 
 export const threadSummarySchema = z.looseObject({
-  threadId: threadIdSchema,
+  threadId: responseThreadIdSchema,
   link: z.string().nullish(),
   title: z.string(),
   status: z.string(),
@@ -137,7 +138,7 @@ export const threadListSchema = z.looseObject({
   nextCursor: z.number().int().nullable(),
   total: z.number().int(),
 });
-// Catalog discovery validates individual rows after checking the raw page bounds. Other list consumers stay strict.
+// Catalog discovery validates individual rows after checking the raw page bounds. Other list consumers validate bounded opaque ids.
 export const threadCatalogPageSchema = threadListSchema.extend({ threads: z.array(z.unknown()) });
 
 export type ThreadList = z.infer<typeof threadListSchema>;
@@ -145,7 +146,7 @@ export type ThreadList = z.infer<typeof threadListSchema>;
 export const threadSearchSchema = z.looseObject({
   matches: z.array(
     z.looseObject({
-      threadId: threadIdSchema,
+      threadId: responseThreadIdSchema,
       projectId: z.string(),
       source: z.string(),
       snippet: z.string(),
@@ -180,7 +181,7 @@ export type ThreadRun = z.infer<typeof threadRunSchema>;
 
 export const threadReadSchema = z.looseObject({
   thread: z.looseObject({
-    threadId: threadIdSchema,
+    threadId: responseThreadIdSchema,
     link: z.string().nullish(),
     projectId: z.string(),
     title: z.string(),
@@ -206,7 +207,7 @@ export type ThreadRead = z.infer<typeof threadReadSchema>;
 export const SEND_MODES = ['auto', 'queue', 'steer', 'restart'] as const;
 
 export const sendResultSchema = z.looseObject({
-  threadId: threadIdSchema,
+  threadId: responseThreadIdSchema,
   messageId: z.string(),
   runId: z.string(),
   status: z.string(),
@@ -215,7 +216,7 @@ export const sendResultSchema = z.looseObject({
 export type SendResult = z.infer<typeof sendResultSchema>;
 
 export const interruptResultSchema = z.looseObject({
-  threadId: threadIdSchema,
+  threadId: responseThreadIdSchema,
   runId: z.string().nullable(),
   status: z.string(),
 });

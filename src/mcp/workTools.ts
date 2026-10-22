@@ -1,5 +1,5 @@
 import * as z from 'zod';
-import { threadIdSchema } from '../t3/threadId.ts';
+import { responseThreadIdSchema, threadIdSchema } from '../t3/threadId.ts';
 import { displayPullRequests, MAX_PULL_REQUESTS, MAX_TRACKED_PULL_REQUESTS, pullRequestsSchema } from '../jobs/pullRequests.ts';
 import { MAX_DELEGATED_TASKS } from '../jobs/derive.ts';
 import { MAX_MESSAGE_TEXT_CHARS, MAX_MESSAGES } from '../jobs/messages.ts';
@@ -146,7 +146,7 @@ const jobSchema = z.object({
       `Delegated tasks beyond the ${MAX_DELEGATED_TASKS} the gateway follows. While above 0, waitingOnDelegatedWork stays true ` +
         'until the job has run a new turn; ask the coordinator for status before sending more work',
     ),
-  threadId: threadIdSchema.nullable().describe('The T3 thread, once it exists'),
+  threadId: responseThreadIdSchema.nullable().describe('The T3 thread, once it exists'),
   link: z
     .string()
     .nullable()

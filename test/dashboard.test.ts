@@ -634,7 +634,7 @@ describe('dashboard: jobs and privacy', () => {
     assert.ok(snap.attention.length <= LIMITS.attention);
     assert.ok(Buffer.byteLength(JSON.stringify(snap)) < 512 * 1024, 'the snapshot stays small');
 
-    assert.equal(threadLink('thread-123_abc:def.1'), 't3-thread://v1/thread-123_abc%3Adef.1');
+    assert.equal(threadLink('thread-123_abc:def.1'), 't3-thread://v1/thread-123_abc:def.1');
     for (const bad of ['', 'a b', 'x/../y', 'javascript:alert(1)//x"', '<script>', 'a'.repeat(2049), null]) {
       assert.equal(threadLink(bad), null, String(bad));
     }

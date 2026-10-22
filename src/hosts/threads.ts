@@ -1,3 +1,4 @@
+import { isThreadId } from '../threadId.js';
 import { silentLogger, type Logger } from '../log.ts';
 import { threadSummarySchema } from '../t3/schemas.ts';
 import { GatewayError } from '../errors.ts';
@@ -89,7 +90,7 @@ export class ThreadCatalog {
       if (scanned > MAX_THREAD_PAGES * THREAD_PAGE_SIZE) throw limit();
       for (const raw of result.threads) {
         const parsed = threadSummarySchema.safeParse(raw);
-        if (!parsed.success) { skipped++; continue; }
+        if (!parsed.success || !isThreadId(parsed.data.threadId)) { skipped++; continue; }
         const thread = parsed.data;
         const candidate: CatalogThread = { threadId: thread.threadId, title: cleanThreadTitle(thread.title), state: cleanThreadTitle(thread.status).slice(0, 80),
           lastActivityAt: isoDate(thread.updatedAt), settled: thread.settled ?? null, settledAt: isoDate(thread.settledAt), archived: thread.archived ?? null };

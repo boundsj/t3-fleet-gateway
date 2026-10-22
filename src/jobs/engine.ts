@@ -64,7 +64,7 @@ interface FoundThread {
   status?: string;
 }
 
-function foundThread(thread: { threadId: string; title: string; latestRunId: string | null; link: string; status: string }): FoundThread {
+function foundThread(thread: { threadId: string; title: string; latestRunId: string | null; link: string | null; status: string }): FoundThread {
   const { threadId, title, latestRunId, link, status } = thread;
   return { threadId, threadTitle: title, lastRunId: latestRunId, threadLink: threadLinkTarget(link), status };
 }

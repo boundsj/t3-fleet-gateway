@@ -467,7 +467,7 @@ test('work_adopt accepts an MCP id through persistence, watcher, feed and dashbo
   assert.equal(dashboard.status, 200);
   const snapshot = await dashboard.json() as { jobs: { open: { id: string; link: string }[] } };
   assert.equal(snapshot.jobs.open.find((entry) => entry.id === job.jobId)?.link, threadLink(thread.threadId));
-  assert.equal(threadLink(thread.threadId), `t3-thread://v1/mcp%3A${uuid}`);
+  assert.equal(threadLink(thread.threadId), `t3-thread://v1/mcp:${uuid}`);
   const calls = h.fake.calls.length;
   for (const threadId of ['bad/id', '../bad', 'bad\\id', 'bad id', 'bad\nvalue', 'bad?x', 'bad#x', 'bad%xx', '<bad>']) {
     assert.equal((await h.agent.callError('work_adopt', { ...target, threadId, requestId: 'invalid-id' })).code, 'Input validation error');
@@ -516,4 +516,43 @@ test('thread page and text limits still fail closed even with skipped and duplic
       600, offset === 500 ? null : offset + 100));
   }
   assert.equal((await h.agent.callError('fleet_threads', { ...target, refresh: true })).code, 'catalog_limit');
+});
+
+test('unfamiliar T3 ids remain operable in persisted job output and are skipped only in discovery and links', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } } });
+  grant(h);
+  for (const threadId of ['synthetic/future-thread', 'synthetic future thread']) {
+    h.fake.nextThreadId = threadId;
+    const job = await startJob(h.agent);
+    await h.tick();
+    const stored = h.gw.services.jobs.store.require(job.jobId);
+    assert.equal(stored.threadId, threadId);
+    assert.equal(stored.threadLink, null);
+    assert.equal(stored.state, 'running');
+    const status = await h.agent.call<{ threadId: string; link: string | null }>('work_status', { jobId: job.jobId });
+    assert.equal(status.threadId, threadId);
+    assert.equal(status.link, null);
+    const list = await h.agent.call<{ jobs: { threadId: string }[] }>('work_list', {});
+    assert.ok(list.jobs.some((entry) => entry.threadId === threadId));
+    await h.agent.call('work_continue', { jobId: job.jobId, message: 'Synthetic follow-up', requestId: `follow-${job.jobId}` });
+    assert.equal(h.fake.sends.at(-1)?.threadId, threadId);
+    await h.agent.call('work_cancel', { jobId: job.jobId });
+    await h.tick();
+  }
+  assert.equal((await h.agent.call<Page>('fleet_threads', target)).total, 0, 'unfamiliar ids do not break or enter discovery');
+});
+
+test('a lost launch response with an unfamiliar T3 id reconciles without launching twice', async (t) => {
+  const h = await startJobHarness(t);
+  h.fake.nextThreadId = 'synthetic/recovered thread';
+  const job = await startJob(h.agent);
+  h.fake.dropResponseOnce.add('t3_thread_launch');
+  await h.tick();
+  assert.equal(h.gw.services.jobs.store.require(job.jobId).state, 'unknown');
+  await h.tickAfter(60_000);
+  const stored = h.gw.services.jobs.store.require(job.jobId);
+  assert.equal(stored.state, 'running');
+  assert.equal(stored.threadId, 'synthetic/recovered thread');
+  assert.equal(stored.threadLink, null);
+  assert.equal(h.fake.launches.length, 1);
 });

@@ -38,11 +38,11 @@ const LAUNCH = {
 describe('T3 result parsing', () => {
   const schema = z.object({ value: z.number() });
 
-  test('encodes an opaque thread id in generated links and still rejects invalid fields', () => {
+  test('preserves raw MCP colon delimiters in generated links and still rejects invalid fields', () => {
     const result = { threadId: 'mcp:synthetic-thread', projectId: 'project-1', runId: null, status: 'preparing' };
     for (const payload of [result, { ...result, link: null }]) {
       for (const response of [{ structuredContent: payload }, { content: [{ type: 'text', text: JSON.stringify(payload) }] }]) {
-        assert.equal(parseToolResult('t3_thread_launch', response, launchResultSchema).link, 't3-thread://v1/mcp%3Asynthetic-thread');
+        assert.equal(parseToolResult('t3_thread_launch', response, launchResultSchema).link, 't3-thread://v1/mcp:synthetic-thread');
       }
     }
     for (const payload of [{ ...result, projectId: null }, { ...result, link: 42 }]) {
@@ -309,3 +309,21 @@ describe('T3 delivery classification', () => {
   });
 });
 
+
+test('unfamiliar bounded thread ids survive launch, read, list, search, send and interrupt with no generated link', async (t) => {
+  const { client, fake } = await setup(t);
+  for (const threadId of ['synthetic/future-thread', 'synthetic future thread']) {
+    fake.nextThreadId = threadId;
+    const launched = await client.launchThread(LAUNCH);
+    assert.equal(launched.threadId, threadId);
+    assert.equal(launched.link, null);
+    const read = await client.readThread({ threadId, view: 'messages' });
+    assert.equal(read.thread.threadId, threadId);
+    assert.equal(read.thread.link, null);
+    const listed = await client.listThreads({ projectId: 'project-1' });
+    assert.equal(listed.threads.find((thread) => thread.threadId === threadId)?.link, null);
+    assert.ok((await client.searchThreads({ projectId: 'project-1', query: 'abc123' })).matches.some((match) => match.threadId === threadId));
+    assert.equal((await client.sendToThread({ threadId, message: 'Synthetic follow-up', clientRequestId: `send-${fake.threads.size}` })).threadId, threadId);
+    assert.equal((await client.interruptThread({ threadId, clientRequestId: `stop-${fake.threads.size}` })).threadId, threadId);
+  }
+});

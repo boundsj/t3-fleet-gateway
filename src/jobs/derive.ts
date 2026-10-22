@@ -149,7 +149,8 @@ export interface Observation {
  * The URL in a T3 thread link. Older T3 returns markdown; current responses are normalized to a bare
  * t3-thread URL by the client schemas. Returns null for invalid links or other URL schemes.
  */
-export function threadLinkTarget(link: string): string | null {
+export function threadLinkTarget(link: string | null | undefined): string | null {
+  if (link == null) return null;
   const text = link.trim();
   const target = /\]\(([^()\s]+)\)$/.exec(text)?.[1] ?? text;
   if (isThreadLink(target)) return target;

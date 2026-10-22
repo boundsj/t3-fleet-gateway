@@ -7,9 +7,9 @@ export function isThreadId(value) {
   return typeof value === 'string' && value.length <= MAX_THREAD_ID_CHARS && value !== '.' && value !== '..' && THREAD_ID.test(value);
 }
 
-/** Encode the whole opaque id once, including its existing percent escapes and URI/Markdown punctuation. */
+/** Preserve colon delimiters in existing MCP links; escape literal percent signs and URI/Markdown punctuation. */
 export function threadLink(value) {
-  return isThreadId(value) ? PREFIX + encodeURIComponent(value).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`) : null;
+  return isThreadId(value) ? PREFIX + encodeURIComponent(value).replaceAll('%3A', ':').replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`) : null;
 }
 
 export function isThreadLink(value) {
