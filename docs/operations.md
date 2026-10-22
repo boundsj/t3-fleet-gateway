@@ -191,10 +191,14 @@ From **Overview**, choose **Connect Grok Bot**, or open **Webhooks**. For Grok, 
 
 1. Paste the **Webhook URL**. This is where the gateway sends job notices.
 2. Paste the **Full authorization header**, including its name and value, for example `Authorization: Bearer example-key`. This tells the receiver to accept the request. Any supported HTTPS receiver and authentication header can be used.
-3. Choose a configured **Project**. Its host is selected from the configuration; only that project's notifications go to this connection.
+3. Choose a **Project** under its host group. Configured aliases are always listed; enrolled hosts with discovery enabled also list their T3 projects by name and ID. An unreachable host is marked unavailable while other hosts remain selectable. Refresh retries discovery. A discovered selection matches the exact host and project ID, including alias and direct-target jobs.
 4. Select **Connect & Test**. The gateway sends a synthetic test before saving. If accepted, check the bot conversation to confirm its response: an HTTP success does not prove the bot finished.
 
+A successful **Connect & Test** immediately saves and activates the gateway connection; there is no separate “saved” or enable button. If the receiver requires saving or enabling its routine, complete that step there. HTTP 2xx proves acceptance only.
+
 The connection sends notices when a job finishes a turn (`idle`), needs input, fails, is cancelled, or stops waiting for delegated work. Worker excerpts stay off. No files or restart are needed, and the saved URL and key are never shown again. The list shows project, host, management source and safe last-test status/time.
+
+Existing connections survive the host/project-target upgrade unchanged; do not re-register them. If a key was exposed, rotate it at the receiver, then use **Replace key** with the new full header (and new URL if changed). Never paste keys into chat or logs.
 
 **Send test** checks an existing connection. **Replace key** tests a new full header and, optionally, a new URL before replacing the old route. Recreating a bot routine changes both its URL and key: replace both. A failed test keeps the old connection working. **Disconnect** asks for confirmation and cancels its queued notices; a request already sent cannot be recalled. File-managed rows must be changed in their configuration and secret file; the dashboard labels them and cannot replace or disconnect them. The CLI's `webhooks list`, `webhooks attempts <id>` and `webhooks ping <id>` work with either source without exporting secrets.
 

@@ -273,12 +273,14 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     const connection = (row) => {
       const managed = row.source === 'dashboard';
       const confirming = model.disconnectId === row.id;
-      return h('article', { class: 'panel webhook-connection', 'aria-label': `Connection for ${row.projects.join(', ') || 'all projects'}` },
-        h('div', { class: 'panel__head' }, h('h3', { class: 'panel__title' }, row.projects.join(', ') || 'All projects'),
+      const projects = [...row.projects, ...(row.targets ?? []).map((t) => t.projectId)].join(', ');
+      const hosts = [...row.hosts, ...(row.targets ?? []).map((t) => t.host)].join(', ');
+      return h('article', { class: 'panel webhook-connection', 'aria-label': `Connection for ${projects || 'all projects'} on ${hosts || 'all hosts'}` },
+        h('div', { class: 'panel__head' }, h('h3', { class: 'panel__title' }, projects || 'All projects'),
           pill(row.enabled === false ? 'unknown' : 'good', row.enabled === false ? 'Disabled' : 'Connected')),
         h('div', { class: 'panel__body' },
           kv([
-            ['Host', row.hosts.join(', ') || 'All hosts'],
+            ['Host', hosts || 'All hosts'],
             ['Managed by', managed ? 'Dashboard' : 'Configuration file'],
             ['Last test', testSummary(row.lastTest)],
           ]),
@@ -334,7 +336,10 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     });
     const project = replacing ? null : h('select', {
       id: 'webhook-project', required: true, disabled: busy || data.projects.length === 0, 'aria-describedby': 'webhook-project-help',
-    }, data.projects.map((item) => h('option', { value: item.alias }, `${item.alias} · ${item.host}`)));
+    }, [...new Set(data.projects.map((item) => item.host))].map((host) =>
+      h('optgroup', { label: host }, data.projects.filter((item) => item.host === host).map((item) =>
+        h('option', { value: item.alias }, item.name ? `${item.name} (${item.projectId})` : item.alias)))));
+    const unavailable = (data.hosts ?? []).filter((host) => host.status === 'unavailable');
     const clear = () => { url.value = ''; auth.value = ''; };
     return h('form', {
       class: 'panel__body webhook-form', autocomplete: 'off', 'aria-label': replacing ? 'Replace connection' : 'Connect webhook',
@@ -348,6 +353,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
         return actions.webhookOperation(replacing ? 'replace' : 'connect', fields);
       } },
     },
+    unavailable.map((host) => h('p', { class: 'sub' }, `${host.host}: unavailable. Configured aliases remain selectable; refresh to retry discovery.`)),
     replacing ? h('p', { class: 'webhook-replace-note' }, 'If you recreated the routine, paste its new URL and full authorization header. Leave the URL blank only if it has not changed. The current connection stays active unless the new test succeeds.') : null,
     h('div', { class: 'field' }, h('label', { for: 'webhook-url' }, replacing ? 'Webhook URL (if changed)' : 'Webhook URL'), url,
       h('p', { class: 'field__hint', id: 'webhook-url-help' }, 'Where the gateway sends updates. In Grok, copy the “POST to” address.')),

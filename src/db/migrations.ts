@@ -385,6 +385,13 @@ CREATE TABLE thread_action_events (
 CREATE TRIGGER thread_action_events_no_update BEFORE UPDATE ON thread_action_events BEGIN SELECT RAISE(ABORT, 'thread actions are append-only'); END;
 CREATE TRIGGER thread_action_events_no_delete BEFORE DELETE ON thread_action_events BEGIN SELECT RAISE(ABORT, 'thread actions are append-only'); END;`,
   },
+  {
+    version: 15,
+    name: 'host and project webhook targets',
+    // Settings gain optional paired targets. Existing alias filters, routes, revisions and queues stay byte-for-byte intact.
+    // The version barrier prevents an older sender from ignoring the new filter and broadcasting it.
+    sql: 'SELECT 1;',
+  },
 ];
 
 /**
