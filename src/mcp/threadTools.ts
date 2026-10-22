@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { responseThreadIdSchema } from '../t3/threadId.ts';
 import type { GatewayServices } from '../gateway.ts';
 import type { CatalogThread } from '../hosts/threads.ts';
 import type { Snapshot } from '../hosts/catalog.ts';
@@ -19,7 +20,7 @@ export function threadTools(deps: GatewayServices) {
     inputSchema: z.object({ host: z.string().min(1).max(32), projectId: z.string().min(1).max(256),
       limit: z.int().min(1).max(100).optional(), cursor: z.string().min(1).max(2048).optional(), refresh: z.boolean().optional() }),
     outputSchema: z.object({ host: z.string(), projectId: z.string(), readAt: z.string(), total: z.int(), nextCursor: z.string().nullable(),
-      threads: z.array(z.object({ threadId: z.string(), title: z.string(), state: z.string(), lastActivityAt: z.string().nullable(),
+      threads: z.array(z.object({ threadId: responseThreadIdSchema, title: z.string(), state: z.string(), lastActivityAt: z.string().nullable(),
         settled: z.boolean().nullable(), settledAt: z.string().nullable(), archived: z.boolean().nullable(),
         gatewayOwned: z.boolean(), jobId: z.string().nullable(), origin: z.enum(['gateway', 'standing', 'adopted']).nullable() })) }),
     async run(input, caller) {

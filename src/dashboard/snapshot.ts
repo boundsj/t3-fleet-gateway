@@ -1,3 +1,4 @@
+import { threadLink } from '../threadId.js';
 import { configuredModel, isLoopbackHostname, mcpResource, type GatewayConfig, type HostConfig } from '../config.ts';
 import { SCHEMA_VERSION, schemaVersion, type Database } from '../db/database.ts';
 import { isCallSignal, SIGNAL_LABELS, type HostSignal } from '../hosts/signals.ts';
@@ -14,6 +15,8 @@ import { DAY, type Clock } from '../time.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
 import type { CheckRun } from './checks.ts';
 import { describeEvent, explainHostError, explainJobError, explainRenewalError, explainRevocation, safeCode } from './explain.ts';
+
+export { threadLink } from '../threadId.js';
 
 /**
  * The operator dashboard's view of the gateway, built from the database and what this process holds in memory only.
@@ -66,10 +69,6 @@ function clip(text: string, max = TITLE_CHARS): string {
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
 }
 
-/** T3 thread ids are opaque; the link is built only from ids made of safe characters, in T3's documented form. */
-export function threadLink(threadId: string | null): string | null {
-  return threadId !== null && /^[A-Za-z0-9._:-]{1,200}$/.test(threadId) ? `t3-thread://v1/${threadId}` : null;
-}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Hosts

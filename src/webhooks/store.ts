@@ -1,3 +1,4 @@
+import { threadLink } from '../threadId.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
@@ -221,7 +222,7 @@ export class WebhookStore {
       jobId: job.id, projectAlias: job.projectAlias, host: job.hostId, projectId: job.t3ProjectId, title: job.title,
       state: job.state, previousState: event.fromState, threadId: job.threadId,
       // Canonical T3 link, never a legacy HTTP URL that may itself contain sensitive query parameters.
-      link: job.threadId === null ? null : `t3-thread://v1/${job.threadId}`,
+      link: threadLink(job.threadId),
       standing: job.standing, waitingOnDelegatedWork: job.delegatedWork.length > 0 || job.delegatedUntracked > 0,
       turnInitiator: turn ? { kind: 'gateway', clientId: turn.client_id } : { kind: 'unknown', clientId: null },
     };

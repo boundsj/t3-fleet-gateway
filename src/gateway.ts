@@ -94,7 +94,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
     tokens: new TokenService(db, clock, { resource: mcpResource(config), ...config.tokens }, logTokenEvent(logger)),
     registry,
     catalog,
-    threads: new ThreadCatalog(registry, clock),
+    threads: new ThreadCatalog(registry, clock, logger),
     webhooks: new WebhookStore(db, clock),
     jobs: new JobService({ config, store: new JobStore(db, clock, logger), registry, catalog, clock, logger }),
     async close() {

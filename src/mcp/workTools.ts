@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { responseThreadIdSchema, threadIdSchema } from '../t3/threadId.ts';
 import { displayPullRequests, MAX_PULL_REQUESTS, MAX_TRACKED_PULL_REQUESTS, pullRequestsSchema } from '../jobs/pullRequests.ts';
 import { MAX_DELEGATED_TASKS } from '../jobs/derive.ts';
 import { MAX_MESSAGE_TEXT_CHARS, MAX_MESSAGES } from '../jobs/messages.ts';
@@ -145,7 +146,7 @@ const jobSchema = z.object({
       `Delegated tasks beyond the ${MAX_DELEGATED_TASKS} the gateway follows. While above 0, waitingOnDelegatedWork stays true ` +
         'until the job has run a new turn; ask the coordinator for status before sending more work',
     ),
-  threadId: z.string().nullable().describe('The T3 thread, once it exists'),
+  threadId: responseThreadIdSchema.nullable().describe('The T3 thread, once it exists'),
   link: z
     .string()
     .nullable()
@@ -326,7 +327,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'No launch slot is used. requestId deduplicates retries; adopting the same host/thread again returns its job. ' +
       'Threads already owned by a gateway launch or an operator standing job are refused. An operator can stop following with jobs release; a released adoption stays released.',
     inputSchema: z.object({ host: z.string().min(1).max(32), projectId: z.string().min(1).max(256),
-      threadId: z.string().regex(/^[A-Za-z0-9_-]{1,256}$/), requestId: requestIdInput }),
+      threadId: threadIdSchema, requestId: requestIdInput }),
     outputSchema: z.object({ job: jobSchema, created: z.boolean() }),
     async run(input, context) {
       const result = await jobs.adoptExternal(context, input);
