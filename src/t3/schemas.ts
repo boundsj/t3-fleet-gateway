@@ -24,10 +24,8 @@ export const projectListSchema = z.looseObject({
   nextCursor: z.number().int().nullable().optional(),
 });
 
-/**
- * One model option T3 advertises in `orchestrator_capabilities` (T3's `ProviderOptionDescriptor`): a
- * `select` with its choices (a reasoning effort, say) or a `boolean`. The type is read as a plain
- * string so a kind added by a newer T3 is carried, unselectable, instead of failing the whole catalog.
+/** Legacy full ProviderOptionDescriptor, retained as the old wire-format reference.
+ * Current compact MCP options are normalized independently in hosts/catalog.ts.
  */
 export const optionDescriptorSchema = z.looseObject({
   id: z.string().min(1),
@@ -48,7 +46,8 @@ export const capabilitiesSchema = z.looseObject({
       providerInstanceId: z.string().min(1),
       driverKind: z.string(),
       displayName: z.string().nullish(),
-      models: z.array(z.looseObject({ id: z.string().min(1), label: z.string().nullish(), options: z.array(optionDescriptorSchema).nullish() })),
+      // Parse entries independently after transport validation: one bad model must not hide its siblings.
+      models: z.array(z.unknown()),
       runtimeModes: z.array(z.string()).nullish(),
       /** Whether this provider may run a delegated child task inside T3: metadata, not proof that a top-level launch works. */
       canRunChildTask: z.boolean().nullish(),
@@ -124,6 +123,9 @@ export const threadSummarySchema = z.looseObject({
   latestRunId: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  settled: z.boolean().optional(),
+  settledAt: z.string().nullable().optional(),
+  archived: z.boolean().optional(),
 }).transform(withThreadLink);
 export type ThreadSummary = z.infer<typeof threadSummarySchema>;
 
@@ -181,6 +183,11 @@ export const threadReadSchema = z.looseObject({
     latestRunId: z.string().nullable(),
     activeRunId: z.string().nullable(),
     pendingRequestCount: z.number().int(),
+    settled: z.boolean().optional(),
+    settledAt: z.string().nullable().optional(),
+    archived: z.boolean().optional(),
+    relationshipToParent: z.string().nullable().optional(),
+    runtimeMode: z.string().optional(),
     branch: z.string().nullable(),
     updatedAt: z.string(),
   }).transform(withThreadLink),

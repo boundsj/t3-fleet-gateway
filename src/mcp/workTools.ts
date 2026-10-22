@@ -85,6 +85,9 @@ const jobSchema = z.object({
     ),
   pullRequestsCheckedAt: nullableTime,
   jobId: z.string(),
+  origin: z.enum(['gateway', 'standing', 'adopted']),
+  adoptedBy: z.string().nullable(),
+  adoptedAt: nullableTime,
   state: z.enum(JOB_STATES),
   project: z
     .string()
@@ -180,6 +183,8 @@ const questionSchema = z.object({
 });
 
 const jobDetailSchema = jobSchema.extend({
+  settled: z.boolean().nullable().describe('Live T3 settlement state; null when unavailable or unsupported'),
+  settledAt: nullableTime,
   stateMeaning: z.string(),
   pendingRequests: z
     .array(z.object({
@@ -271,6 +276,9 @@ export function jobView(job: Job, context: ToolContext): JobView {
     workspaceMode: workspaceModeOf(job),
     branch: job.branch,
     standing: job.standing,
+    origin: job.origin,
+    adoptedBy: job.adoptedBy,
+    adoptedAt: job.adoptedAt === null ? null : isoTime(job.adoptedAt),
     waitingOnDelegatedWork: job.delegatedWork.length > 0 || job.delegatedUntracked > 0,
     delegatedTasks: job.delegatedWork.map((task) => task.title),
     delegatedTasksUntracked: job.delegatedUntracked,
@@ -306,10 +314,26 @@ function describeJob(job: Job, view: JobView): string {
     : `PRs${followed > MAX_PULL_REQUESTS ? ` (${MAX_PULL_REQUESTS} of ${count} shown; open ones first, then the newest)` : ''}: ` +
       view.pullRequests.map((pr) => `${pr.repository}#${pr.number} ${pr.state ?? 'unknown'} ${pr.url}`).join(', ');
   const waiting = view.waitingOnDelegatedWork ? ', waiting on delegated work' : '';
-  return `${view.jobId} [${view.state}${view.standing ? ', standing' : ''}${waiting}] ${view.project}: ${view.title} | ${prs} (checked ${view.pullRequestsCheckedAt ?? 'never'})`;
+  return `${view.jobId} [${view.state}${view.origin === 'adopted' ? ', adopted' : view.standing ? ', standing' : ''}${waiting}] ${view.project}: ${view.title} | ${prs} (checked ${view.pullRequestsCheckedAt ?? 'never'})`;
 }
 
 export function workTools(jobs: JobService): GatewayTool[] {
+  const workAdopt = defineTool({
+    name: 'work_adopt', title: 'Adopt an existing T3 thread', scope: OPERATE_SCOPE, readOnly: false,
+    description: 'Import an existing external T3 thread as an adopted job, using host/projectId from fleet_projects and threadId from fleet_threads. ' +
+      'Requires threads:read, threads:control, Operate on that host and discovery.enabled. Adoption only reads T3; it never sends or changes the thread. ' +
+      'Use work_status/feed/messages/continue/respond/settle/cancel on the returned jobId. Cancel interrupts only the active turn. ' +
+      'No launch slot is used. requestId deduplicates retries; adopting the same host/thread again returns its job. ' +
+      'Threads already owned by a gateway launch or an operator standing job are refused. An operator can stop following with jobs release; a released adoption stays released.',
+    inputSchema: z.object({ host: z.string().min(1).max(32), projectId: z.string().min(1).max(256),
+      threadId: z.string().regex(/^[A-Za-z0-9_-]{1,256}$/), requestId: requestIdInput }),
+    outputSchema: z.object({ job: jobSchema, created: z.boolean() }),
+    async run(input, context) {
+      const result = await jobs.adoptExternal(context, input);
+      const view = jobView(result.job, context);
+      return { structured: { job: view, created: result.created }, summary: `${result.created ? 'Adopted' : 'Already adopted'}: ${describeJob(result.job, view)}` };
+    },
+  });
   const workStart = defineTool({
     name: 'work_start',
     title: 'Start work',
@@ -408,6 +432,8 @@ export function workTools(jobs: JobService): GatewayTool[] {
       const { job } = detail;
       const view: JobDetailView = {
         ...jobView(job, context),
+        settled: detail.settled,
+        settledAt: detail.settledAt,
         stateMeaning: STATE_MEANINGS[job.state],
         pendingRequests: detail.pendingRequests,
         waitingForApproval: detail.waitingForApproval,
@@ -419,6 +445,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
         recentEvents: detail.recentEvents.map(eventView),
       };
       const lines = [describeJob(job, view), STATE_MEANINGS[job.state]];
+      lines.push(`Thread settled: ${view.settled === null ? 'unknown' : view.settled}${view.settledAt ? ` at ${view.settledAt}` : ''}.`);
       if (view.link) lines.push(`Open in T3: ${view.link}`);
       if (view.pendingRequests.length > 0) {
         lines.push(`Answer with work_respond using jobId ${JSON.stringify(view.jobId)}, the requestId and answers keyed by question id. ` +
@@ -569,6 +596,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'not send (a message would start a competing turn), whatever the reply says; wait for its next turn in work_feed. If it ' +
       'is false, nothing it delegated is still running: send follow-ups when its reply asks for input or the work is done, or ' +
       'when work_feed reports delegated_work_ended (its delegated work ended but it did not resume: ask it to check on that work). ' +
+      'On a settled idle job, sending resumes the thread and T3 clears settlement. Terminal jobs cannot be continued. ' +
       'Idempotent: pass a unique requestId per message; ' +
       'repeating a requestId returns the first result without sending again, and if a call fails with an uncertain outcome, ' +
       'repeating it with the same requestId is safe. Request ids are scoped to this tool, separate from work_start. Not for answering a pending question: use work_respond.',
@@ -672,7 +700,29 @@ export function workTools(jobs: JobService): GatewayTool[] {
     },
   });
 
-  return [workStart, workContinue, workRespond, workCancel, workStatus, workMessages, workList, workFeed];
+  const workSettle = defineTool({
+    name: 'work_settle',
+    title: 'Settle a finished thread',
+    description: "Settle an idle, cancelled, failed or released job's T3 thread after delegated work ends. " +
+      'Checks fresh T3 state; T3 refuses running turns, queued user messages and blocking approvals/questions. ' +
+      'Clears the pin, ends PR watches and detaches provider sessions; does not archive or change the job state. ' +
+      'Use a unique requestId per settlement. Replays return the confirmed result, never settle a resumed thread again. ' +
+      'An uncertain outcome is read back without re-sending. work_status reports current settlement; ' +
+      'work_continue on a settled idle job resumes it and clears settlement.',
+    scope: OPERATE_SCOPE,
+    readOnly: false,
+    inputSchema: z.object({ jobId: jobIdInput, requestId: requestIdInput }),
+    outputSchema: z.object({ job: jobSchema, settled: z.boolean(), settledAt: nullableTime, replayed: z.boolean() }),
+    async run(input, context) {
+      const result = await jobs.settle(context, input);
+      return {
+        structured: { ...result, job: jobView(result.job, context) },
+        summary: `${result.replayed ? 'Already confirmed (same requestId)' : 'Confirmed'}: thread settled. Job state: ${result.job.state}.`,
+      };
+    },
+  });
+
+  return [workStart, workAdopt, workContinue, workRespond, workCancel, workSettle, workStatus, workMessages, workList, workFeed];
 }
 
 const DELEGATED_ENDED =

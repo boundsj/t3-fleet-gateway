@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-const V12_COLUMNS = ['pull_requests', 'pull_requests_checked_at', 'workspace_kind', 'workspace_root_key', 'workspace_root_held_at', 'workspace_resume_tokens', 'probe_attempts', 'probe_retry_at'];
+const V12_COLUMNS = ['origin', 'adopted_by', 'adopted_at', 'pull_requests', 'pull_requests_checked_at', 'workspace_kind', 'workspace_root_key', 'workspace_root_held_at', 'workspace_resume_tokens', 'probe_attempts', 'probe_retry_at'];
 
 /** The rows of a table as they were before migration 12, which only added columns to jobs. */
 export function rowsWithoutV12(db: DatabaseSync, table: string): Record<string, unknown>[] {

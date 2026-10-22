@@ -10,6 +10,7 @@ import { ApprovalCodes, DEFAULT_APPROVAL_CODE_TTL, MAX_APPROVAL_CODE_TTL, MAX_FA
 import { ClientStore, isTokenClient, MAX_CLIENT_NAME_LENGTH, MAX_REGISTRATIONS_PER_HOUR } from '../oauth/clients.ts';
 import { diagnoseClient } from '../oauth/diagnostics.ts';
 import { describeAccess, parseHostScope, parseScope, scopesForGrant, type HostChoice } from '../oauth/scopes.ts';
+import { changeThreadScopes, clientThreadScopes } from '../oauth/threadScopes.ts';
 import { NEVER_EXPIRES } from '../oauth/tokens.ts';
 import { FATAL_SHUTDOWN_MS, guardProcess } from '../processErrors.ts';
 import { DAY, HOUR, MINUTE, parseDuration, systemClock } from '../time.ts';
@@ -41,6 +42,11 @@ Commands:
                             --hosts limits it to those host ids (default all: every host,
                             including hosts added later)
   clients diagnose <id>      Diagnose stored grants and authentication recovery (offline)
+  clients grant <id> --scope threads:read [--scope threads:control]
+                            Add external-thread scopes in place (same token, no restart)
+  clients scopes <id>        Show client scopes without token material
+  clients ungrant <id> --scope <scope> [--scope <scope> ...]
+                            Remove named thread scopes, keeping the client and its token
   clients revoke <id>       Revoke a client and every token issued to it
   hosts enroll <id>         Obtain a T3 credential for a host via pairing-code approval
   hosts status              Show each host's credential and reachability
@@ -180,10 +186,23 @@ async function clientToken(paths: Paths, io: CliIo, options: TokenOptions): Prom
   });
 }
 
-function clients(paths: Paths, io: CliIo, action: string | undefined, id: string | undefined): number {
+function clients(paths: Paths, io: CliIo, action: string | undefined, id: string | undefined, scopes: string[] = []): number {
   const storage = openStorage(paths.dataDir);
   try {
     const store = new ClientStore(storage.db, systemClock);
+    if (action === 'grant' || action === 'ungrant') {
+      if (!id) throw new UsageError('A client id is required (see clients list).');
+      const result = changeThreadScopes(storage.db, systemClock, id, action === 'grant' ? 'grant' : 'revoke', scopes);
+      io.out(`Client ${id}: thread scopes ${result.scopes.join(' ') || '(none)'} (${result.changed ? 'changed' : 'unchanged'}). Existing tokens take effect on their next request; no restart needed.`);
+      return 0;
+    }
+    if (action === 'scopes') {
+      if (!id) throw new UsageError('clients scopes needs a client id (see clients list).');
+      const client = store.list().find((candidate) => candidate.id === id);
+      if (!client) throw new GatewayError('not_found', 'No client with that id.');
+      io.out(`Client: ${client.id}\nName: ${client.name}\nScopes: ${client.scopes.join(' ') || '(none)'}\nThread scopes: ${clientThreadScopes(storage.db, id).join(' ') || '(none)'}`);
+      return 0;
+    }
     if (action === 'list') {
       const list = store.list();
       if (list.length === 0) {
@@ -201,9 +220,9 @@ function clients(paths: Paths, io: CliIo, action: string | undefined, id: string
           : client.tokenExpiresAt === NEVER_EXPIRES
             ? 'bearer token, never expires'
             : `bearer token, expires ${shortTime(client.tokenExpiresAt)}`;
-        return [client.id, client.name, access, status, shortTime(client.createdAt), shortTime(client.lastUsedAt), signIn];
+        return [client.id, client.name, access, status, shortTime(client.createdAt), shortTime(client.lastUsedAt), client.scopes.join(' ') || '-', signIn];
       });
-      io.out(table(['ID', 'NAME', 'ACCESS', 'STATUS', 'CREATED', 'LAST USED', 'SIGN-IN'], rows));
+      io.out(table(['ID', 'NAME', 'ACCESS', 'STATUS', 'CREATED', 'LAST USED', 'SCOPES', 'SIGN-IN'], rows));
       return 0;
     }
     if (action === 'diagnose') {
@@ -250,7 +269,7 @@ function clients(paths: Paths, io: CliIo, action: string | undefined, id: string
       io.out(`Revoked client ${id} and ${result.families} unrevoked grant(s). Its tokens no longer work.`);
       return 0;
     }
-    throw new UsageError('Use: clients list | clients diagnose <id> | clients token --name <name> | clients revoke <id>');
+    throw new UsageError('Use: clients list | clients scopes <id> | clients grant <id> --scope <scope> | clients ungrant <id> --scope <scope> | clients revoke <id> | clients diagnose <id> | clients token --name <name>');
   } finally {
     storage.db.close();
   }
@@ -440,6 +459,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         title: { type: 'string' },
         all: { type: 'boolean' },
         limit: { type: 'string' },
+        scope: { type: 'string', multiple: true },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -456,6 +476,12 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
     }
     // `jobs` checks its own arguments: `jobs adopt` takes two.
     if (command !== 'jobs' && args.length > 1) throw new UsageError(`Unexpected arguments: ${args.slice(1).join(' ')}`);
+    if (command === 'clients' && action === 'revoke' && values.scope !== undefined) {
+      throw new UsageError('clients revoke revokes the whole client; use clients ungrant <id> --scope <scope> to remove thread scopes.');
+    }
+    if (command === 'clients' && (action === 'grant' || action === 'ungrant') && !values.scope?.length) {
+      throw new UsageError(`clients ${action} requires at least one --scope (threads:read or threads:control).`);
+    }
     // Each of these options belongs to one command; anywhere else it would be ignored silently.
     const optionCommands = [
       ['ttl', values.ttl, 'pair and clients token', command === 'pair' || (command === 'clients' && action === 'token')],
@@ -464,6 +490,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       ['hosts', values.hosts, 'clients token', command === 'clients' && action === 'token'],
       ['title', values.title, 'jobs adopt', command === 'jobs' && action === 'adopt'],
       ['all', values.all, 'jobs list', command === 'jobs' && action === 'list'],
+      ['scope', values.scope, 'clients grant/ungrant', command === 'clients' && (action === 'grant' || action === 'ungrant')],
       ['limit', values.limit, 'webhooks attempts', command === 'webhooks' && action === 'attempts'],
     ] as const;
     for (const [option, value, owner, allowed] of optionCommands) {
@@ -479,7 +506,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       case 'pair':
         return pair(paths, io, values.ttl);
       case 'clients':
-        if (action !== 'token') return clients(paths, io, action, id);
+        if (action !== 'token') return clients(paths, io, action, id, values.scope);
         if (id !== undefined) throw new UsageError(`Unexpected arguments: ${id}`);
         return await clientToken(paths, io, { name: values.name, access: values.access, hosts: values.hosts, ttl: values.ttl });
       case 'hosts':

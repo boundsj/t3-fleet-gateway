@@ -244,7 +244,7 @@ Automated tests use only synthetic hosts (`test/t3-contract.test.ts`, `test/t3-c
 
 ## Run as a service
 
-Requirements: Node.js 24 or newer; the latest Node 24 or 26 release is recommended. Node 26.0 can raise a spurious `setTypeOfService EINVAL` when T3 resets a new connection (see below).
+Requirements: Node.js 24.22.1 or a later 24.x, or 26.12.1 or newer; the launcher and `install.sh` refuse older releases, which do not block the [compromised eMudhra intermediates](security.md#compromised-emudhra-intermediates). Upgrade Node before deploying a build that requires it, then restart the service. The latest Node 24 or 26 release is recommended. Node 26.0 can raise a spurious `setTypeOfService EINVAL` when T3 resets a new connection (see below).
 
 macOS (launchd, per-user agent with KeepAlive):
 

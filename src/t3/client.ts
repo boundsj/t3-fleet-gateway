@@ -6,7 +6,7 @@ import {
   StreamableHTTPClientTransport,
   UnauthorizedError,
 } from '@modelcontextprotocol/client';
-import type * as z from 'zod';
+import * as z from 'zod';
 import { pullRequestListSchema } from '../jobs/pullRequests.ts';
 import { GatewayError, type ErrorCode } from '../errors.ts';
 import { isTypeOfServiceRace } from '../processErrors.ts';
@@ -49,9 +49,17 @@ export interface T3ClientOptions {
   /** Current bearer credential for this host, read before every request so renewals apply at once. */
   token: () => string | undefined;
   timeoutMs?: number;
+  /** Lifetime cancellation for a dedicated client (background reachability probes only). */
+  signal?: AbortSignal;
+  /** Every logical host call, including catalogs and optional tools; no input or response content. */
+  contact?: (error?: unknown, serverVersion?: string) => void;
+  /** Completed logical calls only, after retries; no input or response content. */
+  observe?: (name: string, error?: unknown) => void;
 }
 
 export interface CallOptions {
+  /** Probes make one attempt, including when the host has forgotten a session. */
+  retry?: false;
   timeoutMs?: number;
   /** The tool does not change T3 state, so a call lost in transit may be repeated. */
   readOnly?: boolean;
@@ -109,6 +117,8 @@ function sessionFailed(error: unknown, sent: boolean): boolean {
 
 interface Connection {
   client: Promise<Client>;
+  instance: Client;
+  cancel: () => void;
   token: string;
   /** Increases with every new connection, so a late failure on an old one cannot close a newer one. */
   generation: number;
@@ -126,8 +136,14 @@ export class T3Client {
   readonly #timeoutMs: number;
   #connection: Connection | undefined;
   #generation = 0;
+  readonly #observe: T3ClientOptions['observe'];
+  readonly #contact: T3ClientOptions['contact'];
+  readonly #signal: AbortSignal | undefined;
 
   constructor(options: T3ClientOptions) {
+    this.#observe = options.observe;
+    this.#contact = options.contact;
+    this.#signal = options.signal;
     this.hostId = options.hostId;
     this.#url = new URL('/mcp', options.t3Url);
     this.#token = options.token;
@@ -142,23 +158,43 @@ export class T3Client {
    * Only session-level failures replace the connection; a timeout leaves other calls on it running.
    */
   async callTool<T>(name: string, args: Record<string, unknown>, schema: z.ZodType<T>, options: CallOptions = {}): Promise<T> {
+    // CatalogService observes complete catalog validation; optional PR reads are not host-health requirements.
+    const observe = name === 'list_thread_pull_requests' || name === 'orchestrator_capabilities' ? undefined : this.#observe;
+    try {
+      const value = await this.#callTool(name, args, schema, options);
+      this.#contact?.(undefined, name === 't3_environment_read' ? (value as T3Environment).serverVersion : undefined);
+      observe?.(name);
+      return value;
+    } catch (error) {
+      // Shutdown cancellation is not evidence that the host failed.
+      if (!this.#signal?.aborted || this.#signal.reason instanceof GatewayError) {
+        this.#contact?.(error);
+        observe?.(name, error);
+      }
+      throw error;
+    }
+  }
+
+  async #callTool<T>(name: string, args: Record<string, unknown>, schema: z.ZodType<T>, options: CallOptions): Promise<T> {
     const timeout = options.timeoutMs ?? this.#timeoutMs;
     for (let attempt = 0; ; attempt++) {
       let sent = false;
       let connection: Connection | undefined;
       try {
+        this.#signal?.throwIfAborted();
         connection = this.#connect(timeout);
         const client = await connection.client;
         sent = true;
-        const result = await client.callTool({ name, arguments: args }, { timeout });
+        const result = await client.callTool({ name, arguments: args }, { timeout, signal: this.#signal });
         return parseToolResult(name, result, schema);
       } catch (error) {
+        if (this.#signal?.aborted) throw this.#signal.reason;
         if (error instanceof GatewayError) throw error;
         if (connection && sessionFailed(error, sent)) await this.#reset(connection.generation);
         const translated = this.#translate(error, sent);
         const retryable =
           httpStatus(error) === 404 || (options.readOnly === true && (translated.code === 'host_unreachable' || translated.code === 't3_response_lost'));
-        if (retryable && attempt === 0) continue;
+        if (options.retry !== false && retryable && attempt === 0) continue;
         throw translated;
       }
     }
@@ -169,7 +205,7 @@ export class T3Client {
     return this.callTool('list_thread_pull_requests', { threadId }, pullRequestListSchema, { readOnly: true, timeoutMs: 3000 });
   }
 
-  environmentRead(options: { timeoutMs?: number } = {}): Promise<T3Environment> {
+  environmentRead(options: Pick<CallOptions, 'timeoutMs' | 'retry'> = {}): Promise<T3Environment> {
     return this.callTool('t3_environment_read', {}, environmentSchema, { ...options, readOnly: true });
   }
 
@@ -236,8 +272,8 @@ export class T3Client {
     return this.callTool('t3_thread_read', withoutNulls(input), threadReadSchema, { readOnly: true });
   }
 
-  /** Threads in a project, newest first: unsettled ones, or settled ones with `settled: true`. Outside clients must pass `projectId`. */
-  listThreads(input: { projectId: string; titleContains?: string; settled?: boolean; limit?: number; cursor?: number }): Promise<ThreadList> {
+  /** Threads in a project, newest first; omitted settled includes both shelves on current T3. Archived/deleted threads are excluded. */
+  listThreads(input: { projectId: string; titleContains?: string; settled?: boolean; includeSubagents?: boolean; limit?: number; cursor?: number }): Promise<ThreadList> {
     return this.callTool('t3_thread_list', withoutNulls(input), threadListSchema, { readOnly: true });
   }
 
@@ -248,6 +284,12 @@ export class T3Client {
   /** Send a message. `clientRequestId` makes T3 deduplicate retries, so callers may repeat it with the same id. */
   sendToThread(input: { threadId: string; message: string; mode?: 'auto' | 'queue' | 'steer'; clientRequestId: string }): Promise<SendResult> {
     return this.callTool('t3_thread_send', withoutNulls(input), sendResultSchema);
+  }
+
+  /** No downstream idempotency key: never retry an ambiguous settlement automatically. */
+  settleThread(threadId: string) {
+    return this.callTool('t3_thread_organize', { threadId, action: 'settle' },
+      z.union([z.looseObject({ sequence: z.number() }), z.looseObject({ settlesWhenTurnEnds: z.literal(true) })]));
   }
 
   /** Request an interrupt of the thread's active turn. Idempotent per `clientRequestId`. */
@@ -282,8 +324,13 @@ export class T3Client {
     if (!this.#connection) {
       const client = new Client({ name: GATEWAY_NAME, version: GATEWAY_VERSION });
       const transport = new StreamableHTTPClientTransport(this.#url, { authProvider: { token: async () => token } });
-      const connecting = client.connect(transport, { timeout }).then(() => client);
-      this.#connection = { client: connecting, token, generation: ++this.#generation };
+      // The SDK does not pass the request signal to notifications/initialized. Close the transport
+      // directly on lifetime cancellation, even when connect() has not finished that notification.
+      const cancel = () => { void client.close().catch(() => {}); };
+      const connecting = client.connect(transport, { timeout, signal: this.#signal }).then(() => client);
+      this.#signal?.addEventListener('abort', cancel, { once: true });
+      if (this.#signal?.aborted) cancel();
+      this.#connection = { client: connecting, instance: client, cancel, token, generation: ++this.#generation };
     }
     return this.#connection;
   }
@@ -293,8 +340,9 @@ export class T3Client {
     const connection = this.#connection;
     if (!connection || (generation !== undefined && connection.generation !== generation)) return;
     this.#connection = undefined;
+    this.#signal?.removeEventListener('abort', connection.cancel);
     try {
-      await (await connection.client).close();
+      await connection.instance.close();
     } catch {
       // The connection already failed; nothing to close.
     }

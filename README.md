@@ -15,7 +15,7 @@ T3 Fleet Gateway connects Grok Bot, Notion and other MCP clients to your T3 serv
 
 ## Get going with prompts
 
-You need an always-on machine with Node.js 24+, a running T3 Code server and its `t3` CLI. A coding agent on that machine can do the setup. The gateway runs from a Git checkout; it is not published to npm.
+You need an always-on machine with Node.js 24.22.1+ on 24.x or 26.12.1+ (older releases do not block the [compromised eMudhra intermediates](docs/security.md#compromised-emudhra-intermediates)), a running T3 Code server and its `t3` CLI. A coding agent on that machine can do the setup. The gateway runs from a Git checkout; it is not published to npm.
 
 ### 1. Ask your coding agent to set up the gateway
 
@@ -67,6 +67,12 @@ review. Don't merge or deploy it.
 ```
 
 > **What happens next:** the gateway starts a T3 thread in a fresh worktree, tracks it, and lets your bot read the result. Worker questions can come back through the bot. Permission approvals still need your click in T3; [unattended projects](docs/configuration.md#approvals-and-unattended-projects) can use a different runtime mode.
+
+## Settle finished work
+
+When review is complete, your bot can call `work_settle({ jobId, requestId })` with a unique request ID. It needs Operate access. The job must be idle, cancelled, failed or released, with no running turn, queued user messages or active delegated work. The gateway checks T3 first and confirms settlement by reading it back. `work_status` reports `settled` and `settledAt`; `work_feed` emits `thread_settled`.
+
+Settling parks the thread, clears its pin, ends PR watches and detaches provider sessions. It does not archive the thread or change the job state. `work_continue` can resume a settled idle job; T3 clears settlement when it accepts the message. Terminal jobs keep their existing behavior. If the host credential cannot settle the thread, the tool returns `t3_unauthorized`; ask the operator to review its T3 access. [Settlement checks, retry rules and bounds](docs/design.md#thread-settlement).
 
 ## Give your bot a doorbell 🔔
 
@@ -191,6 +197,37 @@ Give me its job ID. Leave the thread and any work running in it alone.
 
 Give that request to your setup agent, then tell your bot to use the returned job ID with `work_continue`. The gateway follows the coordinator's replies and delegated work. Interrupting a standing job stops its current turn; it keeps the thread available for the next request. [Standing jobs and coordinator-only projects](docs/operations.md#standing-jobs).
 
+## Use threads opened directly in T3
+
+An operator can opt one existing connector into thread discovery and control without replacing its token:
+
+```sh
+t3-fleet-gateway clients list
+t3-fleet-gateway clients grant <clientId> --scope threads:read --scope threads:control
+t3-fleet-gateway clients scopes <clientId>
+```
+
+Choose the client by its name, sign-in origin, creation time and last use. If names overlap, trigger a known connector request and match its `mcp.tool_call` log's `clientId` or the observed success time in `clients diagnose <clientId>`. The gateway cannot identify which saved token a connector holds. Never paste that token into a diagnostic command.
+
+Ask the connector to call `fleet_projects`, then `fleet_threads { host: "host-a", projectId: "project-x" }`, then `work_adopt { host: "host-a", projectId: "project-x", threadId: "thread-x", requestId: "adopt-1" }`. The host must already have discovery enabled, and the connector still needs Read/Operate on that host. Adoption only reads T3; its returned job works with the existing work tools. Adopted jobs show an **adopted** badge, use no launch slot, and `work_cancel` interrupts their current turn. The operator can stop tracking with `jobs release <jobId>`.
+
+Remove the extra access, keeping the connector's token and ordinary gateway access:
+
+```sh
+t3-fleet-gateway clients ungrant <clientId> --scope threads:control --scope threads:read
+t3-fleet-gateway clients scopes <clientId>
+```
+
+Grant/ungrant applies on the next request without a restart, and affects only that client. Both commands require at least one `--scope`. `clients revoke <clientId>` keeps its whole-client revocation behavior and rejects `--scope` with a usage error pointing to `clients ungrant`. No existing client receives these scopes automatically. Operator-registered standing jobs retain their existing host Read/Operate access; only client-adopted jobs need the extra thread scopes. [Authorization and API limitations](docs/design.md#external-thread-discovery-and-adoption).
+
+| MCP tools | Purpose |
+| --- | --- |
+| `fleet_status`, `fleet_projects`, `fleet_models` | Host status, projects and current advertised models/options |
+| `fleet_threads` | Read-only, paginated T3 thread discovery; requires `threads:read` |
+| `work_start`, `work_adopt` | Launch a new job or import an existing thread; adoption requires both thread scopes |
+| `work_status`, `work_list`, `work_feed`, `work_messages` | Read job state, events and worker replies |
+| `work_continue`, `work_respond`, `work_settle`, `work_cancel` | Follow up, answer questions, settle or interrupt |
+
 ## Guides and reference
 
 | I want to… | Read this |
@@ -213,7 +250,7 @@ npm run dashboard:demo    # try the dashboard with made-up hosts and jobs
 npm run webhooks:smoke    # isolated HTTPS, retries and process-crash checks
 ```
 
-CI checks Node 24 and 26 on Linux, and Node 26 on macOS. The webhook smoke needs OpenSSL; see its [evidence and instructions](docs/evidence/webhooks.md). The optional [compatibility check](docs/operations.md#developer-compatibility-check) compares T3's MCP schemas and runs read-only probes; it installs no schedule.
+CI checks Node 24.22.1 and 26.12.1 on Linux, and Node 26.12.1 on macOS. The webhook smoke needs OpenSSL; see its [evidence and instructions](docs/evidence/webhooks.md). The optional [compatibility check](docs/operations.md#developer-compatibility-check) compares T3's MCP schemas and runs read-only probes; it installs no schedule.
 
 Contributing? Start with [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
 

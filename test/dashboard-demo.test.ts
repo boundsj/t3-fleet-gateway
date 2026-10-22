@@ -79,13 +79,13 @@ describe('dashboard demo fleet', () => {
     });
   });
 
-  test('empty: a fresh install, unchecked and unconnected', async () => {
+  test('empty: freshly enrolled hosts and no connected agents', async () => {
     await withFleet('empty', (snap) => {
       assert.equal(snap.clients.items.length, 0);
       assert.equal(snap.jobs.openTotal, 0);
       assert.equal(snap.events.length, 0);
       assert.equal(snap.checks, null);
-      assert.ok(snap.hosts.every((host) => host.reachability.state === 'unchecked'));
+      assert.ok(snap.hosts.every((host) => host.reachability.state === 'reachable'));
     });
   });
 

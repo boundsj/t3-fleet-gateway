@@ -54,9 +54,11 @@ export interface FakeItem {
 /** A model option as T3 advertises it in orchestrator_capabilities (a `select` with choices, or a `boolean`). */
 export interface FakeOption {
   id: string;
-  label: string;
+  label?: string;
+  values?: (string | boolean)[];
+  default?: string | boolean;
   description?: string;
-  type: 'select' | 'boolean' | string;
+  type?: 'select' | 'boolean' | string;
   options?: { id: string; label: string; description?: string; isDefault?: boolean }[];
   currentValue?: string | boolean;
 }
@@ -121,8 +123,9 @@ export interface FakeThread {
   items: FakeItem[];
   questions: Map<string, FakeQuestion[] | null>;
   approvalsPending: number;
-  /** Settled threads are listed only when t3_thread_list is asked for them (`settled: true`). */
+  /** Current T3 lists both shelves when settled is omitted. */
   settled: boolean;
+  archived?: boolean;
   createdAt: string;
   updatedAt: string;
   launch: Record<string, unknown>;
@@ -249,11 +252,14 @@ export class FakeT3 {
   readonly statusOnce = new Map<string, number>();
   /** Threads whose t3_thread_read answers in a shape that does not match T3's schema. */
   readonly brokenReads = new Set<string>();
+  /** Synthetic older/malformed detail fields, applied before the MCP result is serialized. */
+  readonly threadDetailOverrides = new Map<string, Record<string, unknown>>();
   /** Thread id to a T3 failure returned by t3_thread_read for that thread only. */
   readonly readFailures = new Map<string, { code: string; message: string }>();
   /**
    * Tools whose calls take effect but whose answer is held back until releaseHeld() or stop(). `initialize` holds a new
-   * session's MCP initialization before it is handled (a client still connecting).
+   * session's MCP initialization before it is handled (a client still connecting); `notifications/initialized`
+   * holds the final initialization notification's HTTP acknowledgement.
    */
   readonly holdResponses = new Set<string>();
   /**
@@ -611,6 +617,7 @@ export class FakeT3 {
     }
     const sessionId = req.headers['mcp-session-id'];
     if (sessionId === undefined && this.holdResponses.has('initialize') && isInitialize(body)) await this.#hold('initialize');
+    if (this.holdResponses.has('notifications/initialized') && isInitialized(body)) await this.#hold('notifications/initialized');
     let transport: WebStandardStreamableHTTPServerTransport;
     if (typeof sessionId === 'string') {
       const session = this.#sessions.get(sessionId);
@@ -716,8 +723,9 @@ export class FakeT3 {
       const matching = [...this.threads.values()]
         .filter(
           (thread) =>
-            thread.projectId === projectId &&
-            thread.settled === (input.settled ?? false) &&
+            thread.projectId === projectId && !thread.archived &&
+            (input.includeSubagents !== false || !this.#delegations.has(thread.threadId)) &&
+            (input.settled == null || thread.settled === input.settled) &&
             (!input.titleContains || thread.title.includes(input.titleContains)),
         )
         .reverse();
@@ -741,6 +749,20 @@ export class FakeT3 {
           return hit === undefined ? [] : [{ threadId: thread.threadId, projectId, source: 'user', snippet: hit.slice(0, 240), messageCreatedAt: null }];
         });
       return { matches: matches.slice(0, input.limit ?? 10) };
+    });
+    tool('t3_thread_organize', z.strictObject({ threadId: z.string(), action: z.literal('settle') }), ({ threadId }) => {
+      const thread = this.#thread(threadId);
+      if (this.#activeRun(thread)) throw new FakeFailure('orchestration_error', 'Thread is still running. Stop it before settling.');
+      if (thread.runs.some((run) => run.status === 'queued')) {
+        throw new FakeFailure('orchestration_error', 'Thread has a queued message. Send it or remove it from the queue before settling.');
+      }
+      if (thread.approvalsPending) {
+        throw new FakeFailure('orchestration_error', 'Thread is waiting on an approval or question. Answer it before settling.');
+      }
+      thread.questions.clear();
+      thread.settled = true;
+      thread.updatedAt = new Date().toISOString();
+      return { sequence: 1 };
     });
     tool('t3_thread_send', sendInput, (input) => this.#send(input));
     tool('t3_thread_interrupt', interruptInput, (input) => {
@@ -922,6 +944,7 @@ export class FakeT3 {
     const previous = key ? this.#sendResults.get(key) : undefined;
     if (previous) return previous;
     const thread = this.#thread(input.threadId);
+    thread.settled = false;
     this.sends.push({ threadId: thread.threadId, message: input.message, clientRequestId: input.clientRequestId ?? null });
     const active = this.#activeRun(thread);
     const run = active ?? this.#startRun(thread);
@@ -956,8 +979,8 @@ export class FakeT3 {
       settledAt: thread.settled ? thread.updatedAt : null,
       snoozed: false,
       snoozedUntil: null,
-      parentThreadId: null,
-      relationshipToParent: null,
+      parentThreadId: this.#delegations.get(thread.threadId)?.parentThreadId ?? null,
+      relationshipToParent: this.#delegations.has(thread.threadId) ? 'subagent' : null,
       itemCount: thread.items.length,
       createdAt: thread.createdAt,
       updatedAt: thread.updatedAt,
@@ -992,7 +1015,8 @@ export class FakeT3 {
         worktreePath: null,
         runCount: thread.runs.length,
         pendingRequestCount: thread.questions.size + thread.approvalsPending,
-        archived: false,
+        archived: thread.archived ?? false,
+        ...this.threadDetailOverrides.get(thread.threadId),
       },
       recentRuns: thread.runs.slice(-(input.runLimit ?? 10)).reverse(),
       items: page.map((item) => ({
@@ -1029,4 +1053,12 @@ function toolName(body: Buffer | undefined): string | undefined {
 
 export async function startFakeT3(options: FakeT3Options = {}): Promise<FakeT3> {
   return new FakeT3(options).start();
+}
+
+function isInitialized(body: Buffer | undefined): boolean {
+  try {
+    return (JSON.parse(body?.toString() ?? '') as { method?: unknown }).method === 'notifications/initialized';
+  } catch {
+    return false;
+  }
 }

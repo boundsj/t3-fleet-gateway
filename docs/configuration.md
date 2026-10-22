@@ -36,6 +36,10 @@ The HTTPS origin agents use, for example `https://gateway.example.ts.net` or `ht
 
 Default `[]`. Browser-based MCP clients send an `Origin` header; the gateway accepts requests with no `Origin` (server-to-server clients such as Grok Bot) or with an `Origin` equal to `publicUrl` or listed here. Add an origin only if a browser-based client you trust needs it.
 
+### `reachability`
+
+`{ "intervalMinutes": 5 }` by default. `serve` makes a lightweight authenticated `t3_environment_read` probe per configured, enrolled host 2–3 seconds after startup, then waits this interval plus 0–999 ms jitter after each probe completes. `intervalMinutes` must be an integer from 1 to 60; other values are `config_invalid`. Each probe has a five-second total deadline, no retry and no overlap per host. Shutdown cancels the loop and in-flight probes. Hosts without stored credentials are skipped. This does not enable catalog discovery or catalog refreshes. Successful ordinary host calls also update dashboard reachability with the time they completed.
+
 ### `hosts` (required, at least one)
 
 Each entry is a machine running a T3 Code server.
@@ -257,7 +261,7 @@ The file-managed alternative below remains supported. At most 32 saved active su
 
 Use `webhooks ping <id>` to test config without creating a job, then restart the gateway to apply file changes. The CLI also supports persisted dashboard connections; `webhooks list` identifies the management source. A 2xx test result means the receiver accepted the request; check the bot conversation for its result. `webhooks list` and `webhooks attempts <id> --limit 20` are offline diagnostics and do not apply their config over the serving process. Secrets are stored as plaintext inside the existing protected data directory/database, like downstream credentials. Keep config private too because URLs can contain credentials in their path/query. Protect backups.
 
-For an exact cross-host project filter, use `"targets": [{"host": "host-b", "projectId": "project-1"}]` in a subscription. Pairs are ORed and match both alias jobs and `target: {host, projectId}` jobs. If legacy `projects` (alias), `hosts` or `events` filters are also supplied, all filters must match. The dashboard lists configured aliases plus projects discovered from every enrolled host with `discovery.enabled`, grouped by host; a discovered selection records this exact pair. Unreachable hosts are marked unavailable. Existing alias/host connections retain their filters. Migration 14 changes no data, keys, revisions or enabled state, but prevents older builds from ignoring paired targets: rolling back requires a pre-upgrade database restore.
+For an exact cross-host project filter, use `"targets": [{"host": "host-b", "projectId": "project-1"}]` in a subscription. Pairs are ORed and match both alias jobs and `target: {host, projectId}` jobs. If legacy `projects` (alias), `hosts` or `events` filters are also supplied, all filters must match. The dashboard lists configured aliases plus projects discovered from every enrolled host with `discovery.enabled`, grouped by host; a discovered selection records this exact pair. Unreachable hosts are marked unavailable. Existing alias/host connections retain their filters. Migration 15 changes no data, keys, revisions or enabled state, but prevents older builds from ignoring paired targets: rolling back requires a pre-upgrade database restore.
 
 New subscriptions do not replay history. Disabling/removing a subscription, or changing its route, key, filters or excerpt policy, cancels its old queue. Unchanged routes resume after restart. An already transmitted request can still arrive. Payloads are capped at 16 KiB; oversized upstream metadata increments the same explicit overflow diagnostic as a full queue. [Delivery, overflow, retention and feed catch-up](design.md#outbound-job-webhooks) define recovery; retain polling even when notifications work.
 

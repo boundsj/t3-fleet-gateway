@@ -400,11 +400,11 @@ describe('webhook migration and durable store boundaries', () => {
   });
 });
 
-test('migration 14 preserves populated v13 subscriptions, secrets, revisions, queues and diagnostics byte-for-byte', (t) => {
+test('migration 15 preserves populated v14 subscriptions, secrets, revisions, queues and diagnostics byte-for-byte', (t) => {
   const path = join(tempDir(t), 'previous.db');
   const db = new DatabaseSync(path);
   t.after(() => db.close());
-  migrate(db, MIGRATIONS.slice(0, 13));
+  migrate(db, MIGRATIONS.slice(0, 14));
   const clock = testClock();
   const webhooks = new WebhookStore(db, clock);
   const jobs = new JobStore(db, clock, silentLogger);
@@ -418,10 +418,10 @@ test('migration 14 preserves populated v13 subscriptions, secrets, revisions, qu
   const tables = ['webhook_subscriptions', 'webhook_deliveries', 'webhook_attempts', 'job_events', 'jobs'];
   const before = tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
   migrate(db);
-  assert.equal(schemaVersion(db), 14);
+  assert.equal(schemaVersion(db), 15);
   assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
   assert.deepEqual(webhooks.route(connection.id, connection.revision), dashboardRoute);
-  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 13)), /schema version 14 is newer/);
+  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 14)), /schema version 15 is newer/);
   assert.equal(webhooks.claim(1, 30_000).length, 1, 'pending delivery still dispatches');
 });
 
