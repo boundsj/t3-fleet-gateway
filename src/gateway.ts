@@ -243,8 +243,8 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
     logger.info('gateway.stopping');
     ready = false;
     const stoppedManagement = management.stop();
-    // Not awaited: a call still in flight ends when the T3 clients close below.
     const stoppedReachability = reachability?.stop();
+    // Not awaited: a startup model call still in flight ends when the T3 clients close below.
     modelCheck.abort();
     commandCheck.abort();
     await dashboard?.close();

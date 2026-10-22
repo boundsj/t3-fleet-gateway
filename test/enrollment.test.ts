@@ -57,6 +57,9 @@ describe('host enrollment', () => {
     assert.equal(status.state, 'active');
     assert.equal(status.daysLeft, 29);
     assert.equal(status.renewalError, null);
+    assert.equal(registry.lastHealth('main')?.reachable, true);
+    assert.equal(registry.lastHealth('main')?.t3Version, fake.serverVersion);
+    assert.ok(registry.lastHealth('main')!.checkedAt >= credential.verifiedAt);
     assert.equal((await registry.health('main')).reachable, true);
   });
 
@@ -85,6 +88,9 @@ describe('credential renewal', () => {
     assert.equal(registry.credentialStatus('main').state, 'renewal_due');
     await registry.renewDue();
     const second = store.get('main');
+    assert.equal(registry.lastHealth('main')?.reachable, true, 'renewal retains the verified contact');
+    assert.equal(registry.lastHealth('main')?.t3Version, fake.serverVersion);
+    assert.ok(registry.lastHealth('main')!.checkedAt >= second!.verifiedAt);
     assert.ok(first && second);
     assert.notEqual(second.accessToken, first.accessToken);
     fake.validTokens.delete(first.accessToken);

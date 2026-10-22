@@ -117,6 +117,8 @@ function sessionFailed(error: unknown, sent: boolean): boolean {
 
 interface Connection {
   client: Promise<Client>;
+  instance: Client;
+  cancel: () => void;
   token: string;
   /** Increases with every new connection, so a late failure on an old one cannot close a newer one. */
   generation: number;
@@ -322,8 +324,13 @@ export class T3Client {
     if (!this.#connection) {
       const client = new Client({ name: GATEWAY_NAME, version: GATEWAY_VERSION });
       const transport = new StreamableHTTPClientTransport(this.#url, { authProvider: { token: async () => token } });
+      // The SDK does not pass the request signal to notifications/initialized. Close the transport
+      // directly on lifetime cancellation, even when connect() has not finished that notification.
+      const cancel = () => { void client.close().catch(() => {}); };
       const connecting = client.connect(transport, { timeout, signal: this.#signal }).then(() => client);
-      this.#connection = { client: connecting, token, generation: ++this.#generation };
+      this.#signal?.addEventListener('abort', cancel, { once: true });
+      if (this.#signal?.aborted) cancel();
+      this.#connection = { client: connecting, instance: client, cancel, token, generation: ++this.#generation };
     }
     return this.#connection;
   }
@@ -333,8 +340,9 @@ export class T3Client {
     const connection = this.#connection;
     if (!connection || (generation !== undefined && connection.generation !== generation)) return;
     this.#connection = undefined;
+    this.#signal?.removeEventListener('abort', connection.cancel);
     try {
-      await (await connection.client).close();
+      await connection.instance.close();
     } catch {
       // The connection already failed; nothing to close.
     }

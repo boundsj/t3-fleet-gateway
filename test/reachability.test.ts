@@ -76,7 +76,7 @@ test('failed probes wait until the next interval; stop aborts and drains in-flig
 test('successful non-probe catalog and project calls update reachability at completion; outage and auth recover', async (t) => {
   const { fake, gw } = await startJobHarness(t);
   const { registry, catalog } = gw.services;
-  assert.equal(registry.lastHealth('main'), null);
+  assert.equal(registry.lastHealth('main')?.reachable, true, 'enrollment verification is a successful contact');
   gw.clock.advance(1000);
   await registry.client('main').readCapabilities();
   assert.equal(registry.lastHealth('main')?.reachable, true);
@@ -168,4 +168,36 @@ test('gateway startup schedules probes, skips missing credentials and stops prob
   t.mock.timers.tick(60 * MINUTE);
   await flush();
   assert.equal(fake.calls.length, count);
+});
+
+
+test('the total deadline aborts a stalled initialized notification and shutdown drains it', async (t) => {
+  const { fake, gw } = await startJobHarness(t);
+  const { registry } = gw.services;
+  fake.holdResponses.add('notifications/initialized');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const loop = startReachabilityLoop(registry, MINUTE, () => 0);
+  t.after(() => loop.stop());
+  t.mock.timers.tick(2000);
+  await fake.whenHeld('notifications/initialized');
+  t.mock.timers.tick(REACHABILITY_TIMEOUT_MS);
+  await loop.stop();
+  assert.equal(registry.lastHealth('main')?.error?.code, 't3_timeout');
+  assert.equal(registry.lastHealth('main')?.reachable, false);
+  fake.releaseHeld();
+});
+
+test('shutdown cancels a stalled initialized notification without recording a failure', async (t) => {
+  const { fake, gw } = await startJobHarness(t);
+  const { registry } = gw.services;
+  const previous = registry.lastHealth('main');
+  fake.holdResponses.add('notifications/initialized');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const loop = startReachabilityLoop(registry, MINUTE, () => 0);
+  t.after(() => loop.stop());
+  t.mock.timers.tick(2000);
+  await fake.whenHeld('notifications/initialized');
+  await loop.stop();
+  assert.deepEqual(registry.lastHealth('main'), previous);
+  fake.releaseHeld();
 });

@@ -239,7 +239,7 @@ export class HostRegistry {
       store.save(credential);
       store.recordRenewal(id, clock(), { ok: true });
       this.#health.delete(id);
-      this.#lastHealth.delete(id);
+      this.#recordContact(id, undefined, t3Version);
       logger.info('host.enrollment_succeeded', { hostId: id, expiresAt: new Date(credential.expiresAt).toISOString() });
       return { hostId: id, t3Version, expiresAt: credential.expiresAt };
     } catch (error) {
