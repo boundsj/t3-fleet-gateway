@@ -315,6 +315,7 @@ describe('dashboard: hosts', () => {
     let snap = await snapshot(h.port);
     assert.equal(snap.hosts[0]!.reachability.state, 'reachable');
     assert.equal(snap.hosts[0]!.reachability.checkedAt, new Date(h.gw.clock()).toISOString());
+    assert.equal(snap.hosts[0]!.reachability.detail, 'T3 answered an authenticated host call with the stored credential.');
     assert.ok(snap.attention.some((item) => item.kind === 'host' && /Model catalog/.test(item.title)));
     await h.gw.services.catalog.models('main', { refresh: true });
     snap = await snapshot(h.port);

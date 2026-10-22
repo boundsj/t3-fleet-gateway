@@ -129,7 +129,7 @@ function hostView(sources: DashboardSources, host: HostConfig, counts: Map<strin
   } else if (health.reachable === true) {
     reachability = {
       state: 'reachable', checkedAt: iso(health.checkedAt), t3Version: safeVersion(health.t3Version), errorCode: null,
-      detail: 'T3 answered an authenticated read (t3_environment_read) with the stored credential.',
+      detail: 'T3 answered an authenticated host call with the stored credential.',
     };
   } else {
     const code = safeCode(health.error?.code ?? null);

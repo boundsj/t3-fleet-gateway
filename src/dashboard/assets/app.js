@@ -385,7 +385,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
       lede = `${plural(unchecked, 'host')} ${unchecked === 1 ? 'has' : 'have'} not been checked since the gateway started. Run checks to ask ${unchecked === 1 ? 'it' : 'them'} now.`;
     } else {
       headline = 'All clear';
-      lede = 'Every host answered its last check, and no job is waiting on you.';
+      lede = 'Every host answered its last observed call, and no job is waiting on you.';
     }
     return [
       pageHead('Overview', headline, lede, checksButton(),
@@ -413,7 +413,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     const tile = (href, tone, iconName, label, value, sub) => h('a', { class: `panel vital tone-edge-${tone}`, href },
       h('span', { class: 'vital__label' }, icon(iconName), label), h('span', { class: 'vital__value' }, value), h('span', { class: 'vital__sub' }, sub));
     const d = derived;
-    const hostSub = [d.unreachable && `${d.unreachable} unreachable`, d.hostWarn && `${d.hostWarn} ${d.hostWarn === 1 ? 'needs' : 'need'} attention`, d.unchecked && `${d.unchecked} not checked`].filter(Boolean).join(' · ') || 'all answered their last check';
+    const hostSub = [d.unreachable && `${d.unreachable} unreachable`, d.hostWarn && `${d.hostWarn} ${d.hostWarn === 1 ? 'needs' : 'need'} attention`, d.unchecked && `${d.unchecked} not checked`].filter(Boolean).join(' · ') || 'all answered their last observed call';
     const clientSub = [d.needsApproval && `${d.needsApproval} unusable`, d.neverSeen && `${d.neverSeen} never observed`, d.quiet && `${d.quiet} quiet`].filter(Boolean).join(' · ') || 'all seen in the last day';
     const waitingSub = [d.waiting && `${d.waiting} waiting on you`, snap.jobs.counts.queued && `${snap.jobs.counts.queued} queued`, snap.jobs.counts.running && `${snap.jobs.counts.running} running`].filter(Boolean).join(' · ') || 'nothing waiting';
     return h('div', { class: 'vitals' },
@@ -561,7 +561,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
   function hostsView() {
     return [
       pageHead('Hosts', 'T3 machines',
-        'Reachability is the last check this gateway made; this page never contacts T3 by itself. Transport notes are your own description from the config: the gateway checks only whether T3 answers at its URL.', checksButton()),
+        'Reachability reflects the last completed host call or background probe; this page never contacts T3 by itself. Transport notes are your own description from the config: the gateway checks only whether T3 answers at its URL.', checksButton()),
       h('div', { class: 'cards cards--wide' }, snap.hosts.map(hostCard)),
     ];
   }
@@ -589,7 +589,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
       h('div', { class: 'entity__cols entity__cols--3' },
         h('div', { class: 'entity__col' }, h('h3', null, icon('link'), 'Reachability'),
           kv([
-            ['Last check', r.checkedAt ? time(r.checkedAt) : h('span', { class: 'muted' }, 'none yet')],
+            ['Last observation', r.checkedAt ? time(r.checkedAt) : h('span', { class: 'muted' }, 'none yet')],
             ['Result', pill(reachTone, REACH_LABELS[r.state] ?? r.state)],
             ['Model catalog', (() => {
               const signal = host.signals?.find((entry) => entry.kind === 'models');
