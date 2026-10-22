@@ -10,7 +10,7 @@ function grant(h: JobHarness, clientId = h.agent.clientId, scopes = [THREAD_READ
   return changeThreadScopes(h.gw.services.db, h.gw.clock, clientId, 'grant', scopes);
 }
 function external(h: JobHarness, title = 'Synthetic external thread') {
-  return h.fake.launchDirect({ projectId: 'project-1', title, message: 'Synthetic external task' }).threadId;
+  return h.fake.launchDirect({ projectId: 'project-1', title, runtimeMode: 'auto', message: 'Synthetic external task' }).threadId;
 }
 interface ListedThread { threadId: string; title: string; state: string; archived: boolean | null; settled: boolean | null; gatewayOwned: boolean; jobId: string | null; origin: string | null }
 interface Page { threads: ListedThread[]; nextCursor: string | null; total: number; readAt: string }
@@ -185,6 +185,7 @@ test('operator grants/revokes existing client scopes in place, idempotently, wit
   };
   const stored = () => h.gw.services.db.prepare('SELECT * FROM access_tokens ORDER BY created_at, token_hash').all();
   const before = stored();
+  const grantsBefore = ['refresh_tokens', 'token_families'].map((table) => h.gw.services.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
   assert.equal((await agent.callError('fleet_threads', target)).code, 'insufficient_scope');
   const args = ['--scope', THREAD_READ_SCOPE, '--scope', THREAD_CONTROL_SCOPE];
   assert.equal((await cli('grant', client.clientId, ...args)).code, 0);
@@ -209,9 +210,88 @@ test('operator grants/revokes existing client scopes in place, idempotently, wit
   assert.match((await cli('revoke', client.clientId, ...args)).out, /unchanged/);
   assert.equal((await agent.callError('fleet_threads', target)).code, 'insufficient_scope');
   assert.deepEqual(stored(), before);
+  assert.deepEqual(['refresh_tokens', 'token_families'].map((table) => h.gw.services.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), grantsBefore);
   await agent.call('fleet_status');
   const audits = h.gw.services.db.prepare('SELECT client_id, action, scope, changed FROM operator_scope_events ORDER BY id').all();
   assert.equal(audits.length, 8);
   assert.ok(audits.every((entry) => entry.client_id === client.clientId));
   assert.deepEqual(audits.map((entry) => entry.changed), [1, 1, 0, 0, 1, 1, 0, 0]);
+});
+
+test('adopted resumes revalidate project membership and runtime ceilings; observation never changes T3 settings', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } } });
+  grant(h);
+  const threadId = external(h);
+  h.fake.finishTurn(threadId, 'Synthetic reply');
+  const { job } = await h.agent.call<Adoption>('work_adopt', { ...target, threadId, requestId: 'adopt-policy' });
+  const thread = h.fake.threads.get(threadId)!;
+  thread.runtimeMode = 'full-access';
+  assert.equal((await h.agent.callError('work_continue', { jobId: job.jobId, message: 'Synthetic', requestId: 'resume' })).code, 'job_state_conflict');
+  assert.equal(h.fake.sends.length, 0);
+  const question = h.fake.askQuestion(threadId, [{ id: 'q', header: 'Synthetic', question: 'Synthetic', options: [] }]);
+  assert.equal((await h.agent.callError('work_respond', { jobId: job.jobId, requestId: question, answers: {} })).code, 'job_state_conflict');
+  assert.equal(h.fake.responses.length, 0);
+  await h.agent.call('work_status', { jobId: job.jobId });
+  thread.runtimeMode = 'auto';
+  thread.projectId = 'project-2';
+  assert.equal((await h.agent.callError('work_continue', { jobId: job.jobId, message: 'Synthetic', requestId: 'resume' })).code, 'job_state_conflict');
+  assert.equal(h.fake.sends.length, 0);
+  thread.projectId = 'project-1';
+  thread.questions.clear();
+  await h.agent.call('work_continue', { jobId: job.jobId, message: 'Synthetic', requestId: 'resume' });
+  assert.equal(h.fake.sends.length, 1, 'a refused preflight does not poison the request id');
+  assert.equal(thread.runtimeMode, 'auto');
+});
+
+test('archived and delegated child threads cannot be adopted; gateway launch markers cannot be hijacked before reconciliation', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } } });
+  grant(h);
+  const parent = external(h);
+  const { childThreadId } = h.fake.delegate(parent, 'Synthetic delegated work');
+  const archived = external(h);
+  h.fake.threads.get(archived)!.archived = true;
+  for (const threadId of [childThreadId, archived]) {
+    assert.equal((await h.agent.callError('work_adopt', { ...target, threadId, requestId: threadId })).code, 'job_state_conflict');
+  }
+  const page = await h.agent.call<Page>('fleet_threads', target);
+  assert.deepEqual(page.threads.map((thread) => thread.threadId), [parent]);
+  const queued = await startJob(h.agent);
+  const marker = external(h, h.gw.services.jobs.store.require(queued.jobId).title);
+  assert.equal((await h.agent.callError('work_adopt', { ...target, threadId: marker, requestId: 'marker' })).code, 'job_state_conflict');
+  assert.equal(h.gw.services.jobs.store.require(queued.jobId).threadId, null);
+});
+
+test('durable thread audits include every authorized action and are append-only and content-free', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } } });
+  grant(h);
+  const threadId = external(h);
+  const input = { ...target, threadId, requestId: 'adopt-audit' };
+  const { job } = await h.agent.call<Adoption>('work_adopt', input);
+  await h.agent.call('work_adopt', input);
+  await h.agent.call('work_continue', { jobId: job.jobId, message: 'Synthetic sensitive follow-up', requestId: 'send-audit' });
+  await h.agent.call('work_cancel', { jobId: job.jobId });
+  h.gw.services.jobs.release(job.jobId);
+  const rows = h.gw.services.db.prepare('SELECT * FROM thread_action_events ORDER BY id').all();
+  assert.deepEqual(rows.map((row) => row.action), ['adopt', 'adopt_replayed', 'continue', 'interrupt', 'release']);
+  assert.ok(rows.every((row) => row.host_id === 'main' && row.thread_id === threadId && row.job_id === job.jobId));
+  assert.equal(rows.at(-1)?.client_id, 'operator');
+  assert.equal(JSON.stringify(rows).includes('Synthetic'), false);
+  assert.throws(() => h.gw.services.db.exec('UPDATE thread_action_events SET action = action'), /append-only/);
+  assert.throws(() => h.gw.services.db.exec('DELETE FROM thread_action_events'), /append-only/);
+  assert.throws(() => h.gw.services.db.exec('UPDATE operator_scope_events SET action = action'), /append-only/);
+});
+
+test('release during an adopted resume preflight prevents the later send', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } } });
+  grant(h);
+  const threadId = external(h);
+  const { job } = await h.agent.call<Adoption>('work_adopt', { ...target, threadId, requestId: 'adopt-release-race' });
+  h.fake.holdResponses.add('t3_project_list');
+  const sending = h.agent.callError('work_continue', { jobId: job.jobId, message: 'Synthetic', requestId: 'release-race' });
+  await h.fake.whenHeld('t3_project_list');
+  h.gw.services.jobs.release(job.jobId);
+  h.fake.holdResponses.delete('t3_project_list');
+  h.fake.releaseHeld();
+  assert.equal((await sending).code, 'job_state_conflict');
+  assert.equal(h.fake.sends.length, 0);
 });

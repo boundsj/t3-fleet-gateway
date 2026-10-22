@@ -187,6 +187,7 @@ export const threadReadSchema = z.looseObject({
     settledAt: z.string().nullable().optional(),
     archived: z.boolean().optional(),
     relationshipToParent: z.string().nullable().optional(),
+    runtimeMode: z.string().optional(),
     branch: z.string().nullable(),
     updatedAt: z.string(),
   }).transform(withThreadLink),

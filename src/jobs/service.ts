@@ -1,4 +1,4 @@
-import { configuredModel, type GatewayConfig, type HostConfig, type ProjectConfig } from '../config.ts';
+import { configuredModel, RUNTIME_MODES, runtimeModeAllowed, type GatewayConfig, type HostConfig, type ProjectConfig } from '../config.ts';
 import { sha256Hex } from '../crypto.ts';
 import { describeError, GatewayError } from '../errors.ts';
 import type { CatalogProject, CatalogService } from '../hosts/catalog.ts';
@@ -325,6 +325,33 @@ export class JobService {
 
   #auditThread(caller: Caller, job: Job, action: Parameters<JobStore['auditThread']>[2]): void {
     this.store.auditThread(job, caller.clientId, action);
+  }
+
+  /** Imported threads can be reconfigured in T3. Resuming must not bypass the current project or host ceiling. */
+  async #validateAdoptedResume(job: Job): Promise<void> {
+    if (job.origin !== 'adopted' || job.threadId === null) return;
+    const host = this.#config.hosts.find((candidate) => candidate.id === job.hostId);
+    if (!host) throw new GatewayError('not_found', 'The adopted thread host is no longer configured.');
+    // State only, messages view; no history is needed to validate the resume policy.
+    const { thread } = await this.#registry.client(job.hostId).readThread({
+      threadId: job.threadId, view: 'messages', limit: 1, runLimit: 1, maxCharsPerItem: 1,
+    });
+    if (thread.threadId !== job.threadId || thread.projectId !== job.t3ProjectId || thread.archived || thread.relationshipToParent === 'subagent') {
+      throw new GatewayError('job_state_conflict', 'The imported thread changed project or is no longer a resumable thread. Check it in T3.');
+    }
+    const projects = (await this.#catalog.projects(job.hostId, { refresh: true })).value;
+    const mapping = mapProjects(this.#config, job.hostId, projects).get(thread.projectId);
+    if (!mapping) throw new GatewayError('not_found', 'The adopted thread project is no longer available.');
+    const policy = launchPolicy(host, mapping);
+    if (policy.kind === 'ambiguous') throw new GatewayError('job_state_conflict', 'The adopted thread project has ambiguous configured aliases.');
+    const ceiling = policy.kind === 'alias' ? policy.project.runtimeMode : host.discovery.runtimeMode;
+    const mode = RUNTIME_MODES.find((candidate) => candidate === thread.runtimeMode);
+    if (!mode || !runtimeModeAllowed(mode, host.access) || RUNTIME_MODES.indexOf(mode) > RUNTIME_MODES.indexOf(ceiling)) {
+      throw new GatewayError('job_state_conflict', 'The imported thread runtime mode is unknown or exceeds its current project/host ceiling. Nothing was sent. Review it in T3.');
+    }
+    if (isTerminal(this.store.require(job.id).state)) {
+      throw new GatewayError('job_state_conflict', 'The adopted job was released while its resume was being checked. Nothing was sent.');
+    }
   }
 
   /**
@@ -994,6 +1021,12 @@ export class JobService {
     }
     const threadId = job.threadId;
     if (threadId === null) throw new GatewayError('job_state_conflict', `Job ${job.id} has no thread.`);
+    try {
+      await this.#validateAdoptedResume(job);
+    } catch (error) {
+      if (!key) this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
+      throw error;
+    }
     // Resuming an idle job that works in the project's own folder takes the folder back first, before anything is sent: while
     // another job holds it the follow-up waits, and the same requestId may be sent again later.
     const attempt = job.state === 'idle' ? this.store.reserveRoot(job.id, `continue:${caller.clientId}:${input.requestId}`) : ({ kind: 'not_needed' } as const);
@@ -1034,6 +1067,7 @@ export class JobService {
     if (job.threadId === null || isTerminal(job.state)) {
       throw new GatewayError('job_state_conflict', `Job ${job.id} is ${job.state}; it has no question to answer.`);
     }
+    await this.#validateAdoptedResume(job);
     const client = this.#registry.client(job.hostId);
     const pending = await client.listPendingRequests(job.threadId);
     if (!pending.includes(input.requestId)) {
