@@ -349,6 +349,42 @@ CREATE UNIQUE INDEX jobs_workspace_root_held ON jobs(host_id, workspace_root_key
     sql: `ALTER TABLE jobs ADD COLUMN pull_requests TEXT;
 ALTER TABLE jobs ADD COLUMN pull_requests_checked_at INTEGER;`,
   },
+  {
+    version: 14,
+    name: 'external thread adoption and client opt-in scopes',
+    sql: `ALTER TABLE jobs ADD COLUMN origin TEXT NOT NULL DEFAULT 'gateway' CHECK (origin IN ('gateway', 'standing', 'adopted'));
+UPDATE jobs SET origin = 'standing' WHERE standing = 1;
+ALTER TABLE jobs ADD COLUMN adopted_by TEXT;
+ALTER TABLE jobs ADD COLUMN adopted_at INTEGER;
+UPDATE jobs SET adopted_by = 'operator', adopted_at = created_at WHERE standing = 1;
+CREATE INDEX jobs_host_thread ON jobs(host_id, t3_thread_id);
+CREATE TABLE client_thread_scopes (
+  client_id TEXT NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE,
+  scope TEXT NOT NULL CHECK (scope IN ('threads:read', 'threads:control')),
+  PRIMARY KEY (client_id, scope)
+) STRICT;
+CREATE TABLE operator_scope_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  action TEXT NOT NULL CHECK (action IN ('grant', 'revoke')),
+  scope TEXT NOT NULL,
+  changed INTEGER NOT NULL CHECK (changed IN (0, 1)),
+  created_at INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER operator_scope_events_no_update BEFORE UPDATE ON operator_scope_events BEGIN SELECT RAISE(ABORT, 'scope events are append-only'); END;
+CREATE TRIGGER operator_scope_events_no_delete BEFORE DELETE ON operator_scope_events BEGIN SELECT RAISE(ABORT, 'scope events are append-only'); END;
+CREATE TABLE thread_action_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  host_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  job_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER thread_action_events_no_update BEFORE UPDATE ON thread_action_events BEGIN SELECT RAISE(ABORT, 'thread actions are append-only'); END;
+CREATE TRIGGER thread_action_events_no_delete BEFORE DELETE ON thread_action_events BEGIN SELECT RAISE(ABORT, 'thread actions are append-only'); END;`,
+  },
 ];
 
 /**

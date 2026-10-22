@@ -5,7 +5,7 @@ import type { HostRegistry } from '../hosts/registry.ts';
 import { jobCountsByHost } from '../jobs/counts.ts';
 import type { JobService } from '../jobs/service.ts';
 import { JOB_STATES } from '../jobs/states.ts';
-import { permits, READ_SCOPE } from '../oauth/scopes.ts';
+import { permits, READ_SCOPE, THREAD_READ_SCOPE } from '../oauth/scopes.ts';
 import { isoTime } from '../time.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
 import { defineTool } from './tools.ts';
@@ -159,7 +159,7 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
           };
         }),
       );
-      const standing = deps.jobs.store.standingJobs().filter((job) => visible(job.hostId));
+      const standing = context.scopes.includes(THREAD_READ_SCOPE) ? deps.jobs.store.standingJobs().filter((job) => visible(job.hostId)) : [];
       const projects = deps.config.projects.filter((project) => visible(project.host)).map((project) => ({
         alias: project.alias,
         description: project.description,

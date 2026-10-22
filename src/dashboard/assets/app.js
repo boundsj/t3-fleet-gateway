@@ -675,7 +675,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     if (job.error) flags.push(h('span', { class: 'tag tag--mono tone-bad', title: job.error.detail ?? 'Error code recorded on the job' }, job.error.code));
     return h('li', { class: 'panel job' },
       h('div', null,
-        h('p', { class: 'job__title' }, job.title, job.standing ? tag('standing') : null,
+        h('p', { class: 'job__title' }, job.title, job.origin === 'adopted' ? tag('adopted') : job.standing ? tag('standing') : null,
           ...(job.pullRequests ?? []).map((pr) => tag(`PR #${pr.number} ${pr.state ?? 'unknown'}`))),
         h('p', { class: 'job__meta' },
           h('span', { class: 'mono' }, job.projectName ? `${job.projectName}` : job.project),

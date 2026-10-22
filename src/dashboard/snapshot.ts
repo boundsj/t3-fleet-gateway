@@ -364,6 +364,7 @@ export interface JobView {
   hostId: string;
   state: JobState;
   standing: boolean;
+  origin: Job['origin'];
   startedBy: { clientId: string | null; label: string };
   runtimeMode: string;
   createdAt: Time;
@@ -392,6 +393,7 @@ function jobView(job: Job, clientLabels: Map<string, string>, settlementAcknowle
     hostId: job.hostId,
     state: job.state,
     standing: job.standing,
+    origin: job.origin,
     startedBy: isOperator ? { clientId: null, label: 'Operator (standing job)' } : { clientId: job.clientId, label: clientLabels.get(job.clientId) ?? 'Removed client' },
     runtimeMode: job.runtimeMode,
     createdAt: iso(job.createdAt),

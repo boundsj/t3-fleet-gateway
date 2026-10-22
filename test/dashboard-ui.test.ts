@@ -12,7 +12,7 @@ const ago = (minutes: number) => new Date(Date.parse(NOW) - minutes * 60_000).to
 /** Every string the server could carry from untrusted or operator-written input is hostile here. */
 function hostileSnapshot(): DashboardSnapshot {
   const job = (id: string, state: DashboardSnapshot['jobs']['open'][number]['state'], link: string | null) => ({
-    id, title: `${EVIL} job`, project: EVIL, projectName: EVIL, hostId: 'h1', state, standing: false,
+    id, title: `${EVIL} job`, project: EVIL, projectName: EVIL, hostId: 'h1', state, standing: false, origin: 'gateway',
     startedBy: { clientId: 'c1', label: EVIL }, runtimeMode: EVIL, createdAt: ago(60), stateChangedAt: ago(5), updatedAt: ago(5), finishedAt: ago(5),
     waitingFor: state === 'needs_input' ? 'approval' as const : null, pendingQuestions: 0,
     delegated: { following: 1, untracked: 0, endedAt: null }, hostUnreachableSince: ago(3), error: { code: EVIL, detail: EVIL }, link,
@@ -122,6 +122,19 @@ describe('dashboard page: safe rendering', () => {
     app.render(doc, root, { ...model, route: { view: 'overview', id: null } }, handlers, Date.parse(NOW));
     root.click('Copy');
     assert.deepEqual(calls, ['filter:open', 'runChecks', `copy:${EVIL}`]);
+  });
+
+  test('an adopted thread is distinguished from an operator standing job', async () => {
+    const app = await loadApp();
+    const doc = new FakeDocument();
+    const root = doc.createElement('div');
+    const snapshot = hostileSnapshot();
+    snapshot.jobs.attention[0]!.origin = 'adopted';
+    snapshot.jobs.attention[0]!.standing = true;
+    app.render(doc, root, { snapshot, route: { view: 'jobs', id: null }, error: null, notice: null, loading: false, checking: false,
+      fetchedAt: Date.parse(NOW), jobFilter: 'attention' }, actions().handlers, Date.parse(NOW));
+    assert.ok(root.textContent.includes('adopted'));
+    assertSafeTree(root);
   });
 
   test('loading, error and busy states; unknown times are never invented', async () => {

@@ -123,8 +123,9 @@ export interface FakeThread {
   items: FakeItem[];
   questions: Map<string, FakeQuestion[] | null>;
   approvalsPending: number;
-  /** Settled threads are listed only when t3_thread_list is asked for them (`settled: true`). */
+  /** Current T3 lists both shelves when settled is omitted. */
   settled: boolean;
+  archived?: boolean;
   createdAt: string;
   updatedAt: string;
   launch: Record<string, unknown>;
@@ -720,8 +721,9 @@ export class FakeT3 {
       const matching = [...this.threads.values()]
         .filter(
           (thread) =>
-            thread.projectId === projectId &&
-            thread.settled === (input.settled ?? false) &&
+            thread.projectId === projectId && !thread.archived &&
+            (input.includeSubagents !== false || !this.#delegations.has(thread.threadId)) &&
+            (input.settled == null || thread.settled === input.settled) &&
             (!input.titleContains || thread.title.includes(input.titleContains)),
         )
         .reverse();
@@ -975,8 +977,8 @@ export class FakeT3 {
       settledAt: thread.settled ? thread.updatedAt : null,
       snoozed: false,
       snoozedUntil: null,
-      parentThreadId: null,
-      relationshipToParent: null,
+      parentThreadId: this.#delegations.get(thread.threadId)?.parentThreadId ?? null,
+      relationshipToParent: this.#delegations.has(thread.threadId) ? 'subagent' : null,
       itemCount: thread.items.length,
       createdAt: thread.createdAt,
       updatedAt: thread.updatedAt,
@@ -1011,7 +1013,7 @@ export class FakeT3 {
         worktreePath: null,
         runCount: thread.runs.length,
         pendingRequestCount: thread.questions.size + thread.approvalsPending,
-        archived: false,
+        archived: thread.archived ?? false,
       },
       recentRuns: thread.runs.slice(-(input.runLimit ?? 10)).reverse(),
       items: page.map((item) => ({

@@ -123,6 +123,9 @@ export const threadSummarySchema = z.looseObject({
   latestRunId: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  settled: z.boolean().optional(),
+  settledAt: z.string().nullable().optional(),
+  archived: z.boolean().optional(),
 }).transform(withThreadLink);
 export type ThreadSummary = z.infer<typeof threadSummarySchema>;
 
@@ -183,6 +186,7 @@ export const threadReadSchema = z.looseObject({
     settled: z.boolean().optional(),
     settledAt: z.string().nullable().optional(),
     archived: z.boolean().optional(),
+    relationshipToParent: z.string().nullable().optional(),
     branch: z.string().nullable(),
     updatedAt: z.string(),
   }).transform(withThreadLink),

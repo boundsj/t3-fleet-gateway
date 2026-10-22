@@ -197,6 +197,37 @@ Give me its job ID. Leave the thread and any work running in it alone.
 
 Give that request to your setup agent, then tell your bot to use the returned job ID with `work_continue`. The gateway follows the coordinator's replies and delegated work. Interrupting a standing job stops its current turn; it keeps the thread available for the next request. [Standing jobs and coordinator-only projects](docs/operations.md#standing-jobs).
 
+## Use threads opened directly in T3
+
+An operator can opt one existing connector into thread discovery and control without replacing its token:
+
+```sh
+t3-fleet-gateway clients list
+t3-fleet-gateway clients grant <clientId> --scope threads:read --scope threads:control
+t3-fleet-gateway clients scopes <clientId>
+```
+
+Choose the client by its name, sign-in origin, creation time and last use. If names overlap, trigger a known connector request and match its `mcp.tool_call` log's `clientId` or the observed success time in `clients diagnose <clientId>`. The gateway cannot identify which saved token a connector holds. Never paste that token into a diagnostic command.
+
+Ask the connector to call `fleet_projects`, then `fleet_threads { host: "host-a", projectId: "project-x" }`, then `work_adopt { host: "host-a", projectId: "project-x", threadId: "thread-x", requestId: "adopt-1" }`. The host must already have discovery enabled, and the connector still needs Read/Operate on that host. Adoption only reads T3; its returned job works with the existing work tools. Adopted jobs show an **adopted** badge, use no launch slot, and `work_cancel` interrupts their current turn. The operator can stop tracking with `jobs release <jobId>`.
+
+Remove the extra access, keeping the connector's token and ordinary gateway access:
+
+```sh
+t3-fleet-gateway clients revoke <clientId> --scope threads:control --scope threads:read
+t3-fleet-gateway clients scopes <clientId>
+```
+
+Grant/revoke applies on the next request without a restart, and affects only that client. Omitting `--scope` from `clients revoke` still revokes the **whole client**. No existing client receives these scopes automatically. Operator standing jobs also require the explicit thread scopes for agent reads/control; operators retain the private dashboard and CLI paths. [Authorization and API limitations](docs/design.md#external-thread-discovery-and-adoption).
+
+| MCP tools | Purpose |
+| --- | --- |
+| `fleet_status`, `fleet_projects`, `fleet_models` | Host status, projects and current advertised models/options |
+| `fleet_threads` | Read-only, paginated T3 thread discovery; requires `threads:read` |
+| `work_start`, `work_adopt` | Launch a new job or import an existing thread; adoption requires both thread scopes |
+| `work_status`, `work_list`, `work_feed`, `work_messages` | Read job state, events and worker replies |
+| `work_continue`, `work_respond`, `work_settle`, `work_cancel` | Follow up, answer questions, settle or interrupt |
+
 ## Guides and reference
 
 | I want to… | Read this |

@@ -3,6 +3,8 @@ import { DashboardChecks } from './dashboard/checks.ts';
 import { startDashboard, type RunningDashboard } from './dashboard/server.ts';
 import { openDataDir } from './dataDir.ts';
 import { openDatabase, type Database } from './db/database.ts';
+import { ThreadCatalog } from './hosts/threads.ts';
+import { threadTools } from './mcp/threadTools.ts';
 import { CatalogService } from './hosts/catalog.ts';
 import { CredentialStore } from './hosts/credentials.ts';
 import { warnProjectsWithoutModel } from './hosts/projects.ts';
@@ -41,6 +43,7 @@ export interface GatewayServices {
   registry: HostRegistry;
   /** Per-host T3 project and model catalogs for agents (opt-in per host). */
   catalog: CatalogService;
+  threads: ThreadCatalog;
   jobs: JobService;
   webhooks: WebhookStore;
   close(): Promise<void>;
@@ -91,6 +94,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
     tokens: new TokenService(db, clock, { resource: mcpResource(config), ...config.tokens }, logTokenEvent(logger)),
     registry,
     catalog,
+    threads: new ThreadCatalog(registry, clock),
     webhooks: new WebhookStore(db, clock),
     jobs: new JobService({ config, store: new JobStore(db, clock, logger), registry, catalog, clock, logger }),
     async close() {
@@ -101,7 +105,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
 }
 
 export function gatewayTools(services: GatewayServices): GatewayTool[] {
-  return [fleetStatusTool(services), ...catalogTools(services), ...workTools(services.jobs)];
+  return [fleetStatusTool(services), ...catalogTools(services), ...threadTools(services), ...workTools(services.jobs)];
 }
 
 export interface RunningGateway {

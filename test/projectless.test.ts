@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { changeThreadScopes } from '../src/oauth/threadScopes.ts';
+import { THREAD_SCOPES } from '../src/oauth/scopes.ts';
 import { describe, test } from 'node:test';
 import { parseConfig } from '../src/config.ts';
 import { readLaunchSpec } from '../src/jobs/launchSpec.ts';
@@ -341,6 +343,7 @@ describe('projectless work', () => {
   test('adopted standing jobs expose unknown workspace mode without changing the branch field', async (t) => {
     const { fake, gw, agent } = await startJobHarness(t, scratch);
     const thread = fake.launchDirect({ projectId: 'project-1', title: 'Synthetic standing scratch', workspaceStrategy: { type: 'root' }, message: 'Synthetic' });
+    changeThreadScopes(gw.services.db, gw.clock, agent.clientId, 'grant', THREAD_SCOPES);
     const { job } = await gw.services.jobs.adopt({ project: 'pilot', threadId: thread.threadId });
     const status = await agent.call<ScratchJob>('work_status', { jobId: job.id });
     assert.equal(status.workspaceMode, null);

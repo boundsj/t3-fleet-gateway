@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
+import { changeThreadScopes } from '../src/oauth/threadScopes.ts';
+import { THREAD_SCOPES } from '../src/oauth/scopes.ts';
 import { runCli } from '../src/cli/main.ts';
 import { MINUTE } from '../src/time.ts';
 import type { FakeT3 } from './helpers/fakeT3.ts';
@@ -48,6 +50,7 @@ function coordinatorThread(fake: FakeT3, projectId = 'project-1'): string {
 }
 
 async function adopt(harness: JobHarness, threadId: string, project = 'pilot', title?: string) {
+  changeThreadScopes(harness.gw.services.db, harness.gw.clock, harness.agent.clientId, 'grant', THREAD_SCOPES);
   return harness.gw.services.jobs.adopt({ project, threadId, ...(title === undefined ? {} : { title }) });
 }
 
@@ -166,6 +169,7 @@ describe('standing jobs: driving them', () => {
     const launched = await startJob(agent);
     await tick();
     const other = await connectAgent(t, gw, 'operate');
+    changeThreadScopes(gw.services.db, gw.clock, other.clientId, 'grant', THREAD_SCOPES);
     const feed = await other.call<FeedPage>('work_feed', { mine: true });
     assert.deepEqual([...new Set(feed.events.map((event) => event.jobId))], [job.id], "the standing job, not another agent's job");
     const listed = await other.call<{ jobs: JobView[] }>('work_list', { mine: true });
@@ -676,6 +680,7 @@ describe('standing jobs: CLI', () => {
     const harness = await startJobHarness(t);
     const { fake, gw, agent, tick } = harness;
     const threadId = coordinatorThread(fake);
+    changeThreadScopes(gw.services.db, gw.clock, agent.clientId, 'grant', THREAD_SCOPES);
     const dir = tempDir(t);
     const configPath = join(dir, 'config.json');
     writeFileSync(

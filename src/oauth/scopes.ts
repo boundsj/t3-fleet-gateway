@@ -1,5 +1,10 @@
 export const READ_SCOPE = 'fleet:read';
 export const OPERATE_SCOPE = 'fleet:operate';
+export const THREAD_READ_SCOPE = 'threads:read';
+export const THREAD_CONTROL_SCOPE = 'threads:control';
+/** Operator-only opt-ins; deliberately absent from advertised/default OAuth grants. They never grant host access. */
+export const THREAD_SCOPES = [THREAD_READ_SCOPE, THREAD_CONTROL_SCOPE] as const;
+export type ThreadScope = (typeof THREAD_SCOPES)[number];
 /**
  * The fleet-wide scopes: every configured host, including hosts added later. They are the only scopes
  * advertised in metadata, so clients that request the advertised scopes keep asking for what they always did.
@@ -16,7 +21,7 @@ export type AccessChoice = AccessLevel;
  * these and no fleet scope, so it never covers a host added later, and removing scopes only removes access.
  */
 export type HostScope = `host:${string}:${AccessLevel}`;
-export type Scope = FleetScope | HostScope;
+export type Scope = FleetScope | HostScope | ThreadScope;
 /** The hosts a grant covers: `all` (fleet scopes) or the listed host ids (host scopes). */
 export type HostChoice = 'all' | readonly string[];
 
@@ -42,7 +47,7 @@ function fleetLevel(value: string): AccessLevel | undefined {
 }
 
 function isScope(value: string): value is Scope {
-  return fleetLevel(value) !== undefined || parseHostScope(value) !== undefined;
+  return fleetLevel(value) !== undefined || parseHostScope(value) !== undefined || THREAD_SCOPES.includes(value as ThreadScope);
 }
 
 /** Fleet scopes first, then host scopes by host id, read before operate; no duplicates. */
@@ -54,7 +59,7 @@ function canonical(scopes: Iterable<Scope>): Scope[] {
     .filter((scope) => scope !== undefined)
     .sort((a, b) => (a.hostId === b.hostId ? LEVELS.indexOf(a.level) - LEVELS.indexOf(b.level) : a.hostId < b.hostId ? -1 : 1))
     .map((scope) => hostScope(scope.hostId, scope.level));
-  return [...fleet, ...hosts];
+  return [...fleet, ...hosts, ...THREAD_SCOPES.filter((scope) => unique.includes(scope))];
 }
 
 export function scopesForChoice(choice: AccessChoice): Scope[] {

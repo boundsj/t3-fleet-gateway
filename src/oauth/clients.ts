@@ -2,6 +2,8 @@ import { randomId } from '../crypto.ts';
 import { transaction, type Database } from '../db/database.ts';
 import { DAY, HOUR, MINUTE, type Clock } from '../time.ts';
 import { OAuthError } from './errors.ts';
+import { effectiveScopes } from './threadScopes.ts';
+import { parseScope } from './scopes.ts';
 import { MAX_REDIRECT_URIS, redirectUriProblem } from './redirectUris.ts';
 
 export const MAX_CLIENT_NAME_LENGTH = 80;
@@ -182,7 +184,7 @@ export class ClientStore {
       const client = fromRow(row);
       const all = families.all(row.id) as { scope: string; revoked_at: number | null }[];
       const active = all.filter((family) => family.revoked_at === null);
-      const scopes = [...new Set(active.flatMap((family) => family.scope.split(' ')))];
+      const scopes = effectiveScopes(this.#db, client.id, [...new Set(active.flatMap((family) => parseScope(family.scope) ?? []))]);
       const tokenExpiresAt = isTokenClient(client) ? ((tokenExpiry.get(row.id) as { expires_at: number | null }).expires_at ?? null) : null;
       return { ...client, totalFamilies: all.length, activeFamilies: active.length, scopes, tokenExpiresAt };
     });
