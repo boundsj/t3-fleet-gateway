@@ -255,9 +255,9 @@ describe('dashboard: hosts', () => {
     let snap = await snapshot(h.port);
     assert.equal(h.fake.calls.length, before, 'building the snapshot calls nothing on T3');
     const host = snap.hosts[0]!;
-    assert.equal(host.reachability.state, 'unchecked');
-    assert.equal(host.reachability.checkedAt, null, 'no invented check time');
-    assert.equal(host.status.tone, 'unknown');
+    assert.equal(host.reachability.state, 'reachable', 'enrollment verified contact');
+    assert.ok(host.reachability.checkedAt);
+    assert.equal(host.status.tone, 'good');
     assert.equal(snap.checks, null);
 
     const ledger = ledgerHash(h.gw);
@@ -301,6 +301,28 @@ describe('dashboard: hosts', () => {
     assert.equal(h.fake.calls.length, calls);
   });
 
+  test('a successful model fetch after restart replaces unchecked reachability without clearing model problems', async (t) => {
+    const initial = await harness(t);
+    await initial.gw.gateway.close();
+    const restarted = await startJobHarness(t, { fake: initial.fake, dataDir: initial.gw.dataDir, door: initial.gw.door, dashboard: { enabled: true },
+      host: { defaultModelSelection: { model: 'model-a' } } });
+    const h = { ...restarted, port: dashboardPort(restarted.gw) };
+    const { registry } = h.gw.services;
+    assert.equal((await snapshot(h.port)).hosts[0]!.reachability.state, 'unchecked');
+    registry.signals('main').recordCode('models', 'catalog_limit');
+    h.gw.clock.advance(1000);
+    await registry.client('main').readCapabilities();
+    let snap = await snapshot(h.port);
+    assert.equal(snap.hosts[0]!.reachability.state, 'reachable');
+    assert.equal(snap.hosts[0]!.reachability.checkedAt, new Date(h.gw.clock()).toISOString());
+    assert.equal(snap.hosts[0]!.reachability.detail, 'T3 answered an authenticated host call with the stored credential.');
+    assert.ok(snap.attention.some((item) => item.kind === 'host' && /Model catalog/.test(item.title)));
+    await h.gw.services.catalog.models('main', { refresh: true });
+    snap = await snapshot(h.port);
+    assert.equal(snap.hosts[0]!.status.tone, 'good');
+    assert.equal(snap.attention.some((item) => item.kind === 'host'), false);
+  });
+
   test('a host check has an absolute deadline, even on a connection another caller is still initializing', async (t) => {
     const h = await harness(t);
     const { config, db, clock, logger, registry, jobs } = h.gw.services;
@@ -308,6 +330,7 @@ describe('dashboard: hosts', () => {
     h.fake.holdResponses.add('initialize');
     const ongoing = registry.client('main').listProjects();
     await h.fake.whenHeld('initialize');
+    h.gw.clock.advance(1000);
     const checks = new DashboardChecks({ config, db, dataDir: h.gw.dataDir, registry, clock, logger, hostDeadlineMs: 200 });
     const run = await checks.run();
     const t3 = run.results.find((result) => result.id === 'host:main:t3');
@@ -317,7 +340,7 @@ describe('dashboard: hosts', () => {
       config, db, clock, registry, store: jobs.store, engine: h.gw.gateway.engine, startedAt: clock(), mcpListen: 'test', lastChecks: () => checks.last,
     };
     let snap = buildSnapshot(sources);
-    assert.equal(snap.hosts[0]!.reachability.state, 'unchecked', 'no answer yet');
+    assert.equal(snap.hosts[0]!.reachability.state, 'reachable', 'the previous completed enrollment contact stays visible');
     assert.ok(snap.attention.some((item) => item.kind === 'host' && item.ref === 'main' && item.tone === 'bad' && /T3 answers check failed/.test(item.title)));
 
     // The ongoing operation is unaffected, and the check's own read finishes later and is shown with its own time.

@@ -36,6 +36,10 @@ The HTTPS origin agents use, for example `https://gateway.example.ts.net` or `ht
 
 Default `[]`. Browser-based MCP clients send an `Origin` header; the gateway accepts requests with no `Origin` (server-to-server clients such as Grok Bot) or with an `Origin` equal to `publicUrl` or listed here. Add an origin only if a browser-based client you trust needs it.
 
+### `reachability`
+
+`{ "intervalMinutes": 5 }` by default. `serve` makes a lightweight authenticated `t3_environment_read` probe per configured, enrolled host 2–3 seconds after startup, then waits this interval plus 0–999 ms jitter after each probe completes. `intervalMinutes` must be an integer from 1 to 60; other values are `config_invalid`. Each probe has a five-second total deadline, no retry and no overlap per host. Shutdown cancels the loop and in-flight probes. Hosts without stored credentials are skipped. This does not enable catalog discovery or catalog refreshes. Successful ordinary host calls also update dashboard reachability with the time they completed.
+
 ### `hosts` (required, at least one)
 
 Each entry is a machine running a T3 Code server.

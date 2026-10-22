@@ -255,7 +255,8 @@ export class FakeT3 {
   readonly readFailures = new Map<string, { code: string; message: string }>();
   /**
    * Tools whose calls take effect but whose answer is held back until releaseHeld() or stop(). `initialize` holds a new
-   * session's MCP initialization before it is handled (a client still connecting).
+   * session's MCP initialization before it is handled (a client still connecting); `notifications/initialized`
+   * holds the final initialization notification's HTTP acknowledgement.
    */
   readonly holdResponses = new Set<string>();
   /**
@@ -613,6 +614,7 @@ export class FakeT3 {
     }
     const sessionId = req.headers['mcp-session-id'];
     if (sessionId === undefined && this.holdResponses.has('initialize') && isInitialize(body)) await this.#hold('initialize');
+    if (this.holdResponses.has('notifications/initialized') && isInitialized(body)) await this.#hold('notifications/initialized');
     let transport: WebStandardStreamableHTTPServerTransport;
     if (typeof sessionId === 'string') {
       const session = this.#sessions.get(sessionId);
@@ -1046,4 +1048,12 @@ function toolName(body: Buffer | undefined): string | undefined {
 
 export async function startFakeT3(options: FakeT3Options = {}): Promise<FakeT3> {
   return new FakeT3(options).start();
+}
+
+function isInitialized(body: Buffer | undefined): boolean {
+  try {
+    return (JSON.parse(body?.toString() ?? '') as { method?: unknown }).method === 'notifications/initialized';
+  } catch {
+    return false;
+  }
 }

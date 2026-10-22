@@ -90,6 +90,7 @@ export class HostRegistry {
     if (!client) {
       client = new T3Client({
         hostId: id, t3Url: host.t3Url, token: () => this.#options.store.get(id)?.accessToken,
+        contact: (error, version) => this.#recordContact(id, error, version),
         observe: (name, error) => {
           if (Object.hasOwn(SIGNAL_LABELS, name)) this.signals(id).record(name as SignalKind, error);
         },
@@ -125,8 +126,6 @@ export class HostRegistry {
     };
     entry.value = entry.value.then((health) => {
       entry.settled = health;
-      // A slower, older check that settles late never replaces a newer result.
-      if ((this.#lastHealth.get(id)?.checkedAt ?? -Infinity) <= health.checkedAt) this.#lastHealth.set(id, health);
       return health;
     });
     this.#health.set(id, entry);
@@ -142,16 +141,47 @@ export class HostRegistry {
     return this.#lastHealth.get(id) ?? null;
   }
 
+  #recordContact(id: string, error?: unknown, serverVersion?: string): void {
+    const described = error === undefined ? null : describeError(error);
+    // Application refusals and invalid payloads do not establish transport failure or recovery.
+    if (described && !['host_unreachable', 't3_timeout', 't3_response_lost', 't3_unauthorized', 'host_not_enrolled'].includes(described.code)) return;
+    const credentialRejected = described?.code === 't3_unauthorized';
+    this.#lastHealth.set(id, {
+      reachable: described === null ? true : described.code === 'host_not_enrolled' ? null : credentialRejected,
+      credentialRejected,
+      t3Version: described === null ? serverVersion ?? this.#lastHealth.get(id)?.t3Version ?? null : null,
+      checkedAt: this.#options.clock(),
+      error: described,
+    });
+  }
+
+  /** One cancellable, non-retrying environment read, isolated from the shared work connection. */
+  async probeReachability(id: string, signal: AbortSignal): Promise<void> {
+    const host = this.host(id);
+    if (signal.aborted || this.credentialStatus(id).state === 'missing') return;
+    const client = new T3Client({
+      hostId: id, t3Url: host.t3Url, token: () => this.#options.store.get(id)?.accessToken, signal,
+      contact: (error, version) => this.#recordContact(id, error, version),
+      observe: (name, error) => this.signals(id).record(name as SignalKind, error),
+    });
+    try {
+      await client.environmentRead({ timeoutMs: HEALTH_TIMEOUT_MS, retry: false });
+    } catch {
+      // The client recorded the fixed-code outcome; no immediate retry and no error-content logging.
+    } finally {
+      await client.close();
+    }
+  }
+
   async #checkHealth(id: string): Promise<HostHealth> {
-    const checkedAt = this.#options.clock();
     try {
       const environment = await this.client(id).environmentRead({ timeoutMs: HEALTH_TIMEOUT_MS });
-      return { reachable: true, credentialRejected: false, t3Version: environment.serverVersion, checkedAt, error: null };
+      return { reachable: true, credentialRejected: false, t3Version: environment.serverVersion, checkedAt: this.#options.clock(), error: null };
     } catch (error) {
       const described = describeError(error);
       const credentialRejected = described.code === 't3_unauthorized';
       const reachable = described.code === 'host_not_enrolled' ? null : credentialRejected;
-      return { reachable, credentialRejected, t3Version: null, checkedAt, error: described };
+      return { reachable, credentialRejected, t3Version: null, checkedAt: this.#options.clock(), error: described };
     }
   }
 
@@ -209,7 +239,7 @@ export class HostRegistry {
       store.save(credential);
       store.recordRenewal(id, clock(), { ok: true });
       this.#health.delete(id);
-      this.#lastHealth.delete(id);
+      this.#recordContact(id, undefined, t3Version);
       logger.info('host.enrollment_succeeded', { hostId: id, expiresAt: new Date(credential.expiresAt).toISOString() });
       return { hostId: id, t3Version, expiresAt: credential.expiresAt };
     } catch (error) {
