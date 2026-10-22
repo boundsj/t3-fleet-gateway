@@ -78,7 +78,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
     ...(options.runCommand ? { runCommand: options.runCommand } : {}),
     ...(options.commandEnv ? { commandEnv: options.commandEnv } : {}),
   });
-  const catalog = new CatalogService(registry, clock);
+  const catalog = new CatalogService(registry, clock, logger);
   return {
     config,
     db,

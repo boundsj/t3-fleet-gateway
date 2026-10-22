@@ -54,9 +54,11 @@ export interface FakeItem {
 /** A model option as T3 advertises it in orchestrator_capabilities (a `select` with choices, or a `boolean`). */
 export interface FakeOption {
   id: string;
-  label: string;
+  label?: string;
+  values?: (string | boolean)[];
+  default?: string | boolean;
   description?: string;
-  type: 'select' | 'boolean' | string;
+  type?: 'select' | 'boolean' | string;
   options?: { id: string; label: string; description?: string; isDefault?: boolean }[];
   currentValue?: string | boolean;
 }
