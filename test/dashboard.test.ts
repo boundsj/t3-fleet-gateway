@@ -301,6 +301,23 @@ describe('dashboard: hosts', () => {
     assert.equal(h.fake.calls.length, calls);
   });
 
+  test('a successful model fetch after restart replaces unchecked reachability without clearing model problems', async (t) => {
+    const h = await harness(t);
+    const { registry } = h.gw.services;
+    assert.equal((await snapshot(h.port)).hosts[0]!.reachability.state, 'unchecked');
+    registry.signals('main').recordCode('models', 'catalog_limit');
+    h.gw.clock.advance(1000);
+    await registry.client('main').readCapabilities();
+    let snap = await snapshot(h.port);
+    assert.equal(snap.hosts[0]!.reachability.state, 'reachable');
+    assert.equal(snap.hosts[0]!.reachability.checkedAt, new Date(h.gw.clock()).toISOString());
+    assert.ok(snap.attention.some((item) => item.kind === 'host' && /Model catalog/.test(item.title)));
+    await h.gw.services.catalog.models('main', { refresh: true });
+    snap = await snapshot(h.port);
+    assert.equal(snap.hosts[0]!.status.tone, 'good');
+    assert.equal(snap.attention.some((item) => item.kind === 'host'), false);
+  });
+
   test('a host check has an absolute deadline, even on a connection another caller is still initializing', async (t) => {
     const h = await harness(t);
     const { config, db, clock, logger, registry, jobs } = h.gw.services;

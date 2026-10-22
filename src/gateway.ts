@@ -7,6 +7,7 @@ import { CatalogService } from './hosts/catalog.ts';
 import { CredentialStore } from './hosts/credentials.ts';
 import { warnProjectsWithoutModel } from './hosts/projects.ts';
 import { HostRegistry, type HostRegistryOptions } from './hosts/registry.ts';
+import { startReachabilityLoop } from './hosts/reachability.ts';
 import { startRenewalLoop, type RenewalLoop } from './hosts/renewal.ts';
 import { createRouter, listen, type RunningServer } from './http/server.ts';
 import { JobEngine } from './jobs/engine.ts';
@@ -120,6 +121,8 @@ export interface GatewayOptions extends ServiceOptions {
   webhookSender?: SenderOptions;
   /** Isolated synthetic test/demo transport policy; never populated from operator config. */
   webhookManagement?: ManagementOptions;
+  /** Test/demo harnesses may disable the autonomous reachability timer. */
+  reachability?: { autoStart?: boolean };
   /** Tests drive the job engine by hand (`autoStart: false`) or with a short interval. */
   jobEngine?: { autoStart?: boolean; intervalMs?: number; launchTimeoutMs?: number };
   /** Listen on this port instead of `config.listen.port`; 0 lets the OS pick one (tests). */
@@ -232,6 +235,8 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   // Checked in the background: an unreachable host must not delay startup or shutdown. Logged as warnings.
   const modelCheck = new AbortController();
   void warnProjectsWithoutModel(config, services.registry, logger, modelCheck.signal);
+  const reachability = options.reachability?.autoStart === false ? undefined
+    : startReachabilityLoop(services.registry, config.reachability.intervalMinutes * MINUTE);
   logger.info('gateway.started', { listen: `${config.listen.host}:${server.port}`, publicUrl: config.publicUrl, hosts: config.hosts.length });
   let closing: Promise<void> | undefined;
   const shutdown = async (): Promise<void> => {
@@ -239,10 +244,12 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
     ready = false;
     const stoppedManagement = management.stop();
     // Not awaited: a call still in flight ends when the T3 clients close below.
+    const stoppedReachability = reachability?.stop();
     modelCheck.abort();
     commandCheck.abort();
     await dashboard?.close();
     await stoppedManagement;
+    await stoppedReachability;
     await server!.close();
     // The engine finishes its current tick; job state is already in the database.
     await engine.stop();

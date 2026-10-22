@@ -123,7 +123,7 @@ function hostView(sources: DashboardSources, host: HostConfig, counts: Map<strin
   if (credential.state === 'missing') {
     reachability = { state: 'not_enrolled', checkedAt: iso(health?.checkedAt), t3Version: null, errorCode: 'host_not_enrolled', detail: explainHostError('host_not_enrolled') };
   } else if (!health) {
-    reachability = { state: 'unchecked', checkedAt: null, t3Version: null, errorCode: null, detail: 'Not checked since the gateway started. Run checks to ask T3 now.' };
+    reachability = { state: 'unchecked', checkedAt: null, t3Version: null, errorCode: null, detail: 'No host call or reachability probe has completed since the gateway started.' };
   } else if (health.credentialRejected) {
     reachability = { state: 'credential_rejected', checkedAt: iso(health.checkedAt), t3Version: null, errorCode: 't3_unauthorized', detail: explainHostError('t3_unauthorized') };
   } else if (health.reachable === true) {
