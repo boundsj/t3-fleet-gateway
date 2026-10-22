@@ -33,6 +33,7 @@ import {
   type T3Capabilities,
   type T3Environment,
   type T3Project,
+  threadCatalogPageSchema,
   type ThreadList,
   type ThreadRead,
   type ThreadSearch,
@@ -275,6 +276,10 @@ export class T3Client {
   /** Threads in a project, newest first; omitted settled includes both shelves on current T3. Archived/deleted threads are excluded. */
   listThreads(input: { projectId: string; titleContains?: string; settled?: boolean; includeSubagents?: boolean; limit?: number; cursor?: number }): Promise<ThreadList> {
     return this.callTool('t3_thread_list', withoutNulls(input), threadListSchema, { readOnly: true });
+  }
+
+  listThreadCatalogPage(input: { projectId: string; includeSubagents: boolean; limit: number; cursor: number }) {
+    return this.callTool('t3_thread_list', input, threadCatalogPageSchema, { readOnly: true });
   }
 
   searchThreads(input: { projectId: string; query: string; limit?: number }): Promise<ThreadSearch> {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { isThreadLink } from '../../src/threadId.js';
 import { pathToFileURL } from 'node:url';
 import type { FakeDocument, FakeNode } from './fakeDom.ts';
 
@@ -47,7 +48,7 @@ export function assertSafeTree(root: FakeNode): void {
       assert.notEqual(name, 'style', 'no inline style (blocked by the CSP anyway)');
       assert.notEqual(name, 'action', 'forms submit through the protected JSON API only');
       assert.notEqual(name, 'formaction', 'no browser form navigation');
-      if (name === 'href') assert.match(value, /^(#\/[A-Za-z0-9/_-]*|t3-thread:\/\/v1\/[A-Za-z0-9._:-]{1,200})$/, `unsafe href ${value}`);
+      if (name === 'href') assert.ok(/^#\/[A-Za-z0-9/_-]*$/.test(value) || isThreadLink(value), `unsafe href ${value}`);
       if (name === 'src') assert.equal(value, 'assets/mark.svg');
     }
   }

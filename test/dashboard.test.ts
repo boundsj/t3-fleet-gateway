@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -210,6 +211,13 @@ describe('dashboard: request handling', () => {
     assert.match(page.body, /<script type="module" src="assets\/app\.js"><\/script>/);
     assert.doesNotMatch(page.body, /<script(?![^>]*\bsrc=)[^>]*>|<style|\sstyle=|\son[a-z]+=/i);
     assert.equal((await raw(h.port, { path: '/ops/fleet/assets/app.css' })).status, 200);
+    const app = await raw(h.port, { path: '/ops/fleet/assets/app.js' });
+    assert.match(app.body, /import.*from '\.\/threadId\.js'/);
+    const ids = await raw(h.port, { path: '/ops/fleet/assets/threadId.js' });
+    assert.equal(ids.status, 200);
+    assert.match(String(ids.headers['content-type'] ?? ''), /javascript/);
+    assert.equal(ids.body, readFileSync(new URL('../src/threadId.js', import.meta.url), 'utf8'));
+
     assert.equal((await raw(h.port, { path: '/ops/fleet/api/snapshot', headers: API })).status, 200);
     assert.equal((await raw(h.port, { path: '/' })).status, 404);
     assert.equal((await raw(h.port, { path: '/api/snapshot', headers: API })).status, 404);
@@ -627,7 +635,7 @@ describe('dashboard: jobs and privacy', () => {
     assert.ok(Buffer.byteLength(JSON.stringify(snap)) < 512 * 1024, 'the snapshot stays small');
 
     assert.equal(threadLink('thread-123_abc:def.1'), 't3-thread://v1/thread-123_abc:def.1');
-    for (const bad of ['', 'a b', 'x/../y', 'javascript:alert(1)//x"', '<script>', 'a'.repeat(201), null]) {
+    for (const bad of ['', 'a b', 'x/../y', 'javascript:alert(1)//x"', '<script>', 'a'.repeat(2049), null]) {
       assert.equal(threadLink(bad), null, String(bad));
     }
     const victim = snap.jobs.open[0]!;

@@ -1,3 +1,5 @@
+import { isThreadLink } from './threadId.js';
+
 // t3-fleet-gateway operator dashboard: monitoring and private webhook connections.
 //
 // Security rules for this file, checked by test/dashboard-ui.test.ts:
@@ -8,7 +10,6 @@
 //   are cleared before awaiting a submission, and are never received back from the server.
 
 const API_HEADER = 'x-t3fg-dashboard';
-const SAFE_THREAD_LINK = /^t3-thread:\/\/v1\/[A-Za-z0-9._:-]{1,200}$/;
 const SAFE_ROUTE = /^#\/[A-Za-z0-9/_-]*$/;
 const VIEWS = ['overview', 'clients', 'hosts', 'jobs', 'checks', 'webhooks'];
 const SETUP_PROMPT = 'For the routine I want to connect, send clickable links to its Webhook URL, Webhook key and Authorization header panels. Send private panel links only; do not print the key or header value.';
@@ -43,7 +44,7 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const STALE_MS = 60_000;
 
 export function safeHref(value) {
-  return typeof value === 'string' && (SAFE_ROUTE.test(value) || SAFE_THREAD_LINK.test(value));
+  return typeof value === 'string' && (SAFE_ROUTE.test(value) || isThreadLink(value));
 }
 
 const ICONS = {
@@ -181,7 +182,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
   const button = (label, iconName, onClick, options = {}) => h('button', {
     type: 'button', class: `btn ${options.cls ?? ''}`.trim(), disabled: options.busy, 'aria-busy': options.busy ? 'true' : null, on: { click: onClick },
   }, icon(iconName, 'btn__icon'), h('span', { class: 'btn__label' }, label));
-  const threadButton = (link, small = true) => (SAFE_THREAD_LINK.test(link ?? '')
+  const threadButton = (link, small = true) => (isThreadLink(link)
     ? h('a', { class: `btn ${small ? 'btn--small' : ''}`, href: link, title: 'Opens the thread in the T3 app' }, h('span', null, 'Open in T3'), icon('external', 'btn__icon'))
     : null);
   const command = (text) => h('span', { class: 'cmd' }, h('code', null, text),

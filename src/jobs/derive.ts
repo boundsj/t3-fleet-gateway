@@ -1,3 +1,4 @@
+import { isThreadLink } from '../threadId.js';
 import { ACTIVE_RUN_STATUSES, THREAD_STATUSES, type ThreadItem, type ThreadRead } from '../t3/schemas.ts';
 import type { JobState } from './states.ts';
 import type { Job } from './store.ts';
@@ -148,9 +149,11 @@ export interface Observation {
  * The URL in a T3 thread link. Older T3 returns markdown; current responses are normalized to a bare
  * t3-thread URL by the client schemas. Returns null for invalid links or other URL schemes.
  */
-export function threadLinkTarget(link: string): string | null {
+export function threadLinkTarget(link: string | null | undefined): string | null {
+  if (link == null) return null;
   const text = link.trim();
   const target = /\]\(([^()\s]+)\)$/.exec(text)?.[1] ?? text;
+  if (isThreadLink(target)) return target;
   if (target.length > MAX_LINK_CHARS) return null;
   try {
     return LINK_SCHEMES.has(new URL(target).protocol) ? target : null;

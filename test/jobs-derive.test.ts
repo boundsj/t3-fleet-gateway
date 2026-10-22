@@ -265,6 +265,12 @@ describe('delegated work', () => {
 });
 
 describe('thread links', () => {
+  test('keeps raw legacy MCP links from T3 and older jobs', () => {
+    const link = 't3-thread://v1/mcp:11111111-2222-4333-8444-555555555555';
+    assert.equal(threadLinkTarget(link), link);
+    assert.equal(threadLinkTarget(`[Synthetic thread](${link})`), link);
+  });
+
   test('takes the URL out of the markdown link T3 returns', () => {
     assert.equal(threadLinkTarget('[Fix (the) parser [job:abc]](t3-thread://v1/env-synthetic/thread-1)'), 't3-thread://v1/env-synthetic/thread-1');
     assert.equal(threadLinkTarget('https://t3.example.com/threads/thread-1'), 'https://t3.example.com/threads/thread-1');
