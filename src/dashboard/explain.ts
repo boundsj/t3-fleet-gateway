@@ -81,6 +81,7 @@ export const EVENT_REASONS: Record<string, string> = {
   launch_not_started: 'thread created without a run',
   launch_not_confirmed: 'launch not confirmed',
   run_failed: 'run failed',
+  worker_resumed: 'recovered after a failed turn',
   released: 'released by the operator',
   turn_started: 'started a turn by itself',
   waiting_on_delegated_work: 'waiting on delegated work',
@@ -97,6 +98,7 @@ export const EVENT_REASONS: Record<string, string> = {
 
 const EVENT_TYPES: Record<string, string> = {
   created: 'Created',
+  job_recovered: 'Worker recovered',
   followup_sent: 'Follow-up delivered',
   input_answered: 'Question answered',
   turn_finished: 'Ran a turn by itself',

@@ -570,7 +570,7 @@ describe('dashboard: jobs and privacy', () => {
     assert.equal(job(approval.jobId).link, `t3-thread://v1/${approvalThread.threadId}`);
     assert.equal(job(question.jobId).waitingFor, 'question');
     assert.equal(job(question.jobId).pendingQuestions, 1);
-    assert.equal(job(failing.jobId).state, 'failed');
+    assert.equal(job(failing.jobId).state, 'idle');
     assert.equal(job(failing.jobId).error?.code, 't3_run_failed');
     assert.equal(job(approval.jobId).title.includes('[job:'), false, 'the marker is not part of the title shown');
     const standing = snap.jobs.open.find((item) => item.standing)!;

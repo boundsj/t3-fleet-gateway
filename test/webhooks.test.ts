@@ -193,7 +193,7 @@ describe('outbound job webhooks through MCP, watcher and HTTP', () => {
       const entry = entries[0]!;
       const payload = entry.payload;
       const thread = h.fake.threadForJob(job.jobId);
-      const event = feed.events.find((event) => event.jobId === job.jobId && event.toState === type);
+      const event = feed.events.find((event) => event.jobId === job.jobId && event.toState === (type === 'failed' ? 'idle' : type));
       assert.ok(event);
       assert.deepEqual({
         type: payload.type, state: payload.state, previousState: payload.previousState, feedSequence: payload.feedSequence,
@@ -201,7 +201,7 @@ describe('outbound job webhooks through MCP, watcher and HTTP', () => {
         title: payload.title, threadId: payload.threadId, link: payload.link, standing: payload.standing,
         waitingOnDelegatedWork: payload.waitingOnDelegatedWork, turnInitiator: payload.turnInitiator,
       }, {
-        type, state: type, previousState: 'running', feedSequence: Number(event.cursor), feedCursor: event.cursor,
+        type, state: type === 'failed' ? 'idle' : type, previousState: 'running', feedSequence: Number(event.cursor), feedCursor: event.cursor,
         projectAlias: 'pilot', host: 'main', projectId: 'project-1', title: job.title, threadId: thread.threadId,
         link: `t3-thread://v1/${thread.threadId}`, standing: false, waitingOnDelegatedWork: false,
         turnInitiator: { kind: 'gateway', clientId: h.agent.clientId },
@@ -931,4 +931,35 @@ test('PR webhooks carry at most twenty PRs, open ones first, from a job that fol
     assert.deepEqual(body.pullRequests.map((p) => p.number), [205, 3, ...newest], 'twenty: the open ones, then the newest');
     assert.deepEqual(Object.keys(body.pullRequests[0]!).sort(), ['number', 'state', 'url']);
   }
+});
+
+test('worker failures notify as failed with recoverable idle state; recovery emits once', async (t) => {
+  const sink = await receiver(t);
+  const h = await harness(t, [subscription(sink.url, { projects: ['pilot'], events: ['failed', 'running', 'idle'] })]);
+  const job = await startJob(h.agent);
+  await h.tick();
+  await h.deliver();
+  sink.received.length = 0;
+  const thread = h.fake.threadForJob(job.jobId);
+  h.fake.failRun(thread.threadId);
+  await h.tick();
+  await h.deliver();
+  assert.deepEqual(sink.received.map((r) => [r.payload.type, r.payload.state]), [['failed', 'idle']]);
+  h.gw.clock.advance(2 * MINUTE);
+  await h.tick();
+  await h.deliver();
+  assert.equal(sink.received.length, 1);
+  h.fake.userTurn(thread.threadId, 'Synthetic recovery');
+  h.gw.clock.advance(2 * MINUTE);
+  await h.tick();
+  await h.deliver();
+  assert.deepEqual(sink.received.map((r) => [r.payload.type, r.payload.state]), [['failed', 'idle'], ['running', 'running']]);
+  assert.deepEqual(sink.received[1]!.payload.turnInitiator, { kind: 'unknown', clientId: null });
+  await h.tick();
+  await h.deliver();
+  assert.equal(sink.received.length, 2);
+  h.fake.finishTurn(thread.threadId, 'Synthetic completion');
+  await h.tick();
+  await h.deliver();
+  assert.equal(sink.received.at(-1)!.payload.type, 'idle');
 });

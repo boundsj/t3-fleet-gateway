@@ -53,7 +53,8 @@ describe('dashboard demo fleet', () => {
       assert.equal(snap.clients.pending.count, 1);
       const states = snap.jobs.counts;
       assert.equal(states.needs_input, 2);
-      assert.equal(states.failed, 1);
+      assert.equal(states.failed, 0);
+      assert.ok(snap.jobs.open.some((job) => job.state === 'idle' && job.error?.code === 't3_run_failed'));
       assert.equal(states.cancelled, 1);
       assert.ok(snap.jobs.open.some((job) => job.standing && job.delegated.following === 2));
       assert.ok(snap.attention.filter((item) => item.tone === 'bad' || item.tone === 'warn').length >= 4);

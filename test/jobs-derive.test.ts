@@ -132,9 +132,9 @@ describe('state derivation', () => {
     }
   });
 
-  test('a failed run fails the job', () => {
+  test('a failed run leaves the job idle and recoverable', () => {
     const seen = observe(job(), read({ status: 'failed' }, [{ runId: 'run-1', status: 'failed' }]), []);
-    assert.deepEqual([seen.state, seen.errorCode], ['failed', 't3_run_failed']);
+    assert.deepEqual([seen.state, seen.errorCode], ['idle', 't3_run_failed']);
   });
 
   test('a failed run leaves a standing job idle, with the error', () => {

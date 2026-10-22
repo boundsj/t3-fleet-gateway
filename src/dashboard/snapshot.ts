@@ -535,6 +535,9 @@ function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[
       items.push({ tone: 'warn', kind: 'job', ref: job.id, title: `Launch of “${job.title}” is unconfirmed`, detail: `The gateway is looking for its thread in ${where}. It never launches twice.`, at: job.stateChangedAt, action: null });
     } else if (job.state === 'failed' && job.finishedAt !== null && now - Date.parse(job.finishedAt) <= DAY) {
       items.push({ tone: 'bad', kind: 'job', ref: job.id, title: `“${job.title}” failed`, detail: `${job.error?.detail ?? `Code ${job.error?.code ?? 'unknown'}.`} In ${where}.`, at: job.finishedAt, action: link });
+    } else if (job.state === 'idle' && job.error?.code === 't3_run_failed' && job.stateChangedAt !== null && now - Date.parse(job.stateChangedAt) <= DAY) {
+      items.push({ tone: 'bad', kind: 'job', ref: job.id, title: `“${job.title}” turn failed`,
+        detail: `${job.error.detail} Resume in T3 or use work_continue. In ${where}.`, at: job.stateChangedAt, action: link });
     } else if (job.state === 'idle' && job.delegated.endedAt !== null && job.delegated.following === 0 && job.delegated.untracked === 0) {
       items.push({ tone: 'info', kind: 'job', ref: job.id, title: `“${job.title}” did not resume after its delegated work ended`, detail: `An agent should ask it to check on that work (work_continue). In ${where}.`, at: job.delegated.endedAt, action: link });
     }

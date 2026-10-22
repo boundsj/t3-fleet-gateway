@@ -359,6 +359,7 @@ export class FakeT3 {
   /** A person types into the thread in T3, starting a new turn. */
   userTurn(threadId: string, text: string): void {
     const thread = this.#thread(threadId);
+    thread.settled = false;
     const run = this.#startRun(thread);
     this.#addItem(thread, { runId: run.runId, createdBy: 'user', creationSource: 'web', type: 'user_message', text });
   }

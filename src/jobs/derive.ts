@@ -120,7 +120,7 @@ export interface Observation {
   state: ObservedState;
   /** Why, for the event: the T3 status that decided it. */
   reason: string;
-  /** Set when the turn ended with a failed run: the job moves to failed (a standing job to idle). */
+  /** Set when the turn ended with a failed run: the job stays recoverable in idle. */
   errorCode?: string;
   pendingRequestIds: string[];
   /** The run the job now follows: the thread's latest run once the turn is over. */
@@ -198,9 +198,8 @@ function parseTime(value: string | undefined): number | null {
  * 3. `running` while the thread has an `activeRunId`, its `status` is preparing, queued, starting,
  *    running or waiting, or the run the gateway started (`lastRunId` in `recentRuns`) is still in one
  *    of those statuses.
- * 4. `failed` when the turn ended with the latest run (or the thread) `failed`. A standing job is a
- *    long-lived thread that takes the next instruction after a failed run too, so it becomes `idle`
- *    instead, with the same error code.
+ * 4. `idle` with `t3_run_failed` when the latest run (or thread) failed: the turn ended,
+ *    but the thread still exists and accepts the next instruction.
  * 5. Otherwise `idle`: the turn is over (completed, interrupted, cancelled, rolled back, or a thread
  *    with no run) and the thread is waiting for its next instruction, or (reason
  *    `waiting_on_delegated_work`) for work it delegated, after which T3 starts its next turn by itself.
@@ -231,7 +230,7 @@ export function observe(job: ObservedJob, read: ThreadRead, pendingQuestionIds: 
     state = 'running';
     if (job.state === 'idle') reason = 'turn_started';
   } else if ((latest?.status ?? thread.status) === 'failed' || thread.status === 'failed') {
-    state = job.standing ? 'idle' : 'failed';
+    state = 'idle';
     reason = 'run_failed';
     errorCode = 't3_run_failed';
   } else {
@@ -240,7 +239,7 @@ export function observe(job: ObservedJob, read: ThreadRead, pendingQuestionIds: 
   }
 
   const items = [...read.items].sort((a, b) => a.position - b.position);
-  const turnOver = state === 'idle' || state === 'failed' || state === 'cancelled';
+  const turnOver = state === 'idle' || state === 'cancelled';
   const lastRunId = turnOver ? (thread.latestRunId ?? job.lastRunId) : job.lastRunId;
 
   const { tasks: delegatedWork, cut } = trackDelegated(job.delegatedWork, activity?.items ?? [], activity?.refreshed);

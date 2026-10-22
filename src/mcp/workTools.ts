@@ -536,6 +536,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'job ran a whole turn you did not start, between two checks), delegated_work_ended (an idle job\'s delegated work ' +
       'finished, failed or was cancelled and it did not resume: send work_continue asking it to check on that work), ' +
       'pull_request_opened or pull_request_merged (cached linked PR changes: read work_status for references), ' +
+      'job_recovered (a failed worker turn resumed in T3 or through work_continue), ' +
       'interrupt_requested (work_cancel on a standing job). A ' +
       'turn you did not start shows as state_changed idle to running with reason turn_started (or as turn_finished): a person ' +
       'typed in T3, or a coordinator resumed after work it delegated finished. Standing jobs (long-lived threads the operator ' +
@@ -757,11 +758,11 @@ function attentionReason(job: Job): string {
           'instructions; wait for its next turn in work_feed.'
         );
       }
+      if (job.lastErrorCode === 't3_run_failed') return 'The worker\'s last run failed; see lastError. Resume in T3 or use work_continue to retry on the same thread.';
       if (job.delegatedEndedAt !== null) return DELEGATED_ENDED;
       if (!job.standing) return 'Turn finished: read the reply with work_messages (work_status has an excerpt), then work_continue or work_cancel.';
-      const failed = job.lastErrorCode === 't3_run_failed' ? ' Its last run failed (see lastError).' : '';
       return (
-        `Standing job's turn ended:${failed} read its reply with work_messages (work_status has an excerpt). Nothing it delegated is still running ` +
+        `Standing job's turn ended: read its reply with work_messages (work_status has an excerpt). Nothing it delegated is still running ` +
         '(waitingOnDelegatedWork is false, which wins over the reply text). Send work_continue when the reply asks for input ' +
         'or the work is done.'
       );

@@ -37,7 +37,8 @@ export const STATE_MEANINGS: Record<JobState, string> = {
   needs_input:
     'The worker is blocked: it asked a question (answer with work_respond) or needs a permission approval that only the operator can give in T3 (projects with runtimeMode approval-required).',
   idle:
-    "Nothing is running on the thread: the worker's turn is over. Read its latest reply (work_status); idle is not proof the task succeeded. " +
+    "Nothing is running on the thread: the worker's turn is over. A failed turn stays idle with lastError t3_run_failed; use work_continue to retry. " +
+    'Read its latest reply (work_status); idle is not proof the task succeeded. ' +
     'A worker that delegated work to other threads (a coordinator usually does) goes idle while that work runs and starts its next turn ' +
     'by itself when it is done. waitingOnDelegatedWork tells which, and wins over the reply text when they disagree: while it is true, ' +
     'do not send new instructions; wait for its next turn in work_feed. When it is false, send the next instruction with work_continue ' +
@@ -47,7 +48,7 @@ export const STATE_MEANINGS: Record<JobState, string> = {
   cancelled: 'Stopped by work_cancel. Terminal.',
   released:
     'A standing job the operator stopped tracking (t3-fleet-gateway jobs release). The T3 thread itself was not touched. Terminal.',
-  failed: 'The job could not start or its run failed. Terminal; see lastError. Start a new job to retry.',
+  failed: 'The job could not start or its thread is missing. Terminal; see lastError. Worker turn failures are idle and can be continued.',
   unknown:
     'The gateway cannot tell yet whether the launch happened (for example the response was lost). It is checking T3; do not start a duplicate yet.',
 };
