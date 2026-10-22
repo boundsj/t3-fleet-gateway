@@ -466,7 +466,7 @@ describe('discovery: work_start with a target or a model selection', () => {
     });
     assert.match(future.text, /"synthetic-future" is not a selectable option/);
     const listed = await toolText(agent, 'fleet_models', { host: 'mini', refresh: true });
-    assert.doesNotMatch(listed.text, /synthetic-future/);
+    assert.match(listed.text, /synthetic-future \(slider, not selectable\)/);
     assert.equal(gw.services.jobs.store.list({ limit: 10 }).length, 0, 'no job was created');
     assert.equal(mini.launches.length, 0);
     // Oversized or malformed selections are refused by the schema.

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { sanitizeCapabilities, MAX_CHOICES_PER_OPTION, MAX_OPTIONS_PER_MODEL } from '../src/hosts/catalog.ts';
+import { validateSelection } from '../src/jobs/launchSpec.ts';
 import { createLogger } from '../src/log.ts';
 import { capabilitiesSchema, optionDescriptorSchema } from '../src/t3/schemas.ts';
 
@@ -23,7 +24,7 @@ test('the former descriptor rejects the compact shape that normalization accepts
   });
 });
 
-test('malformed models and options are isolated; missing and unknown types are inferred', () => {
+test('malformed models and options are isolated; only missing types are inferred', () => {
   const logs: string[] = [];
   const providers = sanitizeCapabilities('host-a', catalog([
     null, { label: 'bad model' },
@@ -32,13 +33,20 @@ test('malformed models and options are isolated; missing and unknown types are i
       { id: 'effort', name: 'Effort', type: 'new-select', choices: [{ id: 'high' }] },
       { id: 'fast', default: false },
       { id: 'restricted', values: [true] },
+      { id: 'empty', values: [] },
+      { id: 'future-toggle', type: 'slider', values: [false, true] },
     ] },
     { id: 'model-b' },
   ]), createLogger({ sink: (line) => logs.push(line) }));
   assert.deepEqual(providers[0]!.models.map((model) => model.id), ['model-a', 'model-b']);
   assert.deepEqual(providers[0]!.models[0]!.options.map((option) => [option.id, option.label, option.type]), [
-    ['effort', 'Effort', 'select'], ['fast', 'fast', 'boolean'],
+    ['effort', 'Effort', 'new-select'], ['fast', 'fast', 'boolean'], ['future-toggle', 'future-toggle', 'slider'],
   ]);
+  for (const options of [{ effort: 'high' }, { 'future-toggle': true }] as Record<string, string | boolean>[]) {
+    assert.throws(() => validateSelection('host-a', providers, { instanceId: 'provider-a', model: 'model-a', options }), {
+      code: 'invalid_argument',
+    });
+  }
   assert.deepEqual(logs.map((line) => JSON.parse(line).event), ['catalog.model_skipped', 'catalog.model_skipped', 'catalog.options_skipped']);
   assert.ok(!logs.join('').includes('bad-option'));
 });

@@ -34,7 +34,7 @@ export interface CatalogChoice {
 }
 
 /**
- * A normalized model option: `select` (with `choices`) or `boolean`, selectable with work_start.
+ * A normalized model option. Only `select` and `boolean` are selectable; unknown explicit types are metadata.
  */
 export interface CatalogOption {
   id: string;
@@ -115,13 +115,14 @@ function sanitizeOption(raw: unknown, hostId: string): CatalogOption | null {
   const descriptor = parsed.data;
   const listed = descriptor.options ?? descriptor.choices;
   const values = descriptor.values;
+  if (values?.length === 0) return null;
   const currentValue = descriptor.currentValue ?? descriptor.default ?? null;
   const inferred = listed || (values && values.every((value) => typeof value === 'string')) ? 'select'
     : (values?.length && values.every((value) => typeof value === 'boolean')) || typeof currentValue === 'boolean' ? 'boolean' : null;
-  const type = descriptor.type === 'select' || descriptor.type === 'boolean' ? descriptor.type : inferred;
+  const type = descriptor.type ?? inferred;
   if (!type) return null;
-  if (values && (type === 'select' ? values.some((value) => typeof value !== 'string')
-    : values.some((value) => typeof value !== 'boolean'))) return null;
+  if (values && ((type === 'select' && values.some((value) => typeof value !== 'string'))
+    || (type === 'boolean' && values.some((value) => typeof value !== 'boolean')))) return null;
   // A boolean descriptor with a restricted values list cannot safely be represented as an unrestricted toggle.
   if (type === 'boolean' && values && (!values.some((value) => value === false) || !values.some((value) => value === true))) return null;
   const choices: z.infer<typeof choiceSchema>[] | null = type === 'select' ? (listed ?? (values ?? []).filter((value): value is string => typeof value === 'string').map((id) => ({ id }))) : null;
