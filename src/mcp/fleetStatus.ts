@@ -159,7 +159,8 @@ export function fleetStatusTool(deps: { config: GatewayConfig; registry: HostReg
           };
         }),
       );
-      const standing = context.scopes.includes(THREAD_READ_SCOPE) ? deps.jobs.store.standingJobs().filter((job) => visible(job.hostId)) : [];
+      const standing = deps.jobs.store.standingJobs().filter((job) =>
+        visible(job.hostId) && (job.origin !== 'adopted' || context.scopes.includes(THREAD_READ_SCOPE)));
       const projects = deps.config.projects.filter((project) => visible(project.host)).map((project) => ({
         alias: project.alias,
         description: project.description,

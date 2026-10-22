@@ -214,11 +214,11 @@ Ask the connector to call `fleet_projects`, then `fleet_threads { host: "host-a"
 Remove the extra access, keeping the connector's token and ordinary gateway access:
 
 ```sh
-t3-fleet-gateway clients revoke <clientId> --scope threads:control --scope threads:read
+t3-fleet-gateway clients ungrant <clientId> --scope threads:control --scope threads:read
 t3-fleet-gateway clients scopes <clientId>
 ```
 
-Grant/revoke applies on the next request without a restart, and affects only that client. Omitting `--scope` from `clients revoke` still revokes the **whole client**. No existing client receives these scopes automatically. Operator standing jobs also require the explicit thread scopes for agent reads/control; operators retain the private dashboard and CLI paths. [Authorization and API limitations](docs/design.md#external-thread-discovery-and-adoption).
+Grant/ungrant applies on the next request without a restart, and affects only that client. Both commands require at least one `--scope`. `clients revoke <clientId>` keeps its whole-client revocation behavior and rejects `--scope` with a usage error pointing to `clients ungrant`. No existing client receives these scopes automatically. Operator-registered standing jobs retain their existing host Read/Operate access; only client-adopted jobs need the extra thread scopes. [Authorization and API limitations](docs/design.md#external-thread-discovery-and-adoption).
 
 | MCP tools | Purpose |
 | --- | --- |

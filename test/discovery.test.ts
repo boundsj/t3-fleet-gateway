@@ -1,6 +1,4 @@
 import assert from 'node:assert/strict';
-import { changeThreadScopes } from '../src/oauth/threadScopes.ts';
-import { THREAD_SCOPES } from '../src/oauth/scopes.ts';
 import { describe, test, type TestContext } from 'node:test';
 import { parseConfig } from '../src/config.ts';
 import { CATALOG_TTL_MS, decodeCursor, encodeCursor, MAX_MODELS, MAX_PROVIDERS, snapshotId } from '../src/hosts/catalog.ts';
@@ -497,7 +495,6 @@ describe('discovery: work_start with a target or a model selection', () => {
         { alias: 'beta', host: 'macbook', t3ProjectId: 'project-1', runtimeMode: 'auto' },
       ],
     });
-    changeThreadScopes(gw.services.db, gw.clock, agent.clientId, 'grant', THREAD_SCOPES);
     const standing = (await gw.services.jobs.adopt({ project: 'alpha', threadId: coordinator, title: 'Synthetic CoS' })).job;
     const projects = await agent.call<{ hosts: HostPage<ProjectEntry>[] }>('fleet_projects', { host: 'mini' });
     const byId = Object.fromEntries(projects.hosts[0]!.projects!.map((project) => [project.projectId, project]));
@@ -668,7 +665,6 @@ describe('discovery: review fixes', () => {
       projects: [{ alias: 'cos', host: 'mini', t3ProjectTitle: 'Synthetic coordinator project', runtimeMode: 'auto', allowWorkStart: false }],
     });
     mini.projects[0]!.title = 'Synthetic coordinator project';
-    changeThreadScopes(gw.services.db, gw.clock, agent.clientId, 'grant', THREAD_SCOPES);
     const standing = (await gw.services.jobs.adopt({ project: 'cos', threadId: coordinator, title: 'Synthetic CoS' })).job;
     // Warm the browse cache: project-2 is a plain discovered project right now.
     const browsed = await agent.call<{ hosts: HostPage<ProjectEntry>[] }>('fleet_projects', { host: 'mini' });

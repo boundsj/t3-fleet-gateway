@@ -284,7 +284,8 @@ const MINE = '(jobs.client_id = ? OR jobs.standing = 1)';
  */
 export interface JobScope {
   clientId?: string | undefined;
-  includeExternal?: boolean | undefined;
+  /** Operator standing jobs retain host-grant access; only client imports require the extra read opt-in. */
+  includeAdopted?: boolean | undefined;
   hostIds?: readonly string[] | undefined;
   /** Only jobs in one T3 project of one host (`work_list.target`); a queued alias-only job has no project id yet. */
   target?: { hostId: string; projectId: string } | undefined;
@@ -293,7 +294,7 @@ export interface JobScope {
 function scopeClause(scope: JobScope): { sql: string; params: string[] } {
   const parts: string[] = [];
   const params: string[] = [];
-  if (scope.includeExternal === false) parts.push("jobs.origin = 'gateway'");
+  if (scope.includeAdopted === false) parts.push("jobs.origin <> 'adopted'");
   if (scope.clientId !== undefined) {
     parts.push(MINE);
     params.push(scope.clientId);

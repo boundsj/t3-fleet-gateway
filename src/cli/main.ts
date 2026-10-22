@@ -45,8 +45,9 @@ Commands:
   clients grant <id> --scope threads:read [--scope threads:control]
                             Add external-thread scopes in place (same token, no restart)
   clients scopes <id>        Show client scopes without token material
-  clients revoke <id> [--scope <scope> ...]
-                            Remove named thread scopes, or revoke the entire client when no --scope
+  clients ungrant <id> --scope <scope> [--scope <scope> ...]
+                            Remove named thread scopes, keeping the client and its token
+  clients revoke <id>       Revoke a client and every token issued to it
   hosts enroll <id>         Obtain a T3 credential for a host via pairing-code approval
   hosts status              Show each host's credential and reachability
   throttle status           Show failed approvals and registrations counting toward their limits
@@ -189,9 +190,9 @@ function clients(paths: Paths, io: CliIo, action: string | undefined, id: string
   const storage = openStorage(paths.dataDir);
   try {
     const store = new ClientStore(storage.db, systemClock);
-    if (action === 'grant' || (action === 'revoke' && scopes.length > 0)) {
+    if (action === 'grant' || action === 'ungrant') {
       if (!id) throw new UsageError('A client id is required (see clients list).');
-      const result = changeThreadScopes(storage.db, systemClock, id, action, scopes);
+      const result = changeThreadScopes(storage.db, systemClock, id, action === 'grant' ? 'grant' : 'revoke', scopes);
       io.out(`Client ${id}: thread scopes ${result.scopes.join(' ') || '(none)'} (${result.changed ? 'changed' : 'unchanged'}). Existing tokens take effect on their next request; no restart needed.`);
       return 0;
     }
@@ -268,7 +269,7 @@ function clients(paths: Paths, io: CliIo, action: string | undefined, id: string
       io.out(`Revoked client ${id} and ${result.families} unrevoked grant(s). Its tokens no longer work.`);
       return 0;
     }
-    throw new UsageError('Use: clients list | clients scopes <id> | clients grant <id> --scope <scope> | clients revoke <id> [--scope <scope>] | clients diagnose <id> | clients token --name <name>');
+    throw new UsageError('Use: clients list | clients scopes <id> | clients grant <id> --scope <scope> | clients ungrant <id> --scope <scope> | clients revoke <id> | clients diagnose <id> | clients token --name <name>');
   } finally {
     storage.db.close();
   }
@@ -475,6 +476,12 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
     }
     // `jobs` checks its own arguments: `jobs adopt` takes two.
     if (command !== 'jobs' && args.length > 1) throw new UsageError(`Unexpected arguments: ${args.slice(1).join(' ')}`);
+    if (command === 'clients' && action === 'revoke' && values.scope !== undefined) {
+      throw new UsageError('clients revoke revokes the whole client; use clients ungrant <id> --scope <scope> to remove thread scopes.');
+    }
+    if (command === 'clients' && (action === 'grant' || action === 'ungrant') && !values.scope?.length) {
+      throw new UsageError(`clients ${action} requires at least one --scope (threads:read or threads:control).`);
+    }
     // Each of these options belongs to one command; anywhere else it would be ignored silently.
     const optionCommands = [
       ['ttl', values.ttl, 'pair and clients token', command === 'pair' || (command === 'clients' && action === 'token')],
@@ -483,7 +490,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       ['hosts', values.hosts, 'clients token', command === 'clients' && action === 'token'],
       ['title', values.title, 'jobs adopt', command === 'jobs' && action === 'adopt'],
       ['all', values.all, 'jobs list', command === 'jobs' && action === 'list'],
-      ['scope', values.scope, 'clients grant/revoke', command === 'clients' && (action === 'grant' || action === 'revoke')],
+      ['scope', values.scope, 'clients grant/ungrant', command === 'clients' && (action === 'grant' || action === 'ungrant')],
       ['limit', values.limit, 'webhooks attempts', command === 'webhooks' && action === 'attempts'],
     ] as const;
     for (const [option, value, owner, allowed] of optionCommands) {

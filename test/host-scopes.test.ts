@@ -1,6 +1,4 @@
 import assert from 'node:assert/strict';
-import { changeThreadScopes } from '../src/oauth/threadScopes.ts';
-import { THREAD_SCOPES } from '../src/oauth/scopes.ts';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
@@ -664,7 +662,6 @@ describe('host grants: work tools on two hosts', () => {
     const miniStanding = (await gw.services.jobs.adopt({ project: 'alpha', threadId: miniThread })).job;
     const macbookStanding = (await gw.services.jobs.adopt({ project: 'beta', threadId: macbookThread })).job;
     const agent = await connect(t, gw, 'operate', ['mini']);
-    changeThreadScopes(gw.services.db, gw.clock, agent.clientId, 'grant', THREAD_SCOPES);
     const status = await toolText(agent, 'fleet_status');
     assert.deepEqual((status.structured as { projects: { standingJobs: { jobId: string }[] }[] }).projects.map((project) => project.standingJobs.map((job) => job.jobId)),
       [[miniStanding.id]]);

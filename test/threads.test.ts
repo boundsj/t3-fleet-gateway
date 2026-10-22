@@ -174,7 +174,7 @@ test('external jobs never leak through work listings, feed or fleet_status after
   assert.equal((await readOnly.callError('work_adopt', { ...target, threadId: external(h), requestId: 'read-only' })).code, 'insufficient_scope');
 });
 
-test('operator grants/revokes existing client scopes in place, idempotently, without changing token secrets or other clients', async (t) => {
+test('operator grants/ungrants existing client scopes in place, idempotently, without changing token secrets or other clients', async (t) => {
   const h = await startJobHarness(t, { host: { discovery: { enabled: true } } });
   const client = h.gw.services.tokens.issueOperatorToken({ name: 'Synthetic connector label', scopes: ['host:main:read', 'host:main:operate'], expiresAt: h.gw.clock() + 60_000 });
   const agent = await agentWithToken(t, h.gw.baseUrl, client.clientId, client.token);
@@ -204,10 +204,18 @@ test('operator grants/revokes existing client scopes in place, idempotently, wit
   assert.equal((await cli('grant', 'unknown', ...args)).code, 1);
   assert.equal((await cli('grant', client.clientId, '--scope', 'threads:unknown')).code, 1);
   assert.equal((await cli('grant', client.clientId, '--scope', 'fleet:operate')).code, 1);
-  assert.equal((await cli('grant', client.clientId)).code, 1);
-  assert.equal((await cli('revoke', 'unknown', ...args)).code, 1);
-  assert.equal((await cli('revoke', client.clientId, ...args)).code, 0);
-  assert.match((await cli('revoke', client.clientId, ...args)).out, /unchanged/);
+  const rejectedRevoke = await cli('revoke', client.clientId, ...args);
+  assert.equal(rejectedRevoke.code, 2);
+  assert.match(rejectedRevoke.err, /clients ungrant/);
+  assert.equal(rejectedRevoke.out, '');
+  assert.equal((await cli('grant', client.clientId)).code, 2);
+  assert.equal((await cli('ungrant', client.clientId)).code, 2);
+  await agent.call('fleet_threads', target);
+  assert.equal(h.gw.services.clients.get(client.clientId)?.revokedAt, null);
+  assert.equal((await cli('ungrant', 'unknown', ...args)).code, 1);
+  assert.equal((await cli('ungrant', client.clientId, '--scope', 'threads:unknown')).code, 1);
+  assert.equal((await cli('ungrant', client.clientId, ...args)).code, 0);
+  assert.match((await cli('ungrant', client.clientId, ...args)).out, /unchanged/);
   assert.equal((await agent.callError('fleet_threads', target)).code, 'insufficient_scope');
   assert.deepEqual(stored(), before);
   assert.deepEqual(['refresh_tokens', 'token_families'].map((table) => h.gw.services.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), grantsBefore);
@@ -216,6 +224,65 @@ test('operator grants/revokes existing client scopes in place, idempotently, wit
   assert.equal(audits.length, 8);
   assert.ok(audits.every((entry) => entry.client_id === client.clientId));
   assert.deepEqual(audits.map((entry) => entry.changed), [1, 1, 0, 0, 1, 1, 0, 0]);
+});
+
+test('host grants retain operator standing-job visibility and controls while client adoptions stay scoped', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } }, pilot: { allowWorkStart: false } });
+  const standingThread = external(h, 'Synthetic operator coordinator');
+  h.fake.finishTurn(standingThread, 'Synthetic standing reply');
+  const { job: standing } = await h.gw.services.jobs.adopt({ project: 'pilot', threadId: standingThread });
+  grant(h);
+  const { job: adopted } = await h.agent.call<Adoption>('work_adopt', {
+    ...target, threadId: external(h, 'Synthetic client adoption'), requestId: 'adopt-separated',
+  });
+  for (const access of ['read', 'operate'] as const) {
+    const issued = h.gw.services.tokens.issueOperatorToken({ name: `Synthetic host ${access}`,
+      scopes: access === 'read' ? ['host:main:read'] : ['host:main:read', 'host:main:operate'], expiresAt: h.gw.clock() + 60_000 });
+    const agent = await agentWithToken(t, h.gw.baseUrl, issued.clientId, issued.token);
+    const fleet = await agent.call<{ projects: { standingJobs: { jobId: string }[] }[] }>('fleet_status');
+    assert.deepEqual(fleet.projects.flatMap((project) => project.standingJobs.map((job) => job.jobId)), [standing.id]);
+    for (const mine of [false, true]) {
+      const listed = await agent.call<{ jobs: { jobId: string }[] }>('work_list', { mine, limit: 1 });
+      assert.deepEqual(listed.jobs.map((job) => job.jobId), [standing.id], 'adopted rows do not consume the SQL limit');
+      const feed = await agent.call<{ events: { jobId: string }[]; attention: { jobId: string }[] }>('work_feed', { mine });
+      assert.ok(feed.events.some((event) => event.jobId === standing.id));
+      assert.ok(feed.attention.some((job) => job.jobId === standing.id));
+      assert.ok([...feed.events, ...feed.attention].every((entry) => entry.jobId !== adopted.jobId));
+    }
+    const status = await agent.call<{ state: string; origin: string }>('work_status', { jobId: standing.id });
+    assert.deepEqual([status.state, status.origin], ['idle', 'standing']);
+    await agent.call('work_messages', { jobId: standing.id });
+    assert.equal((await agent.callError('fleet_threads', target)).code, 'insufficient_scope');
+    assert.equal((await agent.callError('work_adopt', { ...target, threadId: external(h), requestId: 'host-only' })).code, 'insufficient_scope');
+    for (const tool of ['work_status', 'work_messages']) {
+      assert.equal((await agent.callError(tool, { jobId: adopted.jobId })).code, 'insufficient_scope');
+    }
+    for (const [tool, input] of [
+      ['work_continue', { message: 'Synthetic', requestId: 'blocked' }], ['work_respond', { requestId: 'q', answers: {} }],
+      ['work_cancel', {}], ['work_settle', { requestId: 'blocked' }],
+    ] as const) {
+      assert.equal((await agent.callError(tool, { ...input, jobId: adopted.jobId })).code, 'insufficient_scope');
+      if (access === 'read') assert.equal((await agent.callError(tool, { ...input, jobId: standing.id })).code, 'insufficient_scope');
+    }
+    if (access === 'operate') {
+      const disabled = await agent.callError('work_start', { project: 'pilot', task: 'Synthetic', requestId: 'disabled-standing' });
+      assert.equal(disabled.code, 'start_disabled');
+      assert.ok(disabled.text.includes(standing.id));
+      assert.equal(disabled.text.includes(adopted.jobId), false);
+      await agent.call('work_continue', { jobId: standing.id, message: 'Synthetic coordinator instruction', requestId: 'standing-continue' });
+      assert.equal(h.fake.sends.at(-1)?.threadId, standingThread);
+      const question = h.fake.askQuestion(standingThread, [{ id: 'choice', header: 'Synthetic', question: 'Synthetic coordinator question', options: [] }]);
+      await h.tick();
+      await agent.call('work_respond', { jobId: standing.id, requestId: question, answers: { choice: 'Synthetic answer' } });
+      assert.equal(h.fake.responses.at(-1)?.threadId, standingThread);
+      const cancelled = await agent.call<{ outcome: string }>('work_cancel', { jobId: standing.id });
+      assert.equal(cancelled.outcome, 'interrupt_requested');
+      await h.tick();
+      assert.equal((await agent.call<{ state: string }>('work_status', { jobId: standing.id })).state, 'idle');
+      const settled = await agent.call<{ settled: boolean }>('work_settle', { jobId: standing.id, requestId: 'standing-settle' });
+      assert.equal(settled.settled, true);
+    }
+  }
 });
 
 test('adopted resumes revalidate project membership and runtime ceilings; observation never changes T3 settings', async (t) => {

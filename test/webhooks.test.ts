@@ -1,6 +1,4 @@
 import assert from 'node:assert/strict';
-import { changeThreadScopes } from '../src/oauth/threadScopes.ts';
-import { THREAD_SCOPES } from '../src/oauth/scopes.ts';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingHttpHeaders, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -312,7 +310,6 @@ describe('outbound job webhooks through MCP, watcher and HTTP', () => {
     const sink = await receiver(t);
     const h = await harness(t, [subscription(sink.url)]);
     const threadId = h.fake.launchDirect({ projectId: 'project-1', title: 'Synthetic coordinator' }).threadId;
-    changeThreadScopes(h.gw.services.db, h.gw.clock, h.agent.clientId, 'grant', THREAD_SCOPES);
     const adopted = await h.gw.services.jobs.adopt({ project: 'pilot', threadId });
     await h.agent.call('work_continue', { jobId: adopted.job.id, message: 'Synthetic delegate task', requestId: 'delegate-1' });
     const child = h.fake.delegate(threadId, 'Synthetic private child task');

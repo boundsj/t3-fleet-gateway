@@ -307,7 +307,7 @@ export class JobService {
       ? {} : { hostIds: [...new Set([...requestedHosts, ...readableHosts])] };
     const job = this.store.get(jobId, scope);
     if (job && permits(caller.scopes, level, job.hostId)) {
-      if (job.origin !== 'gateway') {
+      if (job.origin === 'adopted') {
         this.#requireThreadScope(caller, level);
       }
       return job;
@@ -324,7 +324,7 @@ export class JobService {
   /** The rows of the ledger an agent may read: its grant's hosts, unless it covers all. */
   #visible(caller: Caller, mine = false): JobScope {
     const hosts = permittedHosts(caller.scopes, 'read');
-    return { includeExternal: caller.scopes.includes(THREAD_READ_SCOPE), ...(mine ? { clientId: caller.clientId } : {}), ...(hosts === 'all' ? {} : { hostIds: hosts }) };
+    return { includeAdopted: caller.scopes.includes(THREAD_READ_SCOPE), ...(mine ? { clientId: caller.clientId } : {}), ...(hosts === 'all' ? {} : { hostIds: hosts }) };
   }
 
   #requireThreadScope(caller: Caller, level: AccessLevel): void {
@@ -519,7 +519,8 @@ export class JobService {
   }
 
   #startDisabled(caller: Caller, project: ProjectConfig): GatewayError {
-    const standing = this.store.standingJobs(project.alias).filter((job) => caller.scopes.includes(THREAD_READ_SCOPE) && permits(caller.scopes, 'read', job.hostId));
+    const standing = this.store.standingJobs(project.alias).filter((job) =>
+      permits(caller.scopes, 'read', job.hostId) && (job.origin !== 'adopted' || caller.scopes.includes(THREAD_READ_SCOPE)));
     return new GatewayError('start_disabled', startDisabledMessage(project.alias, standing));
   }
 
