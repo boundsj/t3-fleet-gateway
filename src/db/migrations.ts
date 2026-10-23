@@ -400,6 +400,14 @@ CREATE TRIGGER thread_action_events_no_delete BEFORE DELETE ON thread_action_eve
     sql: `UPDATE jobs SET state = 'idle', finished_at = NULL
       WHERE state = 'failed' AND last_error_code = 't3_run_failed' AND t3_thread_id IS NOT NULL;`,
   },
+  {
+    version: 17,
+    name: 'queued launch attachments',
+    sql: `CREATE TABLE job_launch_attachments (
+  job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+  payload TEXT NOT NULL
+) STRICT;`,
+  },
 ];
 
 /**

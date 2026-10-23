@@ -414,14 +414,16 @@ test('migration 15 preserves populated v14 subscriptions, secrets, revisions, qu
     VALUES ('legacy-file', 'synthetic-revision', 'synthetic-identity', ?, ?, 'config')`)
     .run(JSON.stringify({ enabled: false, hosts: ['main'], projects: ['pilot'], events: ['cancelled'], excerptChars: 0 }), JSON.stringify(dashboardRoute));
   const job = createJob(jobs);
-  jobs.transition(job.id, { from: ['queued'], to: 'cancelled' });
+  // Seed the historical layout directly: the current transition also cleans the attachment table added later.
+  db.prepare("UPDATE jobs SET state = 'cancelled' WHERE id = ?").run(job.id);
+  jobs.appendEvent(job.id, 'state_changed', 'cancelled');
   const tables = ['webhook_subscriptions', 'webhook_deliveries', 'webhook_attempts', 'job_events', 'jobs'];
   const before = tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
   migrate(db);
-  assert.equal(schemaVersion(db), 16);
+  assert.equal(schemaVersion(db), SCHEMA_VERSION);
   assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
   assert.deepEqual(webhooks.route(connection.id, connection.revision), dashboardRoute);
-  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 14)), /schema version 16 is newer/);
+  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 14)), /schema version 17 is newer/);
   assert.equal(webhooks.claim(1, 30_000).length, 1, 'pending delivery still dispatches');
 });
 

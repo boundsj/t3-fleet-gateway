@@ -16,7 +16,8 @@ import type { TokenService, VerifiedAccessToken } from '../oauth/tokens.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
 import { registerTools, type GatewayTool, type ToolContext } from './tools.ts';
 
-export const MCP_BODY_LIMIT = 1024 * 1024;
+// 10 MiB decoded attachments expand to about 14 MiB of base64, plus bounded JSON/text.
+export const MCP_BODY_LIMIT = 15 * 1024 * 1024;
 
 export interface McpEndpointDependencies {
   publicUrl: string;

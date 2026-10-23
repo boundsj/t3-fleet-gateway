@@ -21,7 +21,7 @@ T3 Code stays the execution surface. Every job is an ordinary T3 thread the pers
 - Patching T3 Code. Gaps are worked around in the gateway.
 - Managing hosted agent routines. Agents configure their own polling schedules or opt-in outbound webhook triggers (see "Outbound job webhooks").
 - Multi-user tenancy. One operator; agents are that operator's clients.
-- Queues across hosts, automatic host failover, attachments, PR management, model selection heuristics.
+- Queues across hosts, automatic host failover, PR management, model selection heuristics.
 - A general administration UI. The opt-in operator dashboard has monitoring and, since v0.1.9, webhook connection management on a listener of its own; see "Operator dashboard". It also supports confirmed job settlement; it has no host or client controls.
 
 ## Architecture
@@ -169,13 +169,15 @@ Scopes: **read** = `fleet:read`, **operate** = `fleet:operate`, or the same leve
 | `work_status` | read | One job: state, project, host, `workspaceMode`, T3 thread id, title and app link, branch (empty for a scratch job), timestamps, pending requests, latest worker message excerpt (bounded, with `excerptTruncated`), whether it waits on work it delegated, live `settled` / `settledAt` (null when unknown), last error. |
 | `work_messages` | read | A job's worker messages in full (up to 50,000 characters each), read live from T3: the latest by default, paged back with `before` and forward with `after`. |
 | `work_feed` | read | Events since a cursor (state changes, needs input, finished turns, failures) plus the list of jobs currently needing attention. Returns the next cursor. Designed for an agent's scheduled routine. |
-| `work_start` | operate | Start a job from a task description, with no named project on a chosen machine (`target: { host }`), in a configured project (`project`) or, on a host with discovery, a T3 project by id (`target: { host, projectId }`), optionally with an explicit `modelSelection` from `fleet_models`. Idempotent on `requestId`. |
-| `work_continue` | operate | Send a follow-up instruction to a job's thread. Idempotent on `requestId`. |
+| `work_start` | operate | Start a job from a task description and optional base64 attachments, with no named project on a chosen machine (`target: { host }`), in a configured project (`project`) or, on a host with discovery, a T3 project by id (`target: { host, projectId }`), optionally with an explicit `modelSelection` from `fleet_models`. Idempotent on `requestId`. |
+| `work_continue` | operate | Send a follow-up instruction and optional base64 attachments to a job's thread. Idempotent on `requestId`; uncertain attachment sends stay blocked without resending. |
 | `work_respond` | operate | Answer a pending T3 question on a job. (Permission approvals cannot be answered through T3's tools; see "As built" under Jobs.) |
 | `work_settle` | operate | Settle a quiet finished job's T3 thread; fresh status and delegated-work check, confirmed by a read back. Idempotent on `requestId`. |
 | `work_cancel` | operate | Interrupt a job's thread. Reports requested versus confirmed. On a standing job, interrupts the current turn only. |
 
 Tool descriptions are written for an LLM: what the tool does, when to use it, idempotency rules, and the state meanings.
+
+`work_start` and `work_continue` accept `attachments: [{ name?, mimeType, data }]`: base64 bytes, at most 8 files, 5 MiB each and 10 MiB total. They upload to the destination T3 host and use native image/file metadata. URLs are unsupported. Request hashes include metadata and content hashes; text-only hashes remain unchanged. Migration 17 adds the private `job_launch_attachments` table for queued starts; ordinary job reads never load these payloads. Attachment follow-ups use T3's API without a retry key: a durable attempt marker prevents duplicates after uncertainty, and success reports `delivery: accepted` without guessing new-turn attribution. [Exact schema, storage, retry semantics and T3 source evidence](attachments.md).
 
 As built, tools are registered in this order: `fleet_status`, `fleet_projects`, `fleet_models`, `fleet_threads`, `work_start`, `work_adopt`, `work_continue`, `work_respond`, `work_cancel`, `work_settle`, `work_status`, `work_messages`, `work_list`, `work_feed` (`src/mcp/fleetStatus.ts`, `src/mcp/catalogTools.ts`, `src/mcp/workTools.ts`). Job errors use these stable codes besides the shared ones: `not_found` (job, project, host or pending request), `job_state_conflict` (the job's state does not allow the operation), `request_id_conflict` (a requestId reused with different input for the same tool), `start_disabled` (`work_start` in a project with `allowWorkStart: false`, or into an unconfigured T3 project on a host whose `discovery.allowWorkStart` is false; the message names the project's standing jobs or the aliases that accept work; a retry of a request id the agent used before the setting changed still returns its job), `discovery_disabled` (a `target` or `modelSelection` for a host without `discovery.enabled`; also the per-host error in `fleet_projects` and `fleet_models`), `catalog_limit` (a host's catalog exceeds the gateway's bounds and is reported unavailable rather than cut), and T3 transport codes `host_unreachable`, `t3_timeout`, `t3_response_lost`.
 

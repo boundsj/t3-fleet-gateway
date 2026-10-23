@@ -96,6 +96,7 @@ export type LaunchThreadInput = {
   runtimeMode: (typeof RUNTIME_MODE_VALUES)[number];
   modelSelection?: Record<string, unknown>;
   message: string;
+  attachments?: T3Attachment[];
 } & (
   | { projectId: string; workspaceStrategy: LaunchWorkspaceStrategy; scratch?: never }
   // T3's own scratch workspace: T3 files the thread under its scratch project and gives it a folder of its own. T3 refuses
@@ -241,3 +242,20 @@ export const pendingRequestSchema = z.looseObject({
 export type PendingRequest = z.infer<typeof pendingRequestSchema>;
 
 export const respondResultSchema = z.looseObject({ sequence: z.number().int() });
+
+/** Metadata returned to T3 after its signed upload has received the bytes. */
+export interface T3Attachment {
+  id: string;
+  type: 'image' | 'file';
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+}
+export const attachmentUploadSchema = z.object({
+  attachmentId: z.string().min(1).max(256),
+  relativeUrl: z.string().min(1).max(4096),
+  expiresAt: z.number(),
+});
+export const attachmentSendSchema = z.object({
+  threadId: z.string().min(1), messageId: z.string().min(1), runId: z.string().min(1), status: z.string(),
+});
