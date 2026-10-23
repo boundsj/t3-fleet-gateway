@@ -3,6 +3,7 @@ import { describe, test } from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import * as z from 'zod';
 import { gatewayTools } from '../src/gateway.ts';
+import { MCP_BODY_LIMIT } from '../src/mcp/endpoint.ts';
 import { defineTool } from '../src/mcp/tools.ts';
 import { OPERATE_SCOPE } from '../src/oauth/scopes.ts';
 import { HOUR } from '../src/time.ts';
@@ -129,7 +130,7 @@ describe('MCP protocol handling', () => {
   test('bounds request bodies', async (t) => {
     const gw = await startTestGateway(t);
     const { tokens } = await signIn(gw.baseUrl, gw.mintApprovalCode);
-    const response = await mcpPost(gw.baseUrl, tokens.access_token, { ...INITIALIZE, padding: 'x'.repeat(1_100_000) });
+    const response = await mcpPost(gw.baseUrl, tokens.access_token, { ...INITIALIZE, padding: 'x'.repeat(MCP_BODY_LIMIT + 1) });
     assert.equal(response.status, 413);
   });
 });

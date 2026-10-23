@@ -1,3 +1,4 @@
+import type { AttachmentInput } from '../jobs/attachments.ts';
 import {
   Client,
   SdkError,
@@ -11,8 +12,11 @@ import { pullRequestListSchema } from '../jobs/pullRequests.ts';
 import { GatewayError, type ErrorCode } from '../errors.ts';
 import { isTypeOfServiceRace } from '../processErrors.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
-import { parseToolResult } from './results.ts';
+import { parseToolResult, T3ToolError } from './results.ts';
 import {
+  attachmentUploadSchema,
+  attachmentSendSchema,
+  type T3Attachment,
   capabilitiesSchema,
   environmentSchema,
   interruptResultSchema,
@@ -252,6 +256,51 @@ export class T3Client {
   /** Create a thread. Not retried: T3 has no retry key for launches, so a lost response is ambiguous. */
   launchThread(input: LaunchThreadInput, options: { timeoutMs?: number } = {}): Promise<LaunchResult> {
     return this.callTool('t3_thread_launch', { ...input }, launchResultSchema, options);
+  }
+
+  /** Stage on the destination host, never on the gateway's filesystem. Signed URLs are private and never logged. */
+  async uploadAttachments(items: readonly AttachmentInput[]): Promise<T3Attachment[]> {
+    const uploaded: T3Attachment[] = [];
+    for (const item of items) {
+      const bytes = Buffer.from(item.data, 'base64');
+      const metadata = { type: item.mimeType.startsWith('image/') ? 'image' as const : 'file' as const,
+        name: item.name!, mimeType: item.mimeType, sizeBytes: bytes.length };
+      let prepared;
+      try { prepared = await this.callTool('t3_attachment_prepare_upload', { upload: metadata }, attachmentUploadSchema); }
+      catch (error) {
+        if (error instanceof T3ToolError) throw new T3ToolError(error.tool, error.t3Code, 'T3 could not prepare the attachment upload.');
+        throw error;
+      }
+      // T3 is trusted for the upload capability, but cannot redirect this gateway to another destination.
+      let url: URL;
+      try { url = new URL(prepared.relativeUrl, this.#url); }
+      catch { throw new GatewayError('t3_invalid_response', 'T3 returned an invalid attachment upload route.'); }
+      if (!prepared.relativeUrl.startsWith('/api/attachments/upload/') || url.origin !== this.#url.origin || !url.pathname.startsWith('/api/attachments/upload/') || url.username || url.password || url.hash) {
+        throw new GatewayError('t3_invalid_response', 'T3 returned an invalid attachment upload route.');
+      }
+      let status: number;
+      try {
+        const response = await fetch(url, { method: 'POST', body: bytes, redirect: 'manual',
+          headers: { 'content-type': item.mimeType }, signal: AbortSignal.timeout(this.#timeoutMs) });
+        await response.body?.cancel();
+        status = response.status;
+      } catch {
+        // Fetch errors can include signed URLs and arbitrary response data. Never expose the cause.
+        throw new GatewayError('host_unreachable', 'T3 attachment upload failed. No thread message was sent; retry with the same requestId.');
+      }
+      if (status >= 300 && status < 400) throw new GatewayError('t3_invalid_response', 'T3 attachment upload redirects are not allowed.');
+      if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
+        throw new GatewayError('invalid_argument', 'T3 refused the attachment upload. Check the file type and size before starting new work.');
+      }
+      if (status < 200 || status >= 300) throw new GatewayError('host_unreachable', 'T3 attachment upload failed. No thread message was sent; retry with the same requestId.');
+      uploaded.push({ ...metadata, id: prepared.attachmentId });
+    }
+    return uploaded;
+  }
+
+  /** No retry key in this T3 API. The caller must durably mark an attempt before calling it. */
+  sendAttachments(threadId: string, message: string, attachments: T3Attachment[]) {
+    return this.callTool('t3_thread_send_attachments', { threadId, message, attachments }, attachmentSendSchema, { retry: false });
   }
 
   /**

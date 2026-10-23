@@ -532,6 +532,31 @@ export class JobEngine {
     this.#inFlight.add(job.id);
     try {
       let launched: LaunchResult;
+      let attachments;
+      try { attachments = store.launchAttachments(job.id); }
+      catch {
+        store.transition(job.id, { from: ['dispatching'], to: 'failed', changes: {
+          lastErrorCode: 'database_error', lastErrorMessage: "This job's stored attachments could not be read. Start the work again.",
+        }, detail: { reason: 'database_error', code: 'database_error' } });
+        store.clearLaunchAttachments(job.id);
+        return true;
+      }
+      let uploaded;
+      try { uploaded = attachments.length ? await registry.client(job.hostId).uploadAttachments(attachments) : undefined; }
+      catch (error) {
+        // Uploading alone cannot create a thread, even if the upload response is lost.
+        store.transition(job.id, { from: ['dispatching'], to: isHostFailure(error) ? 'queued' : 'failed',
+          changes: { dispatchStartedAt: null, ...(isHostFailure(error) ? {} : {
+            lastErrorCode: 'invalid_argument', lastErrorMessage: "T3 could not accept this job's attachments.",
+          }) }, detail: { reason: 'attachment_upload_failed' } });
+        store.transition(job.id, { from: ['cancel_requested'], to: 'cancelled', detail: { reason: 'cancelled_before_launch' } });
+        if (isHostFailure(error)) throw error;
+        return true;
+      }
+      if (store.require(job.id).state === 'cancel_requested') {
+        store.transition(job.id, { from: ['cancel_requested'], to: 'cancelled', detail: { reason: 'cancelled_before_launch' } });
+        return true;
+      }
       try {
         launched = await registry.client(job.hostId).launchThread(
           {
@@ -539,6 +564,7 @@ export class JobEngine {
             runtimeMode: job.runtimeMode as RuntimeMode,
             ...(plan.modelSelection ? { modelSelection: plan.modelSelection } : {}),
             message: launchMessage(job),
+            ...(uploaded ? { attachments: uploaded } : {}),
             ...(plan.workspace.kind === 'scratch'
               ? { scratch: true as const }
               : { projectId: plan.projectId, workspaceStrategy: workspaceStrategy(plan.workspace) }),
@@ -546,7 +572,8 @@ export class JobEngine {
           { timeoutMs: this.#launchTimeoutMs },
         );
       } catch (error) {
-        if (error instanceof T3ToolError) return await this.#launchRefused(job, plan, error);
+        if (error instanceof T3ToolError) return await this.#launchRefused(job, plan,
+          uploaded ? new T3ToolError(error.tool, error.t3Code, 'T3 could not accept the attached files.') : error);
         if (error instanceof T3TransportError && error.delivery === 'not_delivered') {
           store.transition(job.id, { from: ['dispatching'], to: 'queued', changes: { dispatchStartedAt: null }, detail: { reason: 'host_unreachable', code: error.code } });
           store.transition(job.id, { from: ['cancel_requested'], to: 'cancelled', detail: { reason: 'cancelled_before_launch' } });
@@ -573,6 +600,7 @@ export class JobEngine {
       await this.#attach(job.id, thread, 'launched', null);
       return true;
     } finally {
+      if (!['queued', 'dispatching'].includes(store.require(job.id).state)) store.clearLaunchAttachments(job.id);
       this.#inFlight.delete(job.id);
     }
   }

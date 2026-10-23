@@ -1,3 +1,4 @@
+import { attachmentsSchema } from '../jobs/attachments.ts';
 import * as z from 'zod';
 import { responseThreadIdSchema, threadIdSchema } from '../t3/threadId.ts';
 import { displayPullRequests, MAX_PULL_REQUESTS, MAX_TRACKED_PULL_REQUESTS, pullRequestsSchema } from '../jobs/pullRequests.ts';
@@ -342,7 +343,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'Start work on a machine. When the user names no project, pass target { host } to use that machine’s configured T3 internal scratch workspace. ' +
       'When the user names a project, use its configured alias or explicit target { host, projectId }; project work creates a fresh git worktree and branch, unless the project\'s host chooses workspaces (see workspace below). ' +
       'An unknown named project must be resolved or reported, never treated as scratch. The gateway opens a T3 Code ' +
-      'thread there and gives the worker your task. Returns at once with a jobId in state "queued"; the job moves to "running" ' +
+      'thread there and gives the worker your task and optional base64 image/file attachments. Returns at once with a jobId in state "queued"; the job moves to "running" ' +
       'when its host has a free slot. Follow it with work_feed (recommended: poll with the last cursor) or work_status. ' +
       'Idempotent: always pass a unique requestId per new piece of work; retrying with the same requestId and the same input ' +
       'returns the same job (created=false) instead of starting another, and reusing a requestId with different input is ' +
@@ -369,6 +370,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       target: startTargetInput.optional().describe('Machine only for no named project, or machine and explicit project id (pass this or project)'),
       workspace: workspaceSelectionSchema.optional().describe('Omit for the host\'s automatic choice. { type: "root" } for the project\'s own folder; { type: "worktree", baseRef?, startFromOrigin? } for a fresh worktree. Only on hosts with a workspace probe'),
       modelSelection: modelSelectionInput.optional().describe('Explicit provider instance, model and options from fleet_models; omit for the configured defaults'),
+      attachments: attachmentsSchema.optional(),
       task: z.string().min(1).max(MAX_TASK_CHARS).describe('What the worker should do, as a complete instruction'),
       requestId: requestIdInput,
       title: z.string().min(1).max(MAX_TITLE_CHARS).optional().describe('Short thread title; defaults to the first line of the task'),
@@ -599,19 +601,22 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'is false, nothing it delegated is still running: send follow-ups when its reply asks for input or the work is done, or ' +
       'when work_feed reports delegated_work_ended (its delegated work ended but it did not resume: ask it to check on that work). ' +
       'On a settled idle job, sending resumes the thread and T3 clears settlement. Terminal jobs cannot be continued. ' +
+      'Optional attachments send base64 images or files through T3 host storage, outside the repository. ' +
       'Idempotent: pass a unique requestId per message; ' +
       'repeating a requestId returns the first result without sending again, and if a call fails with an uncertain outcome, ' +
-      'repeating it with the same requestId is safe. Request ids are scoped to this tool, separate from work_start. Not for answering a pending question: use work_respond.',
+      'repeating it with the same requestId is safe. Attachment sends have no downstream retry key: an uncertain send stays blocked, ' +
+      'so inspect work_messages or the thread before using a new requestId. Request ids are scoped to this tool, separate from work_start. Not for answering a pending question: use work_respond.',
     scope: OPERATE_SCOPE,
     readOnly: false,
     inputSchema: z.object({
       jobId: jobIdInput,
+      attachments: attachmentsSchema.optional(),
       message: z.string().min(1).max(MAX_MESSAGE_CHARS).describe('The instruction for the worker'),
       requestId: requestIdInput,
     }),
     outputSchema: z.object({
       job: jobSchema,
-      delivery: z.string().describe('started (new turn), steered (into the active turn) or queued (behind it)'),
+      delivery: z.string().describe('started (new turn), steered (active turn), queued (behind it), or accepted (attachments: T3 does not report delivery mode)'),
       replayed: z.boolean().describe('true when this requestId was already delivered; nothing was sent again'),
     }),
     async run(input, context) {

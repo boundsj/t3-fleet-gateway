@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { validateAttachments, type AttachmentInput } from './attachments.ts';
 import { sha256Hex } from '../crypto.ts';
 import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
@@ -449,6 +450,7 @@ export interface NewJob {
   /** Known at creation for jobs with a launch spec; alias-only jobs learn it at dispatch. */
   t3ProjectId?: string | null;
   launchSpec?: LaunchSpec | null;
+  attachments?: AttachmentInput[];
 }
 
 /** An existing T3 thread the operator adopts as a standing job, with its state from a first read. */
@@ -678,6 +680,8 @@ export class JobStore {
           job.id, job.clientId, job.requestId, job.projectAlias, job.hostId, job.task, job.title, job.branch, job.runtimeMode, now, now, now,
           job.t3ProjectId ?? null, job.launchSpec ? JSON.stringify(job.launchSpec) : null,
         );
+      if (job.attachments?.length) this.#db.prepare('INSERT INTO job_launch_attachments (job_id, payload) VALUES (?, ?)')
+        .run(job.id, JSON.stringify(job.attachments));
       this.#insertEvent(job.id, 'created', null, 'queued', {}, now);
       this.#db
         .prepare('INSERT INTO idempotency_keys (client_id, request_id, tool, input_hash, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
@@ -791,6 +795,7 @@ export class JobStore {
         errorCode: options.detail?.code,
       });
     }
+    if (!['queued', 'dispatching', 'cancel_requested'].includes(options.to)) this.clearLaunchAttachments(id);
     for (const event of options.events ?? []) this.#insertEvent(id, event.type, current.state, options.to, event.detail ?? {}, now, options.turnRunId);
     if (outcome.contended) this.#insertContended(id, options.to, now);
     return this.get(id);
@@ -1049,6 +1054,23 @@ export class JobStore {
       )
       .all(since, since, ...filter.params, limit) as unknown as JobRow[];
     return rows.map(this.#job);
+  }
+
+  /** Private queued payload; deliberately absent from Job and every view. */
+  launchAttachments(id: string): AttachmentInput[] {
+    const row = this.#db.prepare('SELECT payload FROM job_launch_attachments WHERE job_id = ?').get(id) as { payload: string } | undefined;
+    try { return row === undefined ? [] : validateAttachments(JSON.parse(row.payload)); }
+    catch { throw new GatewayError('database_error', "This job's stored attachments could not be read. Start the work again."); }
+  }
+
+  clearLaunchAttachments(id: string): void {
+    this.#db.prepare('DELETE FROM job_launch_attachments WHERE job_id = ?').run(id);
+  }
+
+  /** No downstream retry key exists for attachment sends. Write the uncertainty before touching that API. */
+  beginAttachmentSend(clientId: string, requestId: string): boolean {
+    return this.#db.prepare(`UPDATE idempotency_keys SET response = '{"attachmentOutcome":"unknown"}'
+      WHERE client_id = ? AND tool = 'work_continue' AND request_id = ? AND response IS NULL`).run(clientId, requestId).changes === 1;
   }
 
   idempotencyKey(clientId: string, tool: IdempotentTool, requestId: string): IdempotencyKey | undefined {

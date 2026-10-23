@@ -143,6 +143,13 @@ const ACTIVE = new Set(['preparing', 'queued', 'starting', 'running', 'waiting']
 const MESSAGE_VIEW_TYPES = new Set(['user_message', 'assistant_message', 'proposed_plan']);
 const nullable = <T extends z.ZodType>(schema: T) => schema.nullable().optional();
 
+const attachmentMetadata = z.strictObject({
+  type: z.enum(['image', 'file']), id: z.string(), name: z.string(), mimeType: z.string(), sizeBytes: z.int().min(1),
+});
+const attachmentUploadInput = z.strictObject({ upload: attachmentMetadata.omit({ id: true }) });
+const attachmentSendInput = z.strictObject({ threadId: z.string().optional(), message: z.string().max(120000).optional(),
+  attachments: z.array(attachmentMetadata).min(1).max(8) });
+
 /** Input schemas copied field-for-field from T3's tools, strict so a misspelled field fails the test. */
 const launchInput = z.strictObject({
   projectId: nullable(z.string()),
@@ -159,7 +166,7 @@ const launchInput = z.strictObject({
     ]),
   ),
   message: nullable(z.string().max(120000)),
-  attachments: nullable(z.array(z.unknown()).max(8)),
+  attachments: nullable(z.array(attachmentMetadata).max(8)),
 });
 const readInput = z.strictObject({
   threadId: z.string(),
@@ -544,8 +551,28 @@ export class FakeT3 {
     this.#sessions.clear();
   }
 
+  readonly uploads = new Map<string, { metadata: z.infer<typeof attachmentMetadata>; bytes: Buffer | null }>();
+  readonly attachmentSends: z.infer<typeof attachmentSendInput>[] = [];
+  uploadRelativeUrl: string | undefined;
+  uploadStatus = 200;
+
+  #checkAttachments(items: z.infer<typeof attachmentMetadata>[]): void {
+    for (const item of items) {
+      const stored = this.uploads.get(item.id);
+      if (!stored?.bytes || Object.entries(stored.metadata).some(([key, value]) => item[key as keyof typeof item] !== value)) throw new FakeFailure('invalid_request', 'Missing upload.');
+    }
+  }
+
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const path = new URL(req.url ?? '/', this.url).pathname;
+    if (path.startsWith('/api/attachments/upload/')) {
+      const stored = this.uploads.get(path.split('/').at(-1)!);
+      const bytes = await readBody(req, 6 * 1024 * 1024);
+      if (!stored || stored.metadata.sizeBytes !== bytes.length) { res.writeHead(400).end(); return; }
+      stored.bytes = bytes;
+      res.writeHead(this.uploadStatus).end();
+      return;
+    }
     const body = req.method === 'POST' ? await readBody(req, 1024 * 1024) : undefined;
     const json = (status: number, value: unknown) => {
       res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
@@ -716,7 +743,23 @@ export class FakeT3 {
         maxBatchThreads: 10,
       },
     }));
-    tool('t3_thread_launch', launchInput, (input) => this.#launch(input));
+    tool('t3_attachment_prepare_upload', attachmentUploadInput, ({ upload }) => {
+      const id = `pending-${randomUUID()}`;
+      const metadata = { ...upload, id };
+      this.uploads.set(id, { metadata, bytes: null });
+      return { attachmentId: id, relativeUrl: this.uploadRelativeUrl ?? `/api/attachments/upload/${id}`, expiresAt: Date.now() + 600000 };
+    });
+    tool('t3_thread_send_attachments', attachmentSendInput, (input) => {
+      this.#checkAttachments(input.attachments);
+      this.attachmentSends.push(input);
+      const sent = this.#send({ threadId: input.threadId!, message: input.message ?? '' });
+      const { delivery, ...result } = sent;
+      return result;
+    });
+    tool('t3_thread_launch', launchInput, (input) => {
+      this.#checkAttachments(input.attachments ?? []);
+      return this.#launch(input);
+    });
     tool('t3_thread_read', readInput, (input) => {
       this.reads.push(input);
       const failure = this.readFailures.get(input.threadId);

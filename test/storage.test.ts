@@ -70,6 +70,7 @@ describe('database', () => {
       'host_renewals',
       'idempotency_keys',
       'job_events',
+      'job_launch_attachments',
       'job_turns',
       'jobs',
       'oauth_clients',
@@ -122,7 +123,7 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 16);
+    assert.equal(SCHEMA_VERSION, 17);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
       after.map(
@@ -551,7 +552,7 @@ CREATE TABLE jobs (
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 16);
+    assert.equal(SCHEMA_VERSION, 17);
     assert.deepEqual(['jobs', 'job_events', 'idempotency_keys'].map((table) => rowsWithoutV12(db, table)), before, 'no existing column changes');
     const added = db.prepare('SELECT workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at FROM jobs ORDER BY rowid').all().map((row) => ({ ...row }));
     assert.deepEqual(added, Array(2).fill({ workspace_kind: null, workspace_root_key: null, workspace_root_held_at: null, workspace_resume_tokens: '[]', probe_attempts: 0, probe_retry_at: null }));
@@ -566,7 +567,7 @@ CREATE TABLE jobs (
     db.prepare("UPDATE jobs SET host_id = 'other' WHERE id = 'legacy0002'").run();
     hold('legacy0002', 'other', 'folder-a');
     assert.throws(() => db.prepare("UPDATE jobs SET workspace_kind = 'checkout' WHERE id = 'legacy0001'").run(), /CHECK/);
-    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 11)), /schema version 16 is newer than this build supports \(11\)/);
+    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 11)), /schema version 17 is newer than this build supports \(11\)/);
     assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
     const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
     t.after(() => fresh.close());
@@ -796,4 +797,18 @@ test('migration 16 reopens only worker failures with threads and preserves settl
   migrate(db);
   assert.deepEqual(db.prepare('SELECT * FROM job_events').all(), history);
   assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
+});
+
+test('migration 17 preserves populated version 16 jobs and adds private queued attachments', (t) => {
+  const db = new DatabaseSync(join(tempDir(t), 'attachments-migration.db'));
+  t.after(() => db.close());
+  migrate(db, MIGRATIONS.slice(0, 16));
+  db.exec(`INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode,
+    created_at, updated_at, state_changed_at) VALUES ('legacyatt1', 'c', 'r', 'pilot', 'main', 'queued', 'Synthetic', 'Synthetic', 'b', 'auto', 1, 2, 2)`);
+  const before = db.prepare('SELECT * FROM jobs').get()!;
+  migrate(db);
+  assert.deepEqual({ ...db.prepare('SELECT * FROM jobs').get()! }, { ...before });
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM job_launch_attachments').get()!.n, 0);
+  assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
+  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 16)), /newer than this build supports/);
 });

@@ -186,6 +186,10 @@ Your bot can also ask for a workspace with `work_start`'s `workspace`: `{ "type"
 
 > **What this means:** a job in a project's own folder edits that checkout directly, with no branch of its own to review. Machines without the probe behave exactly as before. [Workspace probe settings](docs/configuration.md#workspace-probe).
 
+## Send images and files
+
+Your bot can include `attachments: [{ "name": "notes.txt", "mimeType": "text/plain", "data": "SGVsbG8K" }]` with `work_start` or `work_continue`. Send base64 bytes: files do not need to exist on either machine. Images use T3's native image input; other files use T3's attachment store outside the repository. Up to 8 files, 5 MiB each and 10 MiB total; URLs are unsupported. [Supported types, exact schema and retry behavior](docs/attachments.md).
+
 ## Keep a coordinator in the loop
 
 Already have a T3 thread that plans work and delegates to other agents? Adopt it as a **standing job** so your bot can keep talking to that same thread:

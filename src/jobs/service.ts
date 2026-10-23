@@ -12,6 +12,7 @@ import { T3ToolError } from '../t3/results.ts';
 import type { ThreadItem, ThreadRead } from '../t3/schemas.ts';
 import { cleanThreadTitle } from '../hosts/threads.ts';
 import { HOUR, SECOND, type Clock } from '../time.ts';
+import { attachmentHashes, validateAttachments, type AttachmentInput } from './attachments.ts';
 import { scanActivity } from './activity.ts';
 import { EXCERPT_CHARS, holdsReadPosition, isActiveStatus, isDelegatedWorkActive, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { newJobId } from './ids.ts';
@@ -68,6 +69,7 @@ export interface StartInput {
    */
   workspace?: WorkspaceSelection | undefined;
   task: string;
+  attachments?: AttachmentInput[] | undefined;
   requestId: string;
   title?: string | undefined;
 }
@@ -75,6 +77,7 @@ export interface StartInput {
 export interface ContinueInput {
   jobId: string;
   message: string;
+  attachments?: AttachmentInput[] | undefined;
   requestId: string;
 }
 
@@ -193,10 +196,15 @@ export function inputHash(tool: string, input: Record<string, unknown>): string 
  * changed target or selection under the same request id conflicts.
  */
 export function startInputHash(input: StartInput): string {
-  if (input.target === undefined && input.modelSelection === undefined && input.workspace === undefined) {
+  const attachments = validateAttachments(input.attachments);
+  if (input.target === undefined && input.modelSelection === undefined && input.workspace === undefined && attachments.length === 0) {
     return inputHash('work_start', { project: input.project, task: input.task, title: input.title });
   }
+  if (input.target === undefined && input.modelSelection === undefined && input.workspace === undefined) {
+    return inputHash('work_start', { project: input.project, task: input.task, title: input.title, attachments: attachmentHashes(attachments) });
+  }
   return inputHash('work_start', {
+    ...(attachments.length ? { attachments: attachmentHashes(attachments) } : {}),
     project: input.project ?? null,
     target: input.target === undefined ? null : { host: input.target.host, ...(input.target.projectId === undefined ? {} : { projectId: input.target.projectId }) },
     modelSelection: input.modelSelection === undefined ? null : canonicalSelection(input.modelSelection),
@@ -460,6 +468,7 @@ export class JobService {
         projectAlias: project.alias,
         hostId: project.host,
         task: input.task,
+        attachments: validateAttachments(input.attachments),
         title: threadTitle(id, input.task, input.title),
         branch: aliasOnly?.workspace.type === 'root' ? '' : `${project.branchPrefix}${id}`,
         runtimeMode: project.runtimeMode,
@@ -489,6 +498,7 @@ export class JobService {
       projectAlias: spec.alias ?? projectRef(host.id, spec.projectId!),
       hostId: host.id,
       task: input.task,
+      attachments: validateAttachments(input.attachments),
       title: threadTitle(id, input.task, input.title),
       // A root job runs in the project's own folder, on whatever branch is checked out there: it has none of its own.
       branch: spec.v === 2 || (spec.v === 3 && spec.workspace.type === 'root') ? '' : `${branchPrefix}${id}`,
@@ -1011,20 +1021,38 @@ export class JobService {
   /**
    * Send a follow-up instruction to the job's thread. Idempotent on requestId: a delivered request is
    * not sent again, and a request whose first attempt had an unknown outcome is re-sent with the same
-   * T3 clientRequestId, which T3 deduplicates.
+   * T3 clientRequestId, which T3 deduplicates. Attachment sends instead keep a durable uncertainty marker and never resend.
    */
+  readonly #attachmentContinues = new Set<string>();
+
   async continue(caller: Caller, input: ContinueInput): Promise<ContinueResult> {
+    if (!input.attachments?.length) return this.#continue(caller, input);
+    // Authorize and audit every invocation, including one refused by the in-flight guard.
+    const job = this.#jobFor(caller, input.jobId, 'operate');
+    this.#auditThread(caller, job, 'continue');
+    const lock = JSON.stringify([caller.clientId, input.requestId]);
+    if (this.#attachmentContinues.has(lock)) throw new GatewayError('job_state_conflict', 'This attachment follow-up is in progress. Retry the same requestId later.');
+    this.#attachmentContinues.add(lock);
+    try { return await this.#continue(caller, input, true); }
+    finally { this.#attachmentContinues.delete(lock); }
+  }
+
+  async #continue(caller: Caller, input: ContinueInput, audited = false): Promise<ContinueResult> {
     // Before the request id is looked up, so a replay never returns a stored result for a job the agent may not operate.
     let job = this.#jobFor(caller, input.jobId, 'operate');
-    this.#auditThread(caller, job, 'continue');
-    const hash = inputHash('work_continue', { jobId: input.jobId, message: input.message });
+    if (!audited) this.#auditThread(caller, job, 'continue');
+    const attachments = validateAttachments(input.attachments);
+    const hash = inputHash('work_continue', { jobId: input.jobId, message: input.message,
+      ...(attachments.length ? { attachments: attachmentHashes(attachments) } : {}),
+    });
     const key = this.store.idempotencyKey(caller.clientId, 'work_continue', input.requestId);
     if (key) {
       if (key.jobId !== input.jobId || key.inputHash !== hash) {
         throw new GatewayError('request_id_conflict', `requestId "${input.requestId}" was already used for a different request. Use a new requestId.`);
       }
       if (key.response !== null) {
-        const stored = JSON.parse(key.response) as { delivery?: string };
+        const stored = JSON.parse(key.response) as { delivery?: string; attachmentOutcome?: string };
+        if (stored.attachmentOutcome === 'unknown') throw attachmentOutcomeUnknown();
         return { job, delivery: stored.delivery ?? 'unknown', replayed: true };
       }
     } else {
@@ -1043,21 +1071,41 @@ export class JobService {
     }
     // Resuming an idle job that works in the project's own folder takes the folder back first, before anything is sent: while
     // another job holds it the follow-up waits, and the same requestId may be sent again later.
-    const attempt = job.state === 'idle' ? this.store.reserveRoot(job.id, `continue:${caller.clientId}:${input.requestId}`) : ({ kind: 'not_needed' } as const);
+    let attempt = job.state === 'idle' ? this.store.reserveRoot(job.id, `continue:${caller.clientId}:${input.requestId}`) : ({ kind: 'not_needed' } as const);
     if (attempt.kind === 'busy') {
       if (!key) this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
       throw rootBusy(job);
     }
     let sent;
     try {
-      sent = await this.#registry.client(job.hostId).sendToThread({
+      const client = this.#registry.client(job.hostId);
+      if (attachments.length) {
+        const uploaded = await client.uploadAttachments(attachments);
+        await this.#validateAdoptedResume(this.store.require(job.id));
+        const current = this.store.require(job.id);
+        if (!['idle', 'running', 'needs_input'].includes(current.state)) {
+          throw new GatewayError('job_state_conflict', `Job ${job.id} is ${current.state}; the attachment follow-up was not sent.`);
+        }
+        if (current.workspaceKind === 'root' && current.state === 'idle' &&
+            (attempt.kind !== 'held' || !current.workspaceResumeTokens.includes(attempt.token) || current.workspaceRootHeldAt === null)) {
+          attempt = this.store.reserveRoot(job.id, `continue:${caller.clientId}:${input.requestId}`);
+          if (attempt.kind === 'busy') throw rootBusy(current);
+        }
+        // CAS is durable across processes. After this boundary, never resend without a downstream retry key.
+        if (!this.store.beginAttachmentSend(caller.clientId, input.requestId)) throw attachmentOutcomeUnknown();
+        const result = await client.sendAttachments(threadId, input.message, uploaded);
+        sent = { ...result, delivery: 'accepted' };
+      } else sent = await client.sendToThread({
         threadId,
         message: input.message,
         mode: 'auto',
         clientRequestId: `t3fg-${job.id}-${sha256Hex(`${caller.clientId}\n${input.requestId}`).slice(0, 24)}`,
       });
     } catch (error) {
-      if (error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered')) {
+      if (attachments.length && this.store.idempotencyKey(caller.clientId, 'work_continue', input.requestId)?.response !== null) {
+        throw attachmentOutcomeUnknown();
+      }
+      if (attachments.length || error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered')) {
         this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
         // Only this attempt's own claim ends here: an earlier attempt of the job that may have been delivered keeps the folder.
         if (attempt.kind === 'held') this.store.abandonResume(job.id, attempt.token);
@@ -1248,4 +1296,8 @@ async function readToEnd(client: T3Client, threadId: string): Promise<ThreadRead
   }
   if (!read) throw new GatewayError('internal_error', 'No thread read');
   return { ...read, items: kept, nextPosition: read.nextPosition ?? afterPosition };
+}
+
+function attachmentOutcomeUnknown(): GatewayError {
+  return new GatewayError('t3_response_lost', 'An attachment follow-up may have reached T3. It will not be resent: T3 has no attachment retry key. Read work_messages or inspect the thread before sending new work with a new requestId.');
 }
