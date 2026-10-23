@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.1 (2026-10-22)
+
+### Upgrading
+
+- **Database migrations 16 and 17, forward only.** Migration 16 makes existing worker turn failures recoverable: jobs with `t3_run_failed` and a thread become `idle`, preserving their error and history. Migration 17 adds private storage for queued launch attachments. Older builds refuse the newer ledger. Stop older gateway processes and back up the data directory before the first start. Running any command against the data directory migrates it. **Rolling back to 0.2.0 requires restoring that backup**, losing anything recorded since the upgrade.
+- Node requirements remain 24.22.1 or a later 24.x, or 26.12.1 or newer.
+
+### Added
+
+- **Send images and files to T3 jobs** ([#41](https://github.com/boundsj/t3-fleet-gateway/pull/41)). `work_start` and `work_continue` accept base64 attachments, uploaded to the authorized destination T3 host and delivered with the instruction through T3's native attachment APIs. Limits are 8 files, 5 MiB each and 10 MiB total, with MIME/filename allowlists and image signature checks; URLs are unsupported. Queued bytes stay separate from job views and are cleared after launch or cancellation. Provider/model support varies. Attachment follow-ups have no downstream retry key: uncertain sends stay blocked for that request ID across restarts to prevent duplicate turns. Inspect the thread before submitting new work. See [Sending images and files](docs/attachments.md) for storage, retention and retry details.
+
+### Fixed
+
+- **Keep worker turn failures recoverable** ([#40](https://github.com/boundsj/t3-fleet-gateway/pull/40)). A failed worker turn now leaves a launched job `idle` with `lastError.code: t3_run_failed`, so the watcher keeps following it and `work_continue` can resume it. Later activity clears the error and records `job_recovered`; dashboard attention, status, feed and settlement follow the same model. Failure webhooks keep type `failed` but report state `idle`. Launch failures, missing threads, cancellation and release remain terminal. Migration 16 reclassifies eligible old jobs without relaunching, resending or emitting a notification.
+
 ## 0.2.0 (2026-10-22)
 
 ### Upgrading
