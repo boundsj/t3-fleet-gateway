@@ -32,6 +32,15 @@ describe('config', () => {
     assert.equal(config.hosts[0]?.mintPairingCodeProbe, undefined, 'no executable probe is inferred for existing configs');
   });
 
+  test('standingInstructions is optional, trimmed, non-empty and bounded', () => {
+    assert.equal(parseConfig(minimal).standingInstructions, undefined);
+    assert.equal(parseConfig({ ...minimal, standingInstructions: '  Synthetic operator rule.\n' }).standingInstructions, 'Synthetic operator rule.');
+    assert.equal(parseConfig({ ...minimal, standingInstructions: 'x'.repeat(4000) }).standingInstructions?.length, 4000);
+    for (const standingInstructions of [42, null, {}, [], '', ' \n\t', 'x'.repeat(4001)]) {
+      invalid({ ...minimal, standingInstructions }, /standingInstructions/);
+    }
+  });
+
   test('reachability interval accepts whole minutes from 1 to 60 only', () => {
     for (const intervalMinutes of [1, 5, 60]) {
       assert.equal(parseConfig({ ...minimal, reachability: { intervalMinutes } }).reachability.intervalMinutes, intervalMinutes);
