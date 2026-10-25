@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Optional `standingInstructions` configuration text is prepended to every new job's first message ([#43](https://github.com/boundsj/t3-fleet-gateway/pull/43)). See [README](README.md#standing-instructions-for-workers) and [configuration](docs/configuration.md#standinginstructions).
+
+### Fixed
+
+- Malformed HTTP request targets now return `400` with `invalid_request` instead of causing an uncaught URL parsing error and an unauthenticated restart loop. The request log records only `(invalid)` and status 400, without the raw target. Valid request routing is unchanged.
+
 ## 0.2.1 (2026-10-22)
 
 ### Upgrading
