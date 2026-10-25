@@ -56,6 +56,7 @@ export interface JobHarness {
 }
 
 export interface JobHarnessOptions {
+  standingInstructions?: string;
   webhooks?: Record<string, unknown>;
   webhookSender?: GatewayOptions['webhookSender'];
   maxConcurrentJobs?: number;
@@ -99,6 +100,7 @@ export async function startJobHarness(t: TestContext, options: JobHarnessOptions
           modelSelection: { model: 'synthetic-large' },
         },
       ],
+      ...(options.standingInstructions !== undefined ? { standingInstructions: options.standingInstructions } : {}),
       ...(options.watcher ? { watcher: { pollSeconds: 10, ...options.watcher } } : {}),
       ...(options.dashboard ? { dashboard: options.dashboard } : {}),
     },

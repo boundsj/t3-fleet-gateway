@@ -74,13 +74,15 @@ function isHostFailure(error: unknown): error is GatewayError {
 }
 
 /** Appended to every task so the worker (and anyone reading the thread) knows where it came from. */
-export function launchMessage(job: Job): string {
+export function launchMessage(job: Job, standingInstructions?: string): string {
   const workspace = job.launchSpec?.v === 2 && job.launchSpec.workspace.kind === 'scratch'
     ? 'in T3’s internal scratch workspace'
     : job.workspaceKind === 'root'
       ? 'in the project’s own folder'
       : `in a fresh worktree on branch ${job.branch}`;
-  return `${job.task}\n\n---\nStarted through t3-fleet-gateway as job ${job.id}, ${workspace}.`;
+  // With the 20,000-character task bound and 4,000-character config bound, including the footer stays below T3’s 120,000 limit.
+  const prefix = standingInstructions === undefined ? '' : `<operator-standing-instructions>\n${standingInstructions}\n</operator-standing-instructions>\n\n`;
+  return `${prefix}${job.task}\n\n---\nStarted through t3-fleet-gateway as job ${job.id}, ${workspace}.`;
 }
 
 /**
@@ -537,7 +539,7 @@ export class JobEngine {
             title: job.title,
             runtimeMode: job.runtimeMode as RuntimeMode,
             ...(plan.modelSelection ? { modelSelection: plan.modelSelection } : {}),
-            message: launchMessage(job),
+            message: launchMessage(job, this.#options.config.standingInstructions),
             ...(plan.workspace.kind === 'scratch'
               ? { scratch: true as const }
               : { projectId: plan.projectId, workspaceStrategy: workspaceStrategy(plan.workspace) }),

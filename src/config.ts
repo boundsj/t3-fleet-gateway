@@ -177,6 +177,8 @@ const configSchema = z
       })
       .default({ host: '127.0.0.1', port: 3790 }),
     allowedOrigins: z.array(originUrl('allowedOrigins entry')).default([]),
+    /** Private operator text prepended to work_start launches, never diagnostics or logs. */
+    standingInstructions: z.string().trim().min(1).max(4000).optional(),
     hosts: z.array(hostSchema).min(1, 'configure at least one host'),
     projects: z.array(projectSchema).default([]),
     tokens: z

@@ -36,6 +36,12 @@ The HTTPS origin agents use, for example `https://gateway.example.ts.net` or `ht
 
 Default `[]`. Browser-based MCP clients send an `Origin` header; the gateway accepts requests with no `Origin` (server-to-server clients such as Grok Bot) or with an `Origin` equal to `publicUrl` or listed here. Add an origin only if a browser-based client you trust needs it.
 
+### `standingInstructions`
+
+Optional global operator text for all `work_start` launches, across every host and project (including scratch and discovered projects). Omitted by default; when set, a string trimmed to 1–4,000 characters. Wrong types, empty or whitespace-only strings, and longer text fail configuration loading. See the [README example and lifecycle](../README.md#standing-instructions-for-workers).
+
+The dispatcher prepends `<operator-standing-instructions>\n<text>\n</operator-standing-instructions>\n\n` before the caller task and existing footer. It uses the configuration loaded at startup, so a queued job dispatched after a restart uses that configuration. The caller task remains capped at 20,000 characters; the complete launch message stays below T3's 120,000-character bound. Caller-only request hashes preserve retries across config changes. Follow-ups and adoption send no added text, including follow-ups to adopted standing jobs. No per-host/project override is provided: this setting is for rules shared by every worker. Text stays out of diagnostics and logs; doctor does not display it.
+
 ### `hosts` (required, at least one)
 
 Each entry is a machine running a T3 Code server.

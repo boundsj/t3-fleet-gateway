@@ -31,6 +31,15 @@ describe('config', () => {
     assert.equal(config.hosts[0]?.mintPairingCodeProbe, undefined, 'no executable probe is inferred for existing configs');
   });
 
+  test('standingInstructions is optional, trimmed, non-empty and bounded', () => {
+    assert.equal(parseConfig(minimal).standingInstructions, undefined);
+    assert.equal(parseConfig({ ...minimal, standingInstructions: '  Synthetic operator rule.\n' }).standingInstructions, 'Synthetic operator rule.');
+    assert.equal(parseConfig({ ...minimal, standingInstructions: 'x'.repeat(4000) }).standingInstructions?.length, 4000);
+    for (const standingInstructions of [42, null, {}, [], '', ' \n\t', 'x'.repeat(4001)]) {
+      invalid({ ...minimal, standingInstructions }, /standingInstructions/);
+    }
+  });
+
   test('workspaceProbeCommand is opt-in, an exact bounded argv', () => {
     assert.equal(parseConfig(minimal).hosts[0]?.workspaceProbeCommand, undefined, 'no probe is inferred');
     const host = (workspaceProbeCommand: unknown) => ({ ...minimal, hosts: [{ ...(minimal.hosts as object[])[0]!, workspaceProbeCommand }] });
