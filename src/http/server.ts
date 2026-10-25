@@ -16,16 +16,24 @@ export function createRouter(routes: readonly Route[], logger: Logger): (req: In
   const table = new Map(routes.map((route) => [route.path, route]));
   return (req, res) => {
     const started = performance.now();
-    const url = new URL(req.url ?? '/', 'http://gateway.invalid');
+    let path = '(invalid)';
     res.setHeader('x-content-type-options', 'nosniff');
     res.on('finish', () => {
       logger.info('http.request', {
         method: req.method,
-        path: table.has(url.pathname) ? url.pathname : '(unmatched)',
+        path,
         status: res.statusCode,
         durationMs: Math.round(performance.now() - started),
       });
     });
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', 'http://gateway.invalid');
+    } catch {
+      sendJson(res, 400, { error: 'invalid_request' });
+      return;
+    }
+    path = table.has(url.pathname) ? url.pathname : '(unmatched)';
     const route = table.get(url.pathname);
     if (!route) {
       sendJson(res, 404, { error: 'not_found' });
