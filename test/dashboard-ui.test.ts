@@ -12,7 +12,7 @@ const ago = (minutes: number) => new Date(Date.parse(NOW) - minutes * 60_000).to
 /** Every string the server could carry from untrusted or operator-written input is hostile here. */
 function hostileSnapshot(): DashboardSnapshot {
   const job = (id: string, state: DashboardSnapshot['jobs']['open'][number]['state'], link: string | null) => ({
-    id, title: `${EVIL} job`, project: EVIL, projectName: EVIL, hostId: 'h1', state, standing: false,
+    id, title: `${EVIL} job`, project: EVIL, projectName: EVIL, hostId: 'h1', state, standing: false, origin: 'gateway',
     startedBy: { clientId: 'c1', label: EVIL }, runtimeMode: EVIL, createdAt: ago(60), stateChangedAt: ago(5), updatedAt: ago(5), finishedAt: ago(5),
     waitingFor: state === 'needs_input' ? 'approval' as const : null, pendingQuestions: 0,
     delegated: { following: 1, untracked: 0, endedAt: null }, hostUnreachableSince: ago(3), error: { code: EVIL, detail: EVIL }, link,
@@ -124,6 +124,19 @@ describe('dashboard page: safe rendering', () => {
     assert.deepEqual(calls, ['filter:open', 'runChecks', `copy:${EVIL}`]);
   });
 
+  test('an adopted thread is distinguished from an operator standing job', async () => {
+    const app = await loadApp();
+    const doc = new FakeDocument();
+    const root = doc.createElement('div');
+    const snapshot = hostileSnapshot();
+    snapshot.jobs.attention[0]!.origin = 'adopted';
+    snapshot.jobs.attention[0]!.standing = true;
+    app.render(doc, root, { snapshot, route: { view: 'jobs', id: null }, error: null, notice: null, loading: false, checking: false,
+      fetchedAt: Date.parse(NOW), jobFilter: 'attention' }, actions().handlers, Date.parse(NOW));
+    assert.ok(root.textContent.includes('adopted'));
+    assertSafeTree(root);
+  });
+
   test('loading, error and busy states; unknown times are never invented', async () => {
     const app = await loadApp();
     const doc = new FakeDocument();
@@ -166,6 +179,8 @@ type WebhookRow = ReturnType<typeof webhookRow>;
 
 async function webhookPage(options: {
   connections?: WebhookRow[];
+  projects?: { alias: string; host: string; projectId?: string; name?: string }[];
+  hosts?: { host: string; status: string }[];
   post?: (path: string, body: Record<string, unknown>) => Promise<Response> | Response;
 } = {}) {
   const doc = new FakeDocument();
@@ -184,7 +199,7 @@ async function webhookPage(options: {
     if (path === 'api/webhooks') {
       reads++;
       assert.equal(init.method ?? 'GET', 'GET');
-      return Response.json({ projects: [{ alias: 'alpha', host: 'h1' }, { alias: 'beta', host: 'h2' }], connections: rows, session });
+      return Response.json({ projects: options.projects ?? [{ alias: 'alpha', host: 'h1' }, { alias: 'beta', host: 'h2' }], hosts: options.hosts ?? [], connections: rows, session });
     }
     assert.match(path, /^api\/webhooks\/(connect|replace|test|disconnect)$/);
     assert.equal(init.method, 'POST');
@@ -237,7 +252,8 @@ describe('dashboard webhook connections: running browser handlers', () => {
       assert.ok(page.root.elements('label').some((label) => label.getAttribute('for') === id));
       assert.ok(page.doc.getElementById(page.field(id).getAttribute('aria-describedby')!));
     }
-    assert.deepEqual(page.field('webhook-project').elements('option').map((option) => option.textContent), ['alpha · h1', 'beta · h2']);
+    assert.deepEqual(page.field('webhook-project').elements('option').map((option) => option.textContent), ['alpha', 'beta']);
+    assert.deepEqual(page.field('webhook-project').elements('optgroup').map((group) => group.getAttribute('label')), ['h1', 'h2']);
     assert.match(page.root.textContent, /POST to/);
     assert.match(page.root.textContent, /value labelled “header”/);
     assert.match(page.root.textContent, /Reply excerpts are off/);
@@ -454,5 +470,60 @@ test('job PR badges show number and state without adding arbitrary links', async
   app.render(doc, root, { snapshot: snap, route: { view: 'jobs', id: null }, jobFilter: 'open' }, actions().handlers, Date.parse(NOW));
   assert.match(root.textContent, /PR #21 open/);
   assert.match(root.textContent, /PR #22 merged/);
+  assertSafeTree(root);
+});
+
+
+test('webhook picker groups discovered names and IDs by host and explains unavailable hosts without hiding usable choices', async () => {
+  const key = JSON.stringify(['host-b', 'project-1']);
+  const page = await webhookPage({ projects: [
+    { alias: 'local-alias', host: 'host-a' },
+    { alias: key, host: 'host-b', projectId: 'project-1', name: 'Synthetic reader' },
+  ], hosts: [{ host: 'host-c', status: 'unavailable' }] });
+  const picker = page.field('webhook-project');
+  assert.deepEqual(picker.elements('optgroup').map((g) => g.getAttribute('label')), ['host-a', 'host-b']);
+  assert.deepEqual(picker.elements('option').map((o) => o.textContent), ['local-alias', 'Synthetic reader (project-1)']);
+  assert.match(page.root.textContent, /host-c: unavailable/);
+  assert.ok(picker.elements('option').some((o) => o.getAttribute('value') === key));
+});
+
+test('settlement browser action confirms, retains request id on error, then updates attention', async () => {
+  const app = await loadApp();
+  const doc = new FakeDocument();
+  const root = doc.createElement('main');
+  root.setAttribute('id', 'app');
+  doc.body.append(root);
+  const snap = hostileSnapshot();
+  snap.attention = [{ tone: 'bad', kind: 'job', ref: 'j2', title: 'Synthetic failed job', detail: 'Run failed', at: NOW, action: null }];
+  const posts: { jobId: string; requestId: string }[] = [];
+  const win = new FakeWindow(async (url, init) => {
+    if (url === 'api/snapshot') return Response.json(snap);
+    assert.equal(url, 'api/jobs/settle');
+    assert.equal((init?.headers as Record<string, string>)['x-t3fg-dashboard'], '1');
+    posts.push(JSON.parse(String(init?.body)));
+    if (posts.length === 1) return Response.json({ error: 'job_state_conflict', detail: 'Settlement scan limit reached.' }, { status: 409 });
+    return Response.json({ snapshot: { ...snap, attention: [], jobs: { ...snap.jobs, attention: [] } } });
+  });
+  win.location.hash = '#/overview';
+  await app.boot(win, doc).ready;
+  const click = async (label: string) => {
+    const node = root.elements('button').find((item) => item.textContent === label);
+    assert.ok(node, label);
+    await node.dispatch('click');
+  };
+  await click('Settle');
+  assert.equal(posts.length, 0, 'confirmation does not write');
+  await click('Keep open');
+  assert.equal(posts.length, 0);
+  await click('Settle');
+  await click('Confirm settle');
+  assert.match(root.textContent, /Settlement scan limit/);
+  assert.match(root.textContent, /Synthetic failed job/);
+  await click('Confirm settle');
+  assert.equal(posts.length, 2);
+  assert.equal(posts[0]!.requestId, posts[1]!.requestId);
+  assert.equal(posts[0]!.jobId, 'j2');
+  assert.doesNotMatch(root.textContent, /Synthetic failed job/);
+  assert.match(root.textContent, /Thread settled/);
   assertSafeTree(root);
 });

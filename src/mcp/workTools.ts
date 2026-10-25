@@ -1,4 +1,6 @@
+import { attachmentsSchema } from '../jobs/attachments.ts';
 import * as z from 'zod';
+import { responseThreadIdSchema, threadIdSchema } from '../t3/threadId.ts';
 import { displayPullRequests, MAX_PULL_REQUESTS, MAX_TRACKED_PULL_REQUESTS, pullRequestsSchema } from '../jobs/pullRequests.ts';
 import { MAX_DELEGATED_TASKS } from '../jobs/derive.ts';
 import { MAX_MESSAGE_TEXT_CHARS, MAX_MESSAGES } from '../jobs/messages.ts';
@@ -85,6 +87,9 @@ const jobSchema = z.object({
     ),
   pullRequestsCheckedAt: nullableTime,
   jobId: z.string(),
+  origin: z.enum(['gateway', 'standing', 'adopted']),
+  adoptedBy: z.string().nullable(),
+  adoptedAt: nullableTime,
   state: z.enum(JOB_STATES),
   project: z
     .string()
@@ -142,7 +147,7 @@ const jobSchema = z.object({
       `Delegated tasks beyond the ${MAX_DELEGATED_TASKS} the gateway follows. While above 0, waitingOnDelegatedWork stays true ` +
         'until the job has run a new turn; ask the coordinator for status before sending more work',
     ),
-  threadId: z.string().nullable().describe('The T3 thread, once it exists'),
+  threadId: responseThreadIdSchema.nullable().describe('The T3 thread, once it exists'),
   link: z
     .string()
     .nullable()
@@ -180,6 +185,8 @@ const questionSchema = z.object({
 });
 
 const jobDetailSchema = jobSchema.extend({
+  settled: z.boolean().nullable().describe('Live T3 settlement state; null when unavailable or unsupported'),
+  settledAt: nullableTime,
   stateMeaning: z.string(),
   pendingRequests: z
     .array(z.object({
@@ -271,6 +278,9 @@ export function jobView(job: Job, context: ToolContext): JobView {
     workspaceMode: workspaceModeOf(job),
     branch: job.branch,
     standing: job.standing,
+    origin: job.origin,
+    adoptedBy: job.adoptedBy,
+    adoptedAt: job.adoptedAt === null ? null : isoTime(job.adoptedAt),
     waitingOnDelegatedWork: job.delegatedWork.length > 0 || job.delegatedUntracked > 0,
     delegatedTasks: job.delegatedWork.map((task) => task.title),
     delegatedTasksUntracked: job.delegatedUntracked,
@@ -306,10 +316,26 @@ function describeJob(job: Job, view: JobView): string {
     : `PRs${followed > MAX_PULL_REQUESTS ? ` (${MAX_PULL_REQUESTS} of ${count} shown; open ones first, then the newest)` : ''}: ` +
       view.pullRequests.map((pr) => `${pr.repository}#${pr.number} ${pr.state ?? 'unknown'} ${pr.url}`).join(', ');
   const waiting = view.waitingOnDelegatedWork ? ', waiting on delegated work' : '';
-  return `${view.jobId} [${view.state}${view.standing ? ', standing' : ''}${waiting}] ${view.project}: ${view.title} | ${prs} (checked ${view.pullRequestsCheckedAt ?? 'never'})`;
+  return `${view.jobId} [${view.state}${view.origin === 'adopted' ? ', adopted' : view.standing ? ', standing' : ''}${waiting}] ${view.project}: ${view.title} | ${prs} (checked ${view.pullRequestsCheckedAt ?? 'never'})`;
 }
 
 export function workTools(jobs: JobService): GatewayTool[] {
+  const workAdopt = defineTool({
+    name: 'work_adopt', title: 'Adopt an existing T3 thread', scope: OPERATE_SCOPE, readOnly: false,
+    description: 'Import an existing external T3 thread as an adopted job, using host/projectId from fleet_projects and threadId from fleet_threads. ' +
+      'Requires threads:read, threads:control, Operate on that host and discovery.enabled. Adoption only reads T3; it never sends or changes the thread. ' +
+      'Use work_status/feed/messages/continue/respond/settle/cancel on the returned jobId. Cancel interrupts only the active turn. ' +
+      'No launch slot is used. requestId deduplicates retries; adopting the same host/thread again returns its job. ' +
+      'Threads already owned by a gateway launch or an operator standing job are refused. An operator can stop following with jobs release; a released adoption stays released.',
+    inputSchema: z.object({ host: z.string().min(1).max(32), projectId: z.string().min(1).max(256),
+      threadId: threadIdSchema, requestId: requestIdInput }),
+    outputSchema: z.object({ job: jobSchema, created: z.boolean() }),
+    async run(input, context) {
+      const result = await jobs.adoptExternal(context, input);
+      const view = jobView(result.job, context);
+      return { structured: { job: view, created: result.created }, summary: `${result.created ? 'Adopted' : 'Already adopted'}: ${describeJob(result.job, view)}` };
+    },
+  });
   const workStart = defineTool({
     name: 'work_start',
     title: 'Start work',
@@ -317,7 +343,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'Start work on a machine. When the user names no project, pass target { host } to use that machine’s configured T3 internal scratch workspace. ' +
       'When the user names a project, use its configured alias or explicit target { host, projectId }; project work creates a fresh git worktree and branch, unless the project\'s host chooses workspaces (see workspace below). ' +
       'An unknown named project must be resolved or reported, never treated as scratch. The gateway opens a T3 Code ' +
-      'thread there and gives the worker your task. Returns at once with a jobId in state "queued"; the job moves to "running" ' +
+      'thread there and gives the worker your task and optional base64 image/file attachments. Returns at once with a jobId in state "queued"; the job moves to "running" ' +
       'when its host has a free slot. Follow it with work_feed (recommended: poll with the last cursor) or work_status. ' +
       'Idempotent: always pass a unique requestId per new piece of work; retrying with the same requestId and the same input ' +
       'returns the same job (created=false) instead of starting another, and reusing a requestId with different input is ' +
@@ -344,6 +370,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       target: startTargetInput.optional().describe('Machine only for no named project, or machine and explicit project id (pass this or project)'),
       workspace: workspaceSelectionSchema.optional().describe('Omit for the host\'s automatic choice. { type: "root" } for the project\'s own folder; { type: "worktree", baseRef?, startFromOrigin? } for a fresh worktree. Only on hosts with a workspace probe'),
       modelSelection: modelSelectionInput.optional().describe('Explicit provider instance, model and options from fleet_models; omit for the configured defaults'),
+      attachments: attachmentsSchema.optional(),
       task: z.string().min(1).max(MAX_TASK_CHARS).describe('What the worker should do, as a complete instruction'),
       requestId: requestIdInput,
       title: z.string().min(1).max(MAX_TITLE_CHARS).optional().describe('Short thread title; defaults to the first line of the task'),
@@ -408,6 +435,8 @@ export function workTools(jobs: JobService): GatewayTool[] {
       const { job } = detail;
       const view: JobDetailView = {
         ...jobView(job, context),
+        settled: detail.settled,
+        settledAt: detail.settledAt,
         stateMeaning: STATE_MEANINGS[job.state],
         pendingRequests: detail.pendingRequests,
         waitingForApproval: detail.waitingForApproval,
@@ -419,6 +448,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
         recentEvents: detail.recentEvents.map(eventView),
       };
       const lines = [describeJob(job, view), STATE_MEANINGS[job.state]];
+      lines.push(`Thread settled: ${view.settled === null ? 'unknown' : view.settled}${view.settledAt ? ` at ${view.settledAt}` : ''}.`);
       if (view.link) lines.push(`Open in T3: ${view.link}`);
       if (view.pendingRequests.length > 0) {
         lines.push(`Answer with work_respond using jobId ${JSON.stringify(view.jobId)}, the requestId and answers keyed by question id. ` +
@@ -508,6 +538,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'job ran a whole turn you did not start, between two checks), delegated_work_ended (an idle job\'s delegated work ' +
       'finished, failed or was cancelled and it did not resume: send work_continue asking it to check on that work), ' +
       'pull_request_opened or pull_request_merged (cached linked PR changes: read work_status for references), ' +
+      'job_recovered (a failed worker turn resumed in T3 or through work_continue), ' +
       'interrupt_requested (work_cancel on a standing job). A ' +
       'turn you did not start shows as state_changed idle to running with reason turn_started (or as turn_finished): a person ' +
       'typed in T3, or a coordinator resumed after work it delegated finished. Standing jobs (long-lived threads the operator ' +
@@ -569,19 +600,23 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'not send (a message would start a competing turn), whatever the reply says; wait for its next turn in work_feed. If it ' +
       'is false, nothing it delegated is still running: send follow-ups when its reply asks for input or the work is done, or ' +
       'when work_feed reports delegated_work_ended (its delegated work ended but it did not resume: ask it to check on that work). ' +
+      'On a settled idle job, sending resumes the thread and T3 clears settlement. Terminal jobs cannot be continued. ' +
+      'Optional attachments send base64 images or files through T3 host storage, outside the repository. ' +
       'Idempotent: pass a unique requestId per message; ' +
       'repeating a requestId returns the first result without sending again, and if a call fails with an uncertain outcome, ' +
-      'repeating it with the same requestId is safe. Request ids are scoped to this tool, separate from work_start. Not for answering a pending question: use work_respond.',
+      'repeating it with the same requestId is safe. Attachment sends have no downstream retry key: an uncertain send stays blocked, ' +
+      'so inspect work_messages or the thread before using a new requestId. Request ids are scoped to this tool, separate from work_start. Not for answering a pending question: use work_respond.',
     scope: OPERATE_SCOPE,
     readOnly: false,
     inputSchema: z.object({
       jobId: jobIdInput,
+      attachments: attachmentsSchema.optional(),
       message: z.string().min(1).max(MAX_MESSAGE_CHARS).describe('The instruction for the worker'),
       requestId: requestIdInput,
     }),
     outputSchema: z.object({
       job: jobSchema,
-      delivery: z.string().describe('started (new turn), steered (into the active turn) or queued (behind it)'),
+      delivery: z.string().describe('started (new turn), steered (active turn), queued (behind it), or accepted (attachments: T3 does not report delivery mode)'),
       replayed: z.boolean().describe('true when this requestId was already delivered; nothing was sent again'),
     }),
     async run(input, context) {
@@ -672,7 +707,29 @@ export function workTools(jobs: JobService): GatewayTool[] {
     },
   });
 
-  return [workStart, workContinue, workRespond, workCancel, workStatus, workMessages, workList, workFeed];
+  const workSettle = defineTool({
+    name: 'work_settle',
+    title: 'Settle a finished thread',
+    description: "Settle an idle, cancelled, failed or released job's T3 thread after delegated work ends. " +
+      'Checks fresh T3 state; T3 refuses running turns, queued user messages and blocking approvals/questions. ' +
+      'Clears the pin, ends PR watches and detaches provider sessions; does not archive or change the job state. ' +
+      'Use a unique requestId per settlement. Replays return the confirmed result, never settle a resumed thread again. ' +
+      'An uncertain outcome is read back without re-sending. work_status reports current settlement; ' +
+      'work_continue on a settled idle job resumes it and clears settlement.',
+    scope: OPERATE_SCOPE,
+    readOnly: false,
+    inputSchema: z.object({ jobId: jobIdInput, requestId: requestIdInput }),
+    outputSchema: z.object({ job: jobSchema, settled: z.boolean(), settledAt: nullableTime, replayed: z.boolean() }),
+    async run(input, context) {
+      const result = await jobs.settle(context, input);
+      return {
+        structured: { ...result, job: jobView(result.job, context) },
+        summary: `${result.replayed ? 'Already confirmed (same requestId)' : 'Confirmed'}: thread settled. Job state: ${result.job.state}.`,
+      };
+    },
+  });
+
+  return [workStart, workAdopt, workContinue, workRespond, workCancel, workSettle, workStatus, workMessages, workList, workFeed];
 }
 
 const DELEGATED_ENDED =
@@ -706,11 +763,11 @@ function attentionReason(job: Job): string {
           'instructions; wait for its next turn in work_feed.'
         );
       }
+      if (job.lastErrorCode === 't3_run_failed') return 'The worker\'s last run failed; see lastError. Resume in T3 or use work_continue to retry on the same thread.';
       if (job.delegatedEndedAt !== null) return DELEGATED_ENDED;
       if (!job.standing) return 'Turn finished: read the reply with work_messages (work_status has an excerpt), then work_continue or work_cancel.';
-      const failed = job.lastErrorCode === 't3_run_failed' ? ' Its last run failed (see lastError).' : '';
       return (
-        `Standing job's turn ended:${failed} read its reply with work_messages (work_status has an excerpt). Nothing it delegated is still running ` +
+        `Standing job's turn ended: read its reply with work_messages (work_status has an excerpt). Nothing it delegated is still running ` +
         '(waitingOnDelegatedWork is false, which wins over the reply text). Send work_continue when the reply asks for input ' +
         'or the work is done.'
       );

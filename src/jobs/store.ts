@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { validateAttachments, type AttachmentInput } from './attachments.ts';
 import { sha256Hex } from '../crypto.ts';
 import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
@@ -61,6 +62,9 @@ export interface Job {
    * launched or reconciled, holds no concurrency slot, and stays open until the operator releases it.
    */
   standing: boolean;
+  origin: 'gateway' | 'standing' | 'adopted';
+  adoptedBy: string | null;
+  adoptedAt: number | null;
   /**
    * Work the thread delegated to other threads (T3 subagents) that is still running, from its timeline.
    * A coordinator is idle while it waits for such work, and T3 starts its next turn when the work is done.
@@ -241,6 +245,9 @@ interface JobRow {
   dispatch_started_at: number | null;
   finished_at: number | null;
   standing: number;
+  origin: Job['origin'];
+  adopted_by: string | null;
+  adopted_at: number | null;
   delegated_work: string;
   delegated_untracked: number;
   delegated_untracked_run_id: string | null;
@@ -278,6 +285,8 @@ const MINE = '(jobs.client_id = ? OR jobs.standing = 1)';
  */
 export interface JobScope {
   clientId?: string | undefined;
+  /** Operator standing jobs retain host-grant access; only client imports require the extra read opt-in. */
+  includeAdopted?: boolean | undefined;
   hostIds?: readonly string[] | undefined;
   /** Only jobs in one T3 project of one host (`work_list.target`); a queued alias-only job has no project id yet. */
   target?: { hostId: string; projectId: string } | undefined;
@@ -286,6 +295,7 @@ export interface JobScope {
 function scopeClause(scope: JobScope): { sql: string; params: string[] } {
   const parts: string[] = [];
   const params: string[] = [];
+  if (scope.includeAdopted === false) parts.push("jobs.origin <> 'adopted'");
   if (scope.clientId !== undefined) {
     parts.push(MINE);
     params.push(scope.clientId);
@@ -370,6 +380,9 @@ function toJob(row: JobRow): Job {
     dispatchStartedAt: row.dispatch_started_at,
     finishedAt: row.finished_at,
     standing: row.standing === 1,
+    origin: row.origin,
+    adoptedBy: row.adopted_by,
+    adoptedAt: row.adopted_at,
     delegatedWork: parseDelegated(row.delegated_work),
     delegatedUntracked: row.delegated_untracked,
     delegatedUntrackedRunId: row.delegated_untracked_run_id,
@@ -413,7 +426,7 @@ export interface FeedEvent extends JobEvent {
 }
 
 /** Tools whose requestId makes a call idempotent. Keys are scoped per agent and per tool. */
-export type IdempotentTool = 'work_start' | 'work_continue';
+export type IdempotentTool = 'work_start' | 'work_continue' | 'work_settle' | 'work_adopt';
 
 export interface IdempotencyKey {
   inputHash: string;
@@ -437,6 +450,7 @@ export interface NewJob {
   /** Known at creation for jobs with a launch spec; alias-only jobs learn it at dispatch. */
   t3ProjectId?: string | null;
   launchSpec?: LaunchSpec | null;
+  attachments?: AttachmentInput[];
 }
 
 /** An existing T3 thread the operator adopts as a standing job, with its state from a first read. */
@@ -601,11 +615,26 @@ export class JobStore {
   }
 
   /** The open job following a T3 thread, if any. */
-  openJobForThread(threadId: string): Job | undefined {
+  openJobForThread(threadId: string, hostId?: string): Job | undefined {
     const row = this.#db
-      .prepare(`SELECT * FROM jobs WHERE t3_thread_id = ? AND state NOT IN (${NOT_OPEN}) ORDER BY created_at, rowid LIMIT 1`)
-      .get(threadId, ...TERMINAL_STATES) as JobRow | undefined;
+      .prepare(`SELECT * FROM jobs WHERE t3_thread_id = ? AND state NOT IN (${NOT_OPEN}) ${hostId === undefined ? '' : 'AND host_id = ?'} ORDER BY created_at, rowid LIMIT 1`)
+      .get(threadId, ...TERMINAL_STATES, ...(hostId === undefined ? [] : [hostId])) as JobRow | undefined;
     return row && this.#job(row);
+  }
+
+  /** Any recorded owner, including finished gateway jobs and released adoptions; thread ids are host-local. */
+  jobForThread(hostId: string, threadId: string): Job | undefined {
+    const row = this.#db.prepare('SELECT * FROM jobs WHERE host_id = ? AND t3_thread_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1')
+      .get(hostId, threadId) as JobRow | undefined;
+    return row && this.#job(row);
+  }
+
+  /** Durable content-free audit of accepted adoptions and authorized control attempts, including replays. */
+  auditThread(job: Job, clientId: string, action: 'adopt' | 'adopt_replayed' | 'continue' | 'respond' | 'settle' | 'interrupt' | 'release'): void {
+    if (job.origin === 'gateway' || job.threadId === null) return;
+    this.#db.prepare('INSERT INTO thread_action_events (client_id, host_id, thread_id, job_id, action, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(clientId, job.hostId, job.threadId, job.id, action, this.#clock());
+    this.#logger.info('threads.control', { clientId, hostId: job.hostId, jobId: job.id, action });
   }
 
   /** Open standing jobs, oldest first; all of them, or one project's. */
@@ -651,6 +680,8 @@ export class JobStore {
           job.id, job.clientId, job.requestId, job.projectAlias, job.hostId, job.task, job.title, job.branch, job.runtimeMode, now, now, now,
           job.t3ProjectId ?? null, job.launchSpec ? JSON.stringify(job.launchSpec) : null,
         );
+      if (job.attachments?.length) this.#db.prepare('INSERT INTO job_launch_attachments (job_id, payload) VALUES (?, ?)')
+        .run(job.id, JSON.stringify(job.attachments));
       this.#insertEvent(job.id, 'created', null, 'queued', {}, now);
       this.#db
         .prepare('INSERT INTO idempotency_keys (client_id, request_id, tool, input_hash, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
@@ -665,11 +696,25 @@ export class JobStore {
    * first state. Adopting a thread that an open standing job of the same project already follows
    * returns that job; a thread followed by any other open job is refused.
    */
-  adopt(job: NewStandingJob): { job: Job; created: boolean } {
+  adopt(job: NewStandingJob, adoption?: { clientId: string; requestId: string; inputHash: string }): { job: Job; created: boolean } {
     return transaction(this.#db, () => {
-      const existing = this.openJobForThread(job.threadId);
+      if (adoption) {
+        const key = this.idempotencyKey(adoption.clientId, 'work_adopt', adoption.requestId);
+        if (key) {
+          if (key.inputHash !== adoption.inputHash) throw new GatewayError('request_id_conflict', 'This requestId was used for a different adoption.');
+          const replay = this.require(key.jobId);
+          if (replay.hostId !== job.hostId) throw new GatewayError('insufficient_scope', 'The earlier adoption is on a different host.');
+          return { job: replay, created: false };
+        }
+      }
+      const existing = adoption ? this.jobForThread(job.hostId, job.threadId) : this.openJobForThread(job.threadId, job.hostId);
       if (existing) {
-        if (existing.standing && existing.projectAlias === job.projectAlias) return { job: existing, created: false };
+        if (existing.standing && (adoption
+          ? existing.origin === 'adopted' && existing.t3ProjectId === job.t3ProjectId
+          : existing.projectAlias === job.projectAlias)) {
+          if (adoption) this.claimIdempotencyKey(adoption.clientId, 'work_adopt', adoption.requestId, { inputHash: adoption.inputHash, jobId: existing.id });
+          return { job: existing, created: false };
+        }
         const what = existing.standing ? `standing job ${existing.id} in project "${existing.projectAlias}"` : `job ${existing.id}, which the gateway launched`;
         throw new GatewayError('job_state_conflict', `Thread ${job.threadId} is already followed by ${what} (${existing.state}).`);
       }
@@ -684,8 +729,8 @@ export class JobStore {
         )
         .run(
           job.id,
-          OPERATOR_CLIENT_ID,
-          'adopted',
+          adoption?.clientId ?? OPERATOR_CLIENT_ID,
+          adoption?.requestId ?? 'adopted',
           job.projectAlias,
           job.hostId,
           job.t3ProjectId,
@@ -713,7 +758,11 @@ export class JobStore {
           job.delegatedUntrackedRunId,
           job.latestMessageTruncated ? 1 : 0,
         );
+      this.#db.prepare('UPDATE jobs SET origin = ?, adopted_by = ?, adopted_at = ? WHERE id = ?')
+        .run(adoption ? 'adopted' : 'standing', adoption?.clientId ?? OPERATOR_CLIENT_ID, now, job.id);
+      if (adoption) this.claimIdempotencyKey(adoption.clientId, 'work_adopt', adoption.requestId, { inputHash: adoption.inputHash, jobId: job.id });
       this.#insertEvent(job.id, 'created', null, job.state, { reason: 'adopted' }, now);
+      this.auditThread(this.require(job.id), adoption?.clientId ?? OPERATOR_CLIENT_ID, 'adopt');
       this.#logger.info('job.adopted', { jobId: job.id, project: job.projectAlias, hostId: job.hostId, state: job.state });
       return { job: this.require(job.id), created: true };
     });
@@ -746,6 +795,7 @@ export class JobStore {
         errorCode: options.detail?.code,
       });
     }
+    if (!['queued', 'dispatching', 'cancel_requested'].includes(options.to)) this.clearLaunchAttachments(id);
     for (const event of options.events ?? []) this.#insertEvent(id, event.type, current.state, options.to, event.detail ?? {}, now, options.turnRunId);
     if (outcome.contended) this.#insertContended(id, options.to, now);
     return this.get(id);
@@ -874,6 +924,32 @@ export class JobStore {
     transaction(this.#db, () => this.#insertEvent(id, type, state, state, detail, this.#clock()));
   }
 
+  /** A confirmed settlement remains acknowledged until subsequent job activity, ordered by event id (not clock). */
+  settlementAcknowledged(id: string): boolean {
+    const row = this.#db.prepare(`SELECT type FROM job_events WHERE job_id = ?
+      AND type NOT IN ('pull_request_opened', 'pull_request_merged') ORDER BY id DESC LIMIT 1`).get(id) as { type: string } | undefined;
+    return row?.type === 'thread_settled';
+  }
+
+  /** Claim settlement once across concurrent requests/processes. */
+  claimSettlement(clientId: string, requestId: string, key: Omit<IdempotencyKey, 'response'>): boolean {
+    return transaction(this.#db, () => {
+      if (this.idempotencyKey(clientId, 'work_settle', requestId)) return false;
+      this.claimIdempotencyKey(clientId, 'work_settle', requestId, key);
+      return true;
+    });
+  }
+
+  /** Settlement confirmation and its feed event commit together; a concurrent confirmation emits once. */
+  recordSettlement(id: string, clientId: string, requestId: string, result: { settled: boolean; settledAt: string | null }): void {
+    transaction(this.#db, () => {
+      if (this.idempotencyKey(clientId, 'work_settle', requestId)?.response !== null) return;
+      this.completeIdempotencyKey(clientId, 'work_settle', requestId, JSON.stringify(result));
+      const job = this.require(id);
+      this.#insertEvent(id, 'thread_settled', job.state, job.state, {}, this.#clock());
+    });
+  }
+
   /** Commit a successful send and its idempotency result together. Only a newly started exact run proves its caller. */
   recordSend(id: string, sent: { runId: string; delivery: string }, clientId: string, requestId: string, resumeToken?: string): void {
     transaction(this.#db, () => {
@@ -891,6 +967,9 @@ export class JobStore {
       this.#write(job, { lastRunId: sent.runId, ...(next !== job.state ? { lastErrorCode: null, lastErrorMessage: null } : {}) }, now, next, outcome);
       this.#insertEvent(id, next !== job.state ? 'state_changed' : 'followup_sent', job.state, next,
         { reason: next !== job.state ? 'followup' : sent.delivery }, now);
+      if (next !== job.state && job.lastErrorCode === 't3_run_failed') {
+        this.#insertEvent(id, 'job_recovered', job.state, next, { reason: 'worker_resumed' }, now, sent.runId);
+      }
       if (outcome.contended) this.#insertContended(id, next, now);
       if (next !== job.state) this.#logger.info('job.state_changed', { jobId: id, from: job.state, to: next, reason: 'followup' });
       if (resumeToken !== undefined) this.#settleResume(id, resumeToken);
@@ -961,7 +1040,7 @@ export class JobStore {
    * age, and jobs that went idle or failed, or whose delegated work ended while idle, within `recentMs`.
    * `scope`: see JobScope.
    */
-  attention(now: number, recentMs: number, limit: number, scope: JobScope = {}): Job[] {
+  attention(now: number, recentMs: number, limit: number, scope: JobScope = {}, excludeSettled = false): Job[] {
     const filter = scopeClause(scope);
     const since = now - recentMs;
     const rows = this.#db
@@ -969,10 +1048,29 @@ export class JobStore {
         `SELECT * FROM jobs
           WHERE (state IN ('needs_input', 'unknown') OR (state IN ('idle', 'failed') AND state_changed_at >= ?)
             OR (state = 'idle' AND delegated_ended_at >= ?)) ${filter.sql}
+          ${excludeSettled ? `AND (SELECT type FROM job_events WHERE job_id = jobs.id
+            AND type NOT IN ('pull_request_opened', 'pull_request_merged') ORDER BY id DESC LIMIT 1) IS NOT 'thread_settled'` : ''}
           ORDER BY MAX(state_changed_at, COALESCE(delegated_ended_at, 0)) DESC, rowid DESC LIMIT ?`,
       )
       .all(since, since, ...filter.params, limit) as unknown as JobRow[];
     return rows.map(this.#job);
+  }
+
+  /** Private queued payload; deliberately absent from Job and every view. */
+  launchAttachments(id: string): AttachmentInput[] {
+    const row = this.#db.prepare('SELECT payload FROM job_launch_attachments WHERE job_id = ?').get(id) as { payload: string } | undefined;
+    try { return row === undefined ? [] : validateAttachments(JSON.parse(row.payload)); }
+    catch { throw new GatewayError('database_error', "This job's stored attachments could not be read. Start the work again."); }
+  }
+
+  clearLaunchAttachments(id: string): void {
+    this.#db.prepare('DELETE FROM job_launch_attachments WHERE job_id = ?').run(id);
+  }
+
+  /** No downstream retry key exists for attachment sends. Write the uncertainty before touching that API. */
+  beginAttachmentSend(clientId: string, requestId: string): boolean {
+    return this.#db.prepare(`UPDATE idempotency_keys SET response = '{"attachmentOutcome":"unknown"}'
+      WHERE client_id = ? AND tool = 'work_continue' AND request_id = ? AND response IS NULL`).run(clientId, requestId).changes === 1;
   }
 
   idempotencyKey(clientId: string, tool: IdempotentTool, requestId: string): IdempotencyKey | undefined {

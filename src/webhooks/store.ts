@@ -1,3 +1,4 @@
+import { threadLink } from '../threadId.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
@@ -22,6 +23,7 @@ export interface WebhookConnection {
   source: 'config' | 'dashboard';
   projects: string[];
   hosts: string[];
+  targets: { host: string; projectId: string }[];
   lastTest: { at: string; outcome: AttemptOutcome; statusCode: number | null } | null;
 }
 export type WebhookConnectionErrorCode = 'not_found' | 'connection_conflict' | 'file_managed' | 'connection_limit' | 'test_failed';
@@ -57,7 +59,7 @@ export interface WebhookPayload {
   excerpt?: string | null;
   excerptTruncated?: boolean;
 }
-type SubscriptionSettings = Pick<SubscriptionConfig, 'events' | 'projects' | 'hosts' | 'excerptChars'>;
+type SubscriptionSettings = Pick<SubscriptionConfig, 'events' | 'projects' | 'hosts' | 'targets' | 'excerptChars'>;
 interface SubscriptionRow {
   id: string; revision: string; identity: string; settings: string; route: string; source: WebhookConnection['source'];
   last_test_at: number | null; last_test_outcome: AttemptOutcome | null; last_test_status_code: number | null;
@@ -71,6 +73,7 @@ export interface ClaimedDelivery {
   lease: string; attempt: number; expiresAt: number; route: WebhookRoute;
 }
 function eventType(event: JobEvent): WebhookEventType | undefined {
+  if ((event.type === 'state_changed' || event.type === 'turn_finished') && event.detail?.reason === 'run_failed') return 'failed';
   if (event.type === 'pull_request_opened' || event.type === 'pull_request_merged') return event.type;
   if (event.type === 'delegated_work_ended') return 'delegated_work_ended';
   if (event.type === 'turn_finished') return 'idle';
@@ -88,7 +91,7 @@ function excerpt(text: string | null, max: number): string | null {
 function connection(row: SubscriptionRow): WebhookConnection {
   const settings = JSON.parse(row.settings) as SubscriptionSettings;
   return {
-    id: row.id, revision: row.revision, source: row.source, projects: settings.projects ?? [], hosts: settings.hosts ?? [],
+    id: row.id, revision: row.revision, source: row.source, projects: settings.projects ?? [], hosts: settings.hosts ?? [], targets: settings.targets ?? [],
     lastTest: row.last_test_at === null || row.last_test_outcome === null ? null
       : { at: new Date(row.last_test_at).toISOString(), outcome: row.last_test_outcome, statusCode: row.last_test_status_code },
   };
@@ -150,14 +153,17 @@ export class WebhookStore {
   }
 
   /** Call only after the synthetic ping finishes; no network operation belongs inside these transactions. */
-  connectDashboard(id: string, project: string, host: string, route: WebhookRoute, test: DashboardTest): WebhookConnection {
+  connectDashboard(id: string, project: string, host: string, route: WebhookRoute, test: DashboardTest, projectId?: string): WebhookConnection {
     return transaction(this.#db, () => {
       const existing = this.#db.prepare('SELECT source FROM webhook_subscriptions WHERE id = ?').get(id);
       if (existing) throw new WebhookConnectionError(existing.source === 'config' ? 'file_managed' : 'connection_conflict');
       const count = this.#db.prepare('SELECT COUNT(*) AS n FROM webhook_subscriptions').get() as { n: number };
       if (count.n >= MAX_SUBSCRIPTIONS) throw new WebhookConnectionError('connection_limit');
       this.#requireSuccessfulTest(test);
-      const settings: SubscriptionSettings = { projects: [project], hosts: [host], events: [...DEFAULT_WEBHOOK_EVENTS], excerptChars: 0 };
+      const settings: SubscriptionSettings = {
+        ...(projectId ? { targets: [{ host, projectId }] } : { projects: [project], hosts: [host] }),
+        events: [...DEFAULT_WEBHOOK_EVENTS], excerptChars: 0,
+      };
       this.#db.prepare(`INSERT INTO webhook_subscriptions (id, revision, identity, settings, route, source)
         VALUES (?, ?, ?, ?, ?, 'dashboard')`)
         .run(id, randomUUID(), identityFor(settings, route), JSON.stringify(settings), JSON.stringify(route));
@@ -206,7 +212,8 @@ export class WebhookStore {
     const rows = this.#db.prepare('SELECT * FROM webhook_subscriptions').all() as unknown as SubscriptionRow[];
     const matches = rows.filter((row) => {
       const s = JSON.parse(row.settings) as SubscriptionSettings;
-      return s.events.includes(type) && (!s.projects || s.projects.includes(job.projectAlias)) && (!s.hosts || s.hosts.includes(job.hostId));
+      return (!s.targets || s.targets.some((t) => t.host === job.hostId && t.projectId === job.t3ProjectId)) &&
+        s.events.includes(type) && (!s.projects || s.projects.includes(job.projectAlias)) && (!s.hosts || s.hosts.includes(job.hostId));
     });
     if (!matches.length) return;
     const turn = turnRunId === null ? undefined : this.#db.prepare('SELECT client_id FROM job_turns WHERE job_id = ? AND run_id = ?')
@@ -216,7 +223,7 @@ export class WebhookStore {
       jobId: job.id, projectAlias: job.projectAlias, host: job.hostId, projectId: job.t3ProjectId, title: job.title,
       state: job.state, previousState: event.fromState, threadId: job.threadId,
       // Canonical T3 link, never a legacy HTTP URL that may itself contain sensitive query parameters.
-      link: job.threadId === null ? null : `t3-thread://v1/${job.threadId}`,
+      link: threadLink(job.threadId),
       standing: job.standing, waitingOnDelegatedWork: job.delegatedWork.length > 0 || job.delegatedUntracked > 0,
       turnInitiator: turn ? { kind: 'gateway', clientId: turn.client_id } : { kind: 'unknown', clientId: null },
     };

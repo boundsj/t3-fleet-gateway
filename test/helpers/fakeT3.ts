@@ -54,9 +54,11 @@ export interface FakeItem {
 /** A model option as T3 advertises it in orchestrator_capabilities (a `select` with choices, or a `boolean`). */
 export interface FakeOption {
   id: string;
-  label: string;
+  label?: string;
+  values?: (string | boolean)[];
+  default?: string | boolean;
   description?: string;
-  type: 'select' | 'boolean' | string;
+  type?: 'select' | 'boolean' | string;
   options?: { id: string; label: string; description?: string; isDefault?: boolean }[];
   currentValue?: string | boolean;
 }
@@ -121,8 +123,9 @@ export interface FakeThread {
   items: FakeItem[];
   questions: Map<string, FakeQuestion[] | null>;
   approvalsPending: number;
-  /** Settled threads are listed only when t3_thread_list is asked for them (`settled: true`). */
+  /** Current T3 lists both shelves when settled is omitted. */
   settled: boolean;
+  archived?: boolean;
   createdAt: string;
   updatedAt: string;
   launch: Record<string, unknown>;
@@ -140,6 +143,13 @@ const ACTIVE = new Set(['preparing', 'queued', 'starting', 'running', 'waiting']
 const MESSAGE_VIEW_TYPES = new Set(['user_message', 'assistant_message', 'proposed_plan']);
 const nullable = <T extends z.ZodType>(schema: T) => schema.nullable().optional();
 
+const attachmentMetadata = z.strictObject({
+  type: z.enum(['image', 'file']), id: z.string(), name: z.string(), mimeType: z.string(), sizeBytes: z.int().min(1),
+});
+const attachmentUploadInput = z.strictObject({ upload: attachmentMetadata.omit({ id: true }) });
+const attachmentSendInput = z.strictObject({ threadId: z.string().optional(), message: z.string().max(120000).optional(),
+  attachments: z.array(attachmentMetadata).min(1).max(8) });
+
 /** Input schemas copied field-for-field from T3's tools, strict so a misspelled field fails the test. */
 const launchInput = z.strictObject({
   projectId: nullable(z.string()),
@@ -156,7 +166,7 @@ const launchInput = z.strictObject({
     ]),
   ),
   message: nullable(z.string().max(120000)),
-  attachments: nullable(z.array(z.unknown()).max(8)),
+  attachments: nullable(z.array(attachmentMetadata).max(8)),
 });
 const readInput = z.strictObject({
   threadId: z.string(),
@@ -249,11 +259,14 @@ export class FakeT3 {
   readonly statusOnce = new Map<string, number>();
   /** Threads whose t3_thread_read answers in a shape that does not match T3's schema. */
   readonly brokenReads = new Set<string>();
+  /** Synthetic older/malformed detail fields, applied before the MCP result is serialized. */
+  readonly threadDetailOverrides = new Map<string, Record<string, unknown>>();
   /** Thread id to a T3 failure returned by t3_thread_read for that thread only. */
   readonly readFailures = new Map<string, { code: string; message: string }>();
   /**
    * Tools whose calls take effect but whose answer is held back until releaseHeld() or stop(). `initialize` holds a new
-   * session's MCP initialization before it is handled (a client still connecting).
+   * session's MCP initialization before it is handled (a client still connecting); `notifications/initialized`
+   * holds the final initialization notification's HTTP acknowledgement.
    */
   readonly holdResponses = new Set<string>();
   /**
@@ -263,6 +276,8 @@ export class FakeT3 {
   scratchProjectId = 'project-1';
   /** When set, t3_thread_launch creates the thread but starts no run on it (thread `idle`, no runs). */
   launchWithoutRun = false;
+  /** A synthetic T3-minted id for the next launch. */
+  nextThreadId: string | undefined;
   /** Older T3 versions supplied links; current published thread tools omit them. */
   legacyThreadLinks = false;
   /** When set, interrupts are accepted but take effect only on completeInterrupts(). */
@@ -270,6 +285,8 @@ export class FakeT3 {
   /** When set, an interrupt leaves the thread's pending questions listed (T3 may keep them). */
   keepQuestionsOnInterrupt = false;
   readonly threads = new Map<string, FakeThread>();
+  /** Synthetic raw pages, including malformed entries and offset-page movement. */
+  readonly threadListPages = new Map<number, Record<string, unknown>>();
   readonly sends: { threadId: string; message: string; clientRequestId: string | null }[] = [];
   readonly responses: { threadId: string; requestId: string; answers: Record<string, unknown> }[] = [];
   #sequence = 0;
@@ -349,6 +366,7 @@ export class FakeT3 {
   /** A person types into the thread in T3, starting a new turn. */
   userTurn(threadId: string, text: string): void {
     const thread = this.#thread(threadId);
+    thread.settled = false;
     const run = this.#startRun(thread);
     this.#addItem(thread, { runId: run.runId, createdBy: 'user', creationSource: 'web', type: 'user_message', text });
   }
@@ -533,8 +551,28 @@ export class FakeT3 {
     this.#sessions.clear();
   }
 
+  readonly uploads = new Map<string, { metadata: z.infer<typeof attachmentMetadata>; bytes: Buffer | null }>();
+  readonly attachmentSends: z.infer<typeof attachmentSendInput>[] = [];
+  uploadRelativeUrl: string | undefined;
+  uploadStatus = 200;
+
+  #checkAttachments(items: z.infer<typeof attachmentMetadata>[]): void {
+    for (const item of items) {
+      const stored = this.uploads.get(item.id);
+      if (!stored?.bytes || Object.entries(stored.metadata).some(([key, value]) => item[key as keyof typeof item] !== value)) throw new FakeFailure('invalid_request', 'Missing upload.');
+    }
+  }
+
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const path = new URL(req.url ?? '/', this.url).pathname;
+    if (path.startsWith('/api/attachments/upload/')) {
+      const stored = this.uploads.get(path.split('/').at(-1)!);
+      const bytes = await readBody(req, 6 * 1024 * 1024);
+      if (!stored || stored.metadata.sizeBytes !== bytes.length) { res.writeHead(400).end(); return; }
+      stored.bytes = bytes;
+      res.writeHead(this.uploadStatus).end();
+      return;
+    }
     const body = req.method === 'POST' ? await readBody(req, 1024 * 1024) : undefined;
     const json = (status: number, value: unknown) => {
       res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
@@ -611,6 +649,7 @@ export class FakeT3 {
     }
     const sessionId = req.headers['mcp-session-id'];
     if (sessionId === undefined && this.holdResponses.has('initialize') && isInitialize(body)) await this.#hold('initialize');
+    if (this.holdResponses.has('notifications/initialized') && isInitialized(body)) await this.#hold('notifications/initialized');
     let transport: WebStandardStreamableHTTPServerTransport;
     if (typeof sessionId === 'string') {
       const session = this.#sessions.get(sessionId);
@@ -704,7 +743,23 @@ export class FakeT3 {
         maxBatchThreads: 10,
       },
     }));
-    tool('t3_thread_launch', launchInput, (input) => this.#launch(input));
+    tool('t3_attachment_prepare_upload', attachmentUploadInput, ({ upload }) => {
+      const id = `pending-${randomUUID()}`;
+      const metadata = { ...upload, id };
+      this.uploads.set(id, { metadata, bytes: null });
+      return { attachmentId: id, relativeUrl: this.uploadRelativeUrl ?? `/api/attachments/upload/${id}`, expiresAt: Date.now() + 600000 };
+    });
+    tool('t3_thread_send_attachments', attachmentSendInput, (input) => {
+      this.#checkAttachments(input.attachments);
+      this.attachmentSends.push(input);
+      const sent = this.#send({ threadId: input.threadId!, message: input.message ?? '' });
+      const { delivery, ...result } = sent;
+      return result;
+    });
+    tool('t3_thread_launch', launchInput, (input) => {
+      this.#checkAttachments(input.attachments ?? []);
+      return this.#launch(input);
+    });
     tool('t3_thread_read', readInput, (input) => {
       this.reads.push(input);
       const failure = this.readFailures.get(input.threadId);
@@ -712,12 +767,15 @@ export class FakeT3 {
       return this.brokenReads.has(input.threadId) ? { thread: { threadId: input.threadId } } : this.#read(input);
     });
     tool('t3_thread_list', listInput, (input) => {
+      const overridden = this.threadListPages.get(input.cursor ?? 0);
+      if (overridden) return overridden;
       const projectId = this.#target(input.projectId);
       const matching = [...this.threads.values()]
         .filter(
           (thread) =>
-            thread.projectId === projectId &&
-            thread.settled === (input.settled ?? false) &&
+            thread.projectId === projectId && !thread.archived &&
+            (input.includeSubagents !== false || !this.#delegations.has(thread.threadId)) &&
+            (input.settled == null || thread.settled === input.settled) &&
             (!input.titleContains || thread.title.includes(input.titleContains)),
         )
         .reverse();
@@ -741,6 +799,20 @@ export class FakeT3 {
           return hit === undefined ? [] : [{ threadId: thread.threadId, projectId, source: 'user', snippet: hit.slice(0, 240), messageCreatedAt: null }];
         });
       return { matches: matches.slice(0, input.limit ?? 10) };
+    });
+    tool('t3_thread_organize', z.strictObject({ threadId: z.string(), action: z.literal('settle') }), ({ threadId }) => {
+      const thread = this.#thread(threadId);
+      if (this.#activeRun(thread)) throw new FakeFailure('orchestration_error', 'Thread is still running. Stop it before settling.');
+      if (thread.runs.some((run) => run.status === 'queued')) {
+        throw new FakeFailure('orchestration_error', 'Thread has a queued message. Send it or remove it from the queue before settling.');
+      }
+      if (thread.approvalsPending) {
+        throw new FakeFailure('orchestration_error', 'Thread is waiting on an approval or question. Answer it before settling.');
+      }
+      thread.questions.clear();
+      thread.settled = true;
+      thread.updatedAt = new Date().toISOString();
+      return { sequence: 1 };
     });
     tool('t3_thread_send', sendInput, (input) => this.#send(input));
     tool('t3_thread_interrupt', interruptInput, (input) => {
@@ -880,7 +952,8 @@ export class FakeT3 {
     if (!input.modelSelection && !project.defaultModelSelection) {
       throw new FakeFailure('invalid_request', 'Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.');
     }
-    const threadId = `thread-${this.threads.size + 1}`;
+    const threadId = this.nextThreadId ?? `thread-${this.threads.size + 1}`;
+    this.nextThreadId = undefined;
     const now = new Date().toISOString();
     const strategy = input.workspaceStrategy;
     const thread: FakeThread = {
@@ -922,6 +995,7 @@ export class FakeT3 {
     const previous = key ? this.#sendResults.get(key) : undefined;
     if (previous) return previous;
     const thread = this.#thread(input.threadId);
+    thread.settled = false;
     this.sends.push({ threadId: thread.threadId, message: input.message, clientRequestId: input.clientRequestId ?? null });
     const active = this.#activeRun(thread);
     const run = active ?? this.#startRun(thread);
@@ -956,8 +1030,8 @@ export class FakeT3 {
       settledAt: thread.settled ? thread.updatedAt : null,
       snoozed: false,
       snoozedUntil: null,
-      parentThreadId: null,
-      relationshipToParent: null,
+      parentThreadId: this.#delegations.get(thread.threadId)?.parentThreadId ?? null,
+      relationshipToParent: this.#delegations.has(thread.threadId) ? 'subagent' : null,
       itemCount: thread.items.length,
       createdAt: thread.createdAt,
       updatedAt: thread.updatedAt,
@@ -992,7 +1066,8 @@ export class FakeT3 {
         worktreePath: null,
         runCount: thread.runs.length,
         pendingRequestCount: thread.questions.size + thread.approvalsPending,
-        archived: false,
+        archived: thread.archived ?? false,
+        ...this.threadDetailOverrides.get(thread.threadId),
       },
       recentRuns: thread.runs.slice(-(input.runLimit ?? 10)).reverse(),
       items: page.map((item) => ({
@@ -1029,4 +1104,12 @@ function toolName(body: Buffer | undefined): string | undefined {
 
 export async function startFakeT3(options: FakeT3Options = {}): Promise<FakeT3> {
   return new FakeT3(options).start();
+}
+
+function isInitialized(body: Buffer | undefined): boolean {
+  try {
+    return (JSON.parse(body?.toString() ?? '') as { method?: unknown }).method === 'notifications/initialized';
+  } catch {
+    return false;
+  }
 }

@@ -42,6 +42,10 @@ Optional global operator text for all `work_start` launches, across every host a
 
 The dispatcher prepends `<operator-standing-instructions>\n<text>\n</operator-standing-instructions>\n\n` before the caller task and existing footer. It uses the configuration loaded at startup, so a queued job dispatched after a restart uses that configuration. The caller task remains capped at 20,000 characters; the complete launch message stays below T3's 120,000-character bound. Caller-only request hashes preserve retries across config changes. Follow-ups and adoption send no added text, including follow-ups to adopted standing jobs. No per-host/project override is provided: this setting is for rules shared by every worker. Text stays out of diagnostics and logs; doctor does not display it.
 
+### `reachability`
+
+`{ "intervalMinutes": 5 }` by default. `serve` makes a lightweight authenticated `t3_environment_read` probe per configured, enrolled host 2–3 seconds after startup, then waits this interval plus 0–999 ms jitter after each probe completes. `intervalMinutes` must be an integer from 1 to 60; other values are `config_invalid`. Each probe has a five-second total deadline, no retry and no overlap per host. Shutdown cancels the loop and in-flight probes. Hosts without stored credentials are skipped. This does not enable catalog discovery or catalog refreshes. Successful ordinary host calls also update dashboard reachability with the time they completed.
+
 ### `hosts` (required, at least one)
 
 Each entry is a machine running a T3 Code server.
@@ -244,7 +248,7 @@ Then run `t3-fleet-gateway hosts enroll studio`. Adding a host is configuration 
 
 ## Webhooks
 
-v0.1.9: `webhooks: { "subscriptions": [] }` is the default. The easiest setup is **Connect Grok Bot** in the private dashboard: paste a URL and full authentication header, choose a configured project and test the connection. It works with generic HTTPS receivers too. Dashboard connections live in the database, require no secret file or restart, and use the five default events with excerpts off. They survive config edits and restarts.
+v0.1.9: `webhooks: { "subscriptions": [] }` is the default. The easiest setup is **Connect Grok Bot** in the private dashboard: paste a URL and full authentication header, choose a project under its host group and test the connection. It works with generic HTTPS receivers too. Dashboard connections live in the database, require no secret file or restart, and use the five default events with excerpts off. They survive config edits and restarts.
 
 The file-managed alternative below remains supported. At most 32 saved active subscriptions across both sources are allowed; restart `serve` to apply file changes. The dashboard labels file-managed rows and cannot replace or disconnect them. ID collisions between ownership types are refused. The [manual setup example](setup.md#configure-a-webhook-by-hand) uses a Grok routine URL and sender-key header. No new incoming connection is required.
 
@@ -256,11 +260,14 @@ The file-managed alternative below remains supported. At most 32 saved active su
 | `auth.header` | Exact HTTP authentication header name supplied by the receiver, such as `X-Sender-Key` or `Authorization`. Transport/control headers (`Host`, framing, connection, proxy headers, etc.) are refused. |
 | `auth.secretFile` | A regular file in the gateway data directory, named by a single filename, owned by the current user and readable only by that user (`0600`), never a symlink or FIFO. Contents are the header value, up to 8 KiB; one final newline is removed. Empty/missing/invalid secrets fail closed. |
 | `projects`, `hosts` | Optional nonempty lists; OR within each, AND between them. Omitted means all. Project matching uses the stored alias (or discovery's `@host/projectId` ref). |
-| `events` | Nonempty selection of `needs_input`, `idle`, `failed`, `cancelled`, `delegated_work_ended`, `running`. Defaults to the first five. |
+| `targets` | Optional nonempty list of exact `{host, projectId}` pairs; OR within the list, AND with the other filters. |
+| `events` | Nonempty selection of `needs_input`, `idle`, `failed`, `cancelled`, `delegated_work_ended`, `running`, `pull_request_opened`, `pull_request_merged`. Defaults to the first five. |
 | `excerptChars` | Default `0` omits both excerpt fields. Opt in with 1–500 for a bounded worker excerpt and truncation flag. Worker secrets cannot be reliably redacted. |
 | `allowLoopbackHttp` | Default `false`. Isolated development only: permits HTTP at literal `127.0.0.1` or `[::1]`; no other HTTP host. HTTPS always validates certificates. |
 
 Use `webhooks ping <id>` to test config without creating a job, then restart the gateway to apply file changes. The CLI also supports persisted dashboard connections; `webhooks list` identifies the management source. A 2xx test result means the receiver accepted the request; check the bot conversation for its result. `webhooks list` and `webhooks attempts <id> --limit 20` are offline diagnostics and do not apply their config over the serving process. Secrets are stored as plaintext inside the existing protected data directory/database, like downstream credentials. Keep config private too because URLs can contain credentials in their path/query. Protect backups.
+
+For an exact cross-host project filter, use `"targets": [{"host": "host-b", "projectId": "project-1"}]` in a subscription. Pairs are ORed and match both alias jobs and `target: {host, projectId}` jobs. If legacy `projects` (alias), `hosts` or `events` filters are also supplied, all filters must match. The dashboard lists configured aliases plus projects discovered from every enrolled host with `discovery.enabled`, grouped by host; a discovered selection records this exact pair. Unreachable hosts are marked unavailable. Existing alias/host connections retain their filters. Migration 15 changes no data, keys, revisions or enabled state, but prevents older builds from ignoring paired targets: rolling back requires a pre-upgrade database restore.
 
 New subscriptions do not replay history. Disabling/removing a subscription, or changing its route, key, filters or excerpt policy, cancels its old queue. Unchanged routes resume after restart. An already transmitted request can still arrive. Payloads are capped at 16 KiB; oversized upstream metadata increments the same explicit overflow diagnostic as a full queue. [Delivery, overflow, retention and feed catch-up](design.md#outbound-job-webhooks) define recovery; retain polling even when notifications work.
 

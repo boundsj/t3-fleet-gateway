@@ -48,6 +48,9 @@ function job(overrides: Partial<Job> = {}): Job {
     probeAttempts: 0,
     probeRetryAt: null,
     standing: false,
+    origin: 'gateway',
+    adoptedBy: null,
+    adoptedAt: null,
     delegatedWork: [],
     delegatedUntracked: 0,
     delegatedUntrackedRunId: null,
@@ -129,9 +132,9 @@ describe('state derivation', () => {
     }
   });
 
-  test('a failed run fails the job', () => {
+  test('a failed run leaves the job idle and recoverable', () => {
     const seen = observe(job(), read({ status: 'failed' }, [{ runId: 'run-1', status: 'failed' }]), []);
-    assert.deepEqual([seen.state, seen.errorCode], ['failed', 't3_run_failed']);
+    assert.deepEqual([seen.state, seen.errorCode], ['idle', 't3_run_failed']);
   });
 
   test('a failed run leaves a standing job idle, with the error', () => {
@@ -262,6 +265,12 @@ describe('delegated work', () => {
 });
 
 describe('thread links', () => {
+  test('keeps raw legacy MCP links from T3 and older jobs', () => {
+    const link = 't3-thread://v1/mcp:11111111-2222-4333-8444-555555555555';
+    assert.equal(threadLinkTarget(link), link);
+    assert.equal(threadLinkTarget(`[Synthetic thread](${link})`), link);
+  });
+
   test('takes the URL out of the markdown link T3 returns', () => {
     assert.equal(threadLinkTarget('[Fix (the) parser [job:abc]](t3-thread://v1/env-synthetic/thread-1)'), 't3-thread://v1/env-synthetic/thread-1');
     assert.equal(threadLinkTarget('https://t3.example.com/threads/thread-1'), 'https://t3.example.com/threads/thread-1');

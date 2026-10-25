@@ -65,14 +65,18 @@ describe('database', () => {
       'approval_codes',
       'approval_failures',
       'authorization_codes',
+      'client_thread_scopes',
       'host_credentials',
       'host_renewals',
       'idempotency_keys',
       'job_events',
+      'job_launch_attachments',
       'job_turns',
       'jobs',
       'oauth_clients',
+      'operator_scope_events',
       'refresh_tokens',
+      'thread_action_events',
       'token_families',
       'webhook_attempts',
       'webhook_deliveries',
@@ -119,11 +123,11 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 13);
+    assert.equal(SCHEMA_VERSION, 17);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
       after.map(
-        ({ standing, delegated_work, activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, pull_requests, pull_requests_checked_at, ...rest }) =>
+        ({ standing, delegated_work, activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, pull_requests, pull_requests_checked_at, origin, adopted_by, adopted_at, ...rest }) =>
           rest,
       ),
       before,
@@ -138,7 +142,7 @@ describe('database', () => {
     assert.throws(() => db.prepare("INSERT INTO job_events (job_id, type, created_at) VALUES ('nojob', 'x', 0)").run(), /FOREIGN KEY/);
     assert.throws(() => db.prepare('DELETE FROM job_events').run(), /append-only/, 'the job_events triggers survive');
     const indexes = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'jobs' AND sql IS NOT NULL ORDER BY name").all() as { name: string }[]).map((row) => row.name);
-    assert.deepEqual(indexes, ['jobs_host_state', 'jobs_project_created', 'jobs_state', 'jobs_thread', 'jobs_workspace_root', 'jobs_workspace_root_held']);
+    assert.deepEqual(indexes, ['jobs_host_state', 'jobs_host_thread', 'jobs_project_created', 'jobs_state', 'jobs_thread', 'jobs_workspace_root', 'jobs_workspace_root_held']);
     db.prepare("UPDATE jobs SET state = 'released', standing = 1 WHERE id = 'jobfull0001'").run();
     assert.throws(() => db.prepare("UPDATE jobs SET state = 'paused' WHERE id = 'jobfull0001'").run(), /CHECK/);
     assert.throws(() => db.prepare("UPDATE jobs SET standing = 2 WHERE id = 'jobfull0001'").run(), /CHECK/);
@@ -217,7 +221,7 @@ CREATE TABLE jobs (
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
     const after = (db.prepare('SELECT * FROM jobs').all() as Record<string, unknown>[]).map(
-      ({ activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, pull_requests, pull_requests_checked_at, ...rest }) => [activity_position, rest],
+      ({ activity_position, delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, pull_requests, pull_requests_checked_at, origin, adopted_by, adopted_at, ...rest }) => [activity_position, rest],
     );
     assert.deepEqual(after, before.map((row) => [null, row]), 'existing jobs keep every column and have no activity position yet');
     const store = new JobStore(db, () => 1_000, silentLogger);
@@ -251,7 +255,7 @@ CREATE TABLE jobs (
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
     const after = (db.prepare('SELECT * FROM jobs').all() as Record<string, unknown>[]).map(
-      ({ delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, pull_requests, pull_requests_checked_at, ...rest }) => [[delegated_untracked, delegated_untracked_run_id, delegated_ended_at], rest],
+      ({ delegated_untracked, delegated_untracked_run_id, delegated_ended_at, latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, pull_requests, pull_requests_checked_at, origin, adopted_by, adopted_at, ...rest }) => [[delegated_untracked, delegated_untracked_run_id, delegated_ended_at], rest],
     );
     assert.deepEqual(after, before.map((row) => [[0, null, null], row]), 'existing jobs keep every column, with nothing untracked or ended');
     const store = new JobStore(db, () => 1_000, silentLogger);
@@ -289,7 +293,7 @@ CREATE TABLE jobs (
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
     const after = (db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[]).map(
-      ({ latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, pull_requests, pull_requests_checked_at, ...rest }) => [latest_message_truncated, rest],
+      ({ latest_message_truncated, launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, pull_requests, pull_requests_checked_at, origin, adopted_by, adopted_at, ...rest }) => [latest_message_truncated, rest],
     );
     assert.deepEqual(after, before.map((row, index) => [[0, 1, 1, 0][index], row]), 'existing jobs keep every column; excerpts at the bound are cut');
     const store = new JobStore(db, () => 1_000, silentLogger);
@@ -333,7 +337,7 @@ CREATE TABLE jobs (
     assert.deepEqual(
       tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().map((row) => {
         // Migration 8 adds launch_spec to jobs, NULL for every existing row.
-        const { launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, pull_requests, pull_requests_checked_at, ...rest } = { ...row } as Record<string, unknown>;
+        const { launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, pull_requests, pull_requests_checked_at, origin, adopted_by, adopted_at, ...rest } = { ...row } as Record<string, unknown>;
         if (table === 'jobs') assert.equal(launch_spec, null);
         return table === 'jobs' ? rest : { ...row };
       })),
@@ -391,7 +395,7 @@ CREATE TABLE jobs (
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
     assert.deepEqual(tables.map((table) => rowsWithoutV12(db, table)), before);
-    const jobs = (db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[]).map(({ launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, pull_requests, pull_requests_checked_at, ...rest }) => [launch_spec, rest]);
+    const jobs = (db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[]).map(({ launch_spec, workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at, pull_requests, pull_requests_checked_at, origin, adopted_by, adopted_at, ...rest }) => [launch_spec, rest]);
     assert.deepEqual(jobs, jobsBefore.map((row) => [null, row]), 'existing jobs keep every column and have no launch spec');
     const store = new JobStore(db, () => 1_000, silentLogger);
     assert.deepEqual([store.require('jobqueue001').launchSpec, store.require('jobstand001').launchSpec, store.require('jobstand001').standing], [null, null, true]);
@@ -548,7 +552,7 @@ CREATE TABLE jobs (
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 13);
+    assert.equal(SCHEMA_VERSION, 17);
     assert.deepEqual(['jobs', 'job_events', 'idempotency_keys'].map((table) => rowsWithoutV12(db, table)), before, 'no existing column changes');
     const added = db.prepare('SELECT workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at FROM jobs ORDER BY rowid').all().map((row) => ({ ...row }));
     assert.deepEqual(added, Array(2).fill({ workspace_kind: null, workspace_root_key: null, workspace_root_held_at: null, workspace_resume_tokens: '[]', probe_attempts: 0, probe_retry_at: null }));
@@ -563,7 +567,7 @@ CREATE TABLE jobs (
     db.prepare("UPDATE jobs SET host_id = 'other' WHERE id = 'legacy0002'").run();
     hold('legacy0002', 'other', 'folder-a');
     assert.throws(() => db.prepare("UPDATE jobs SET workspace_kind = 'checkout' WHERE id = 'legacy0001'").run(), /CHECK/);
-    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 11)), /schema version 13 is newer than this build supports \(11\)/);
+    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 11)), /schema version 17 is newer than this build supports \(11\)/);
     assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
     const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
     t.after(() => fresh.close());
@@ -733,11 +737,78 @@ test('migration 13 preserves populated version 12 jobs and adds unknown PR snaps
   db.exec(`INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode,
     created_at, updated_at, state_changed_at) VALUES ('legacypr01', 'c', 'r', 'pilot', 'main', 'idle', 'Synthetic', 'Synthetic', 'b', 'auto', 1, 2, 2)`);
   const before = db.prepare('SELECT * FROM jobs').get()!;
-  migrate(db);
+  migrate(db, MIGRATIONS.slice(0, 13));
   const after = db.prepare('SELECT * FROM jobs').get()!;
   const { pull_requests, pull_requests_checked_at, ...rest } = after;
   assert.equal(pull_requests, null);
   assert.equal(pull_requests_checked_at, null);
   assert.deepEqual(rest, { ...before });
   assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
+});
+
+test('migration 14 preserves version 13 jobs, grants and secrets, backfills provenance, and opts nobody in', (t) => {
+  const db = new DatabaseSync(join(tempDir(t), 'adoption-migration.db'));
+  t.after(() => db.close());
+  migrate(db, MIGRATIONS.slice(0, 13));
+  db.exec(`INSERT INTO oauth_clients (id, name, redirect_uris, created_at) VALUES ('client-a', 'Synthetic connector', '[]', 1);
+INSERT INTO token_families (id, client_id, scope, resource, created_at) VALUES ('family-a', 'client-a', 'fleet:read fleet:operate', 'https://gateway.example/mcp', 1);
+INSERT INTO access_tokens (token_hash, family_id, refresh_token_hash, scope, created_at, expires_at)
+  VALUES ('synthetic-hash', 'family-a', '', 'fleet:read fleet:operate', 1, 9000);
+INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode, created_at, updated_at, state_changed_at, standing)
+  VALUES ('legacy0001', 'client-a', 'r1', 'pilot', 'main', 'running', 'Synthetic', 'Synthetic', 'b', 'auto', 1, 2, 2, 0),
+         ('legacy0002', 'operator', 'adopted', 'pilot', 'main', 'idle', '', 'Synthetic', '', 'auto', 3, 4, 4, 1);`);
+  const tables = ['oauth_clients', 'token_families', 'access_tokens'];
+  const before = tables.map((table) => db.prepare(`SELECT * FROM ${table}`).all());
+  const jobs = db.prepare('SELECT * FROM jobs ORDER BY id').all().map((row) => ({ ...row }));
+  migrate(db);
+  assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table}`).all()), before);
+  const after = db.prepare('SELECT * FROM jobs ORDER BY id').all();
+  assert.deepEqual(after.map(({ origin, adopted_by, adopted_at, ...rest }) => rest), jobs);
+  assert.deepEqual(after.map((row) => [row.origin, row.adopted_by, row.adopted_at]), [['gateway', null, null], ['standing', 'operator', 3]]);
+  assert.deepEqual(db.prepare('SELECT * FROM client_thread_scopes').all(), []);
+  assert.deepEqual(db.prepare('SELECT * FROM operator_scope_events').all(), []);
+  assert.throws(() => db.exec("INSERT INTO client_thread_scopes VALUES ('client-a', 'threads:unknown')"), /CHECK/);
+  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 13)), /newer than this build supports/);
+  assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
+});
+
+test('migration 16 reopens only worker failures with threads and preserves settlement and history', (t) => {
+  const db = new DatabaseSync(join(tempDir(t), 'recovery-migration.db'));
+  t.after(() => db.close());
+  migrate(db, MIGRATIONS.slice(0, 15));
+  const insert = db.prepare(`INSERT INTO jobs
+    (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode,
+     created_at, updated_at, state_changed_at, finished_at, t3_thread_id, last_error_code)
+    VALUES (?, 'client-a', ?, 'pilot', 'main', ?, 'Synthetic', 'Synthetic', 'b', 'auto', 1, 2, 2, 2, ?, ?)`);
+  insert.run('recover', 'r1', 'failed', 'thread-a', 't3_run_failed');
+  insert.run('missing', 'r2', 'failed', 'thread-b', 'thread_missing');
+  insert.run('cancelled', 'r3', 'cancelled', 'thread-c', 't3_run_failed');
+  insert.run('no-thread', 'r4', 'failed', null, 't3_run_failed');
+  db.exec(`INSERT INTO job_events (job_id, type, from_state, to_state, created_at)
+    VALUES ('recover', 'thread_settled', 'failed', 'failed', 3);`);
+  const history = db.prepare('SELECT * FROM job_events').all();
+  migrate(db);
+  assert.deepEqual(db.prepare('SELECT state, finished_at, last_error_code, updated_at FROM jobs WHERE id = ?').get('recover'),
+    Object.assign(Object.create(null), { state: 'idle', finished_at: null, last_error_code: 't3_run_failed', updated_at: 2 }));
+  assert.deepEqual(db.prepare("SELECT state FROM jobs WHERE id <> 'recover' ORDER BY id").all().map((r) => r.state),
+    ['cancelled', 'failed', 'failed']);
+  assert.deepEqual(db.prepare('SELECT * FROM job_events').all(), history);
+  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 15)), /newer than this build supports/);
+  migrate(db);
+  assert.deepEqual(db.prepare('SELECT * FROM job_events').all(), history);
+  assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
+});
+
+test('migration 17 preserves populated version 16 jobs and adds private queued attachments', (t) => {
+  const db = new DatabaseSync(join(tempDir(t), 'attachments-migration.db'));
+  t.after(() => db.close());
+  migrate(db, MIGRATIONS.slice(0, 16));
+  db.exec(`INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode,
+    created_at, updated_at, state_changed_at) VALUES ('legacyatt1', 'c', 'r', 'pilot', 'main', 'queued', 'Synthetic', 'Synthetic', 'b', 'auto', 1, 2, 2)`);
+  const before = db.prepare('SELECT * FROM jobs').get()!;
+  migrate(db);
+  assert.deepEqual({ ...db.prepare('SELECT * FROM jobs').get()! }, { ...before });
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM job_launch_attachments').get()!.n, 0);
+  assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
+  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 16)), /newer than this build supports/);
 });

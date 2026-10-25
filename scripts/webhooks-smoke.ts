@@ -1,7 +1,7 @@
 /**
  * Opt-in developer smoke: real serve CLI processes, public MCP calls, a trusted local-CA HTTPS receiver, and fake T3.
  * Uses only temporary data and loopback sockets; no installed configuration, real jobs, or hosted connector credentials.
- * Requires Node 24+ and openssl. Emits one sanitized JSON receipt, removes temporary keys/data, and stops every child.
+ * Requires a supported Node (src/nodeVersion.ts) and openssl. Emits one sanitized JSON receipt, removes temporary keys/data, and stops every child.
  * Run: node scripts/webhooks-smoke.ts [--receipt /path/to/receipt.json]
  */
 import assert from 'node:assert/strict';

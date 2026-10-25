@@ -64,7 +64,7 @@ interface FoundThread {
   status?: string;
 }
 
-function foundThread(thread: { threadId: string; title: string; latestRunId: string | null; link: string; status: string }): FoundThread {
+function foundThread(thread: { threadId: string; title: string; latestRunId: string | null; link: string | null; status: string }): FoundThread {
   const { threadId, title, latestRunId, link, status } = thread;
   return { threadId, threadTitle: title, lastRunId: latestRunId, threadLink: threadLinkTarget(link), status };
 }
@@ -519,12 +519,13 @@ export class JobEngine {
   }
 
   #failQueued(job: Job, code: string, message: string): void {
-    this.#options.store.transition(job.id, {
+    const failed = this.#options.store.transition(job.id, {
       from: ['queued'],
       to: 'failed',
       changes: { lastErrorCode: code, lastErrorMessage: message },
       detail: { reason: code, code },
     });
+    if (failed) this.#options.registry.signals(job.hostId).recordCode('dispatch', code);
   }
 
   /** Launch one job's thread. Returns false when no further job should be launched this tick. */
@@ -533,6 +534,31 @@ export class JobEngine {
     this.#inFlight.add(job.id);
     try {
       let launched: LaunchResult;
+      let attachments;
+      try { attachments = store.launchAttachments(job.id); }
+      catch {
+        store.transition(job.id, { from: ['dispatching'], to: 'failed', changes: {
+          lastErrorCode: 'database_error', lastErrorMessage: "This job's stored attachments could not be read. Start the work again.",
+        }, detail: { reason: 'database_error', code: 'database_error' } });
+        store.clearLaunchAttachments(job.id);
+        return true;
+      }
+      let uploaded;
+      try { uploaded = attachments.length ? await registry.client(job.hostId).uploadAttachments(attachments) : undefined; }
+      catch (error) {
+        // Uploading alone cannot create a thread, even if the upload response is lost.
+        store.transition(job.id, { from: ['dispatching'], to: isHostFailure(error) ? 'queued' : 'failed',
+          changes: { dispatchStartedAt: null, ...(isHostFailure(error) ? {} : {
+            lastErrorCode: 'invalid_argument', lastErrorMessage: "T3 could not accept this job's attachments.",
+          }) }, detail: { reason: 'attachment_upload_failed' } });
+        store.transition(job.id, { from: ['cancel_requested'], to: 'cancelled', detail: { reason: 'cancelled_before_launch' } });
+        if (isHostFailure(error)) throw error;
+        return true;
+      }
+      if (store.require(job.id).state === 'cancel_requested') {
+        store.transition(job.id, { from: ['cancel_requested'], to: 'cancelled', detail: { reason: 'cancelled_before_launch' } });
+        return true;
+      }
       try {
         launched = await registry.client(job.hostId).launchThread(
           {
@@ -540,6 +566,7 @@ export class JobEngine {
             runtimeMode: job.runtimeMode as RuntimeMode,
             ...(plan.modelSelection ? { modelSelection: plan.modelSelection } : {}),
             message: launchMessage(job, this.#options.config.standingInstructions),
+            ...(uploaded ? { attachments: uploaded } : {}),
             ...(plan.workspace.kind === 'scratch'
               ? { scratch: true as const }
               : { projectId: plan.projectId, workspaceStrategy: workspaceStrategy(plan.workspace) }),
@@ -547,7 +574,8 @@ export class JobEngine {
           { timeoutMs: this.#launchTimeoutMs },
         );
       } catch (error) {
-        if (error instanceof T3ToolError) return await this.#launchRefused(job, plan, error);
+        if (error instanceof T3ToolError) return await this.#launchRefused(job, plan,
+          uploaded ? new T3ToolError(error.tool, error.t3Code, 'T3 could not accept the attached files.') : error);
         if (error instanceof T3TransportError && error.delivery === 'not_delivered') {
           store.transition(job.id, { from: ['dispatching'], to: 'queued', changes: { dispatchStartedAt: null }, detail: { reason: 'host_unreachable', code: error.code } });
           store.transition(job.id, { from: ['cancel_requested'], to: 'cancelled', detail: { reason: 'cancelled_before_launch' } });
@@ -574,6 +602,7 @@ export class JobEngine {
       await this.#attach(job.id, thread, 'launched', null);
       return true;
     } finally {
+      if (!['queued', 'dispatching'].includes(store.require(job.id).state)) store.clearLaunchAttachments(job.id);
       this.#inFlight.delete(job.id);
     }
   }
@@ -757,6 +786,11 @@ export class JobEngine {
       } catch { /* Missing tool, malformed output or transport error: retain the last known snapshot. */ }
     }
     const seen = observe(job, read, questions, activity);
+    // A later turn may start and finish entirely between idle polls. A repeated failed snapshot
+    // is not recovery, nor is metadata activity (PRs, settlement) on the same failed run.
+    const recovered = job.lastErrorCode === 't3_run_failed' && !seen.errorCode &&
+      (seen.state === 'running' || seen.state === 'needs_input' || seen.anotherTurnFinished);
+    const recoveryEvents = recovered ? [{ type: 'job_recovered', detail: { reason: 'worker_resumed' } }] : [];
     // An idle job's delegated work ended (finished, failed or cancelled) and no turn followed: T3 starts
     // one by itself when a child finishes, but not always (a failed or cancelled child, say), and the job
     // would otherwise sit waiting with nothing to tell the agent.
@@ -779,7 +813,7 @@ export class JobEngine {
       ...(seen.errorCode
         ? { lastErrorCode: seen.errorCode, lastErrorMessage: 'The T3 run failed. Open the thread in T3 for details.' }
         : // A valid observation clears a prior shape error; a failed run clears only once a new turn runs.
-          job.lastErrorCode === 't3_invalid_response' || (seen.state === 'running' && job.lastErrorCode === 't3_run_failed')
+          job.lastErrorCode === 't3_invalid_response' || recovered
           ? { lastErrorCode: null, lastErrorMessage: null }
           : {}),
     };
@@ -791,6 +825,7 @@ export class JobEngine {
         turnRunId: read.thread.activeRunId ?? read.thread.latestRunId,
         events: [
           ...prEvents,
+          ...recoveryEvents,
           ...(seen.anotherTurnFinished ? [{ type: 'turn_finished', detail: { reason: seen.reason } }] : []),
           ...(delegatedEnded ? [{ type: 'delegated_work_ended', detail: { reason: 'no_turn_started' } }] : []),
         ],
@@ -808,7 +843,7 @@ export class JobEngine {
       expected: job,
       turnRunId: read.thread.activeRunId ?? read.thread.latestRunId,
       changes,
-      events: prEvents,
+      events: [...prEvents, ...recoveryEvents],
       detail: { reason: seen.reason, ...(seen.errorCode ? { code: seen.errorCode } : {}) },
     });
   }
@@ -874,6 +909,7 @@ export class JobEngine {
       store.transition(jobId, { from: ['cancel_requested'], to: 'cancelled', changes, detail });
       return;
     }
+    registry.signals(store.require(jobId).hostId).record('dispatch');
     const changes = { pullRequests: [], ...rest, ...(threadLink ? { threadLink } : {}), lastErrorCode: null, lastErrorMessage: null };
     const gatewayTurn = via === 'launched' && thread.lastRunId !== null
       ? { runId: thread.lastRunId, clientId: store.require(jobId).clientId } : undefined;

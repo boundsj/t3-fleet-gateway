@@ -3,10 +3,13 @@ import { DashboardChecks } from './dashboard/checks.ts';
 import { startDashboard, type RunningDashboard } from './dashboard/server.ts';
 import { openDataDir } from './dataDir.ts';
 import { openDatabase, type Database } from './db/database.ts';
+import { ThreadCatalog } from './hosts/threads.ts';
+import { threadTools } from './mcp/threadTools.ts';
 import { CatalogService } from './hosts/catalog.ts';
 import { CredentialStore } from './hosts/credentials.ts';
 import { warnProjectsWithoutModel } from './hosts/projects.ts';
 import { HostRegistry, type HostRegistryOptions } from './hosts/registry.ts';
+import { startReachabilityLoop } from './hosts/reachability.ts';
 import { startRenewalLoop, type RenewalLoop } from './hosts/renewal.ts';
 import { createRouter, listen, type RunningServer } from './http/server.ts';
 import { JobEngine } from './jobs/engine.ts';
@@ -40,6 +43,7 @@ export interface GatewayServices {
   registry: HostRegistry;
   /** Per-host T3 project and model catalogs for agents (opt-in per host). */
   catalog: CatalogService;
+  threads: ThreadCatalog;
   jobs: JobService;
   webhooks: WebhookStore;
   close(): Promise<void>;
@@ -78,7 +82,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
     ...(options.runCommand ? { runCommand: options.runCommand } : {}),
     ...(options.commandEnv ? { commandEnv: options.commandEnv } : {}),
   });
-  const catalog = new CatalogService(registry, clock);
+  const catalog = new CatalogService(registry, clock, logger);
   return {
     config,
     db,
@@ -90,6 +94,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
     tokens: new TokenService(db, clock, { resource: mcpResource(config), ...config.tokens }, logTokenEvent(logger)),
     registry,
     catalog,
+    threads: new ThreadCatalog(registry, clock, logger),
     webhooks: new WebhookStore(db, clock),
     jobs: new JobService({ config, store: new JobStore(db, clock, logger), registry, catalog, clock, logger }),
     async close() {
@@ -100,7 +105,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
 }
 
 export function gatewayTools(services: GatewayServices): GatewayTool[] {
-  return [fleetStatusTool(services), ...catalogTools(services), ...workTools(services.jobs)];
+  return [fleetStatusTool(services), ...catalogTools(services), ...threadTools(services), ...workTools(services.jobs)];
 }
 
 export interface RunningGateway {
@@ -120,6 +125,8 @@ export interface GatewayOptions extends ServiceOptions {
   webhookSender?: SenderOptions;
   /** Isolated synthetic test/demo transport policy; never populated from operator config. */
   webhookManagement?: ManagementOptions;
+  /** Test/demo harnesses may disable the autonomous reachability timer. */
+  reachability?: { autoStart?: boolean };
   /** Tests drive the job engine by hand (`autoStart: false`) or with a short interval. */
   jobEngine?: { autoStart?: boolean; intervalMs?: number; launchTimeoutMs?: number };
   /** Listen on this port instead of `config.listen.port`; 0 lets the OS pick one (tests). */
@@ -138,7 +145,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   const { config, logger } = services;
   const management = new WebhookManagement(services.webhooks, config, services.clock, logger, () => {
     if (options.webhookSender?.autoStart !== false) webhooks.start();
-  }, options.webhookManagement);
+  }, options.webhookManagement, { catalog: services.catalog, registry: services.registry });
   const mcp = createMcpEndpoint({
     publicUrl: config.publicUrl,
     allowedOrigins: config.allowedOrigins,
@@ -181,6 +188,8 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
         checks,
         logger,
         management,
+        jobs: services.jobs,
+        available: () => ready,
         ...(options.dashboardPort === undefined ? {} : { port: options.dashboardPort }),
         sources: {
           config, db: services.db, clock: services.clock, registry: services.registry, store: services.jobs.store, engine, startedAt,
@@ -230,17 +239,21 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   // Checked in the background: an unreachable host must not delay startup or shutdown. Logged as warnings.
   const modelCheck = new AbortController();
   void warnProjectsWithoutModel(config, services.registry, logger, modelCheck.signal);
+  const reachability = options.reachability?.autoStart === false ? undefined
+    : startReachabilityLoop(services.registry, config.reachability.intervalMinutes * MINUTE);
   logger.info('gateway.started', { listen: `${config.listen.host}:${server.port}`, publicUrl: config.publicUrl, hosts: config.hosts.length });
   let closing: Promise<void> | undefined;
   const shutdown = async (): Promise<void> => {
     logger.info('gateway.stopping');
     ready = false;
     const stoppedManagement = management.stop();
-    // Not awaited: a call still in flight ends when the T3 clients close below.
+    const stoppedReachability = reachability?.stop();
+    // Not awaited: a startup model call still in flight ends when the T3 clients close below.
     modelCheck.abort();
     commandCheck.abort();
     await dashboard?.close();
     await stoppedManagement;
+    await stoppedReachability;
     await server!.close();
     // The engine finishes its current tick; job state is already in the database.
     await engine.stop();

@@ -193,6 +193,9 @@ const configSchema = z
         checkEveryMinutes: z.int().min(1).max(1440).default(60),
       })
       .default({ renewWhenDaysLeft: 5, checkEveryMinutes: 60 }),
+    reachability: z
+      .strictObject({ intervalMinutes: z.int().min(1).max(60).default(5) })
+      .default({ intervalMinutes: 5 }),
     watcher: z
       .strictObject({
         pollSeconds: z.int().min(2).max(300).default(10),

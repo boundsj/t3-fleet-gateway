@@ -10,7 +10,8 @@ export const ATTEMPT_TIMEOUT_MS = 10_000;
 export const MAX_RESPONSE_BYTES = 32 * 1024;
 const CONCURRENCY = 4;
 const TLS_ERRORS = new Set(['CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
-  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'ERR_TLS_CERT_ALTNAME_INVALID']);
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'ERR_TLS_CERT_ALTNAME_INVALID',
+  'CERT_REVOKED']);
 
 /** A real HTTP(S) POST: no redirects, no body retention, one deadline covering DNS/TLS/headers/body. */
 export function postWebhook(route: WebhookRoute, payload: string, timeoutMs = ATTEMPT_TIMEOUT_MS, signal?: AbortSignal): Promise<AttemptResult> {

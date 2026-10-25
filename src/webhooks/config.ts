@@ -37,6 +37,8 @@ const subscriptionSchema = z.strictObject({
   }),
   projects: z.array(z.string().min(1).max(300)).min(1).max(100).optional(),
   hosts: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/)).min(1).max(100).optional(),
+  targets: z.array(z.strictObject({ host: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/),
+    projectId: z.string().min(1).max(300) })).min(1).max(100).optional(),
   events: z.array(z.enum(WEBHOOK_EVENTS)).min(1).max(WEBHOOK_EVENTS.length).default(DEFAULT_WEBHOOK_EVENTS),
   excerptChars: z.int().min(0).max(500).default(0),
   allowLoopbackHttp: z.boolean().default(false),

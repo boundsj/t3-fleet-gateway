@@ -1,4 +1,6 @@
 import * as z from 'zod';
+import { threadLink } from '../threadId.js';
+import { responseThreadIdSchema } from './threadId.ts';
 
 /** The fields of `t3_environment_read` the gateway relies on. Extra fields are kept, not validated. */
 export const environmentSchema = z.looseObject({
@@ -24,10 +26,8 @@ export const projectListSchema = z.looseObject({
   nextCursor: z.number().int().nullable().optional(),
 });
 
-/**
- * One model option T3 advertises in `orchestrator_capabilities` (T3's `ProviderOptionDescriptor`): a
- * `select` with its choices (a reasoning effort, say) or a `boolean`. The type is read as a plain
- * string so a kind added by a newer T3 is carried, unselectable, instead of failing the whole catalog.
+/** Legacy full ProviderOptionDescriptor, retained as the old wire-format reference.
+ * Current compact MCP options are normalized independently in hosts/catalog.ts.
  */
 export const optionDescriptorSchema = z.looseObject({
   id: z.string().min(1),
@@ -48,7 +48,8 @@ export const capabilitiesSchema = z.looseObject({
       providerInstanceId: z.string().min(1),
       driverKind: z.string(),
       displayName: z.string().nullish(),
-      models: z.array(z.looseObject({ id: z.string().min(1), label: z.string().nullish(), options: z.array(optionDescriptorSchema).nullish() })),
+      // Parse entries independently after transport validation: one bad model must not hide its siblings.
+      models: z.array(z.unknown()),
       runtimeModes: z.array(z.string()).nullish(),
       /** Whether this provider may run a delegated child task inside T3: metadata, not proof that a top-level launch works. */
       canRunChildTask: z.boolean().nullish(),
@@ -95,6 +96,7 @@ export type LaunchThreadInput = {
   runtimeMode: (typeof RUNTIME_MODE_VALUES)[number];
   modelSelection?: Record<string, unknown>;
   message: string;
+  attachments?: T3Attachment[];
 } & (
   | { projectId: string; workspaceStrategy: LaunchWorkspaceStrategy; scratch?: never }
   // T3's own scratch workspace: T3 files the thread under its scratch project and gives it a folder of its own. T3 refuses
@@ -104,11 +106,12 @@ export type LaunchThreadInput = {
 
 /** Current T3 omits links. Keep older supplied links and normalize newer responses at the boundary. */
 function withThreadLink<T extends { threadId: string; link?: string | null }>(thread: T) {
-  return { ...thread, link: thread.link ?? `t3-thread://v1/${thread.threadId}` };
+  const canonical = threadLink(thread.threadId);
+  return { ...thread, link: canonical === null ? null : thread.link ?? canonical };
 }
 
 export const launchResultSchema = z.looseObject({
-  threadId: z.string().min(1),
+  threadId: responseThreadIdSchema,
   link: z.string().nullish(),
   projectId: z.string(),
   runId: z.string().nullable(),
@@ -117,13 +120,16 @@ export const launchResultSchema = z.looseObject({
 export type LaunchResult = z.infer<typeof launchResultSchema>;
 
 export const threadSummarySchema = z.looseObject({
-  threadId: z.string(),
+  threadId: responseThreadIdSchema,
   link: z.string().nullish(),
   title: z.string(),
   status: z.string(),
   latestRunId: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  settled: z.boolean().optional(),
+  settledAt: z.string().nullable().optional(),
+  archived: z.boolean().optional(),
 }).transform(withThreadLink);
 export type ThreadSummary = z.infer<typeof threadSummarySchema>;
 
@@ -133,12 +139,15 @@ export const threadListSchema = z.looseObject({
   nextCursor: z.number().int().nullable(),
   total: z.number().int(),
 });
+// Catalog discovery validates individual rows after checking the raw page bounds. Other list consumers validate bounded opaque ids.
+export const threadCatalogPageSchema = threadListSchema.extend({ threads: z.array(z.unknown()) });
+
 export type ThreadList = z.infer<typeof threadListSchema>;
 
 export const threadSearchSchema = z.looseObject({
   matches: z.array(
     z.looseObject({
-      threadId: z.string(),
+      threadId: responseThreadIdSchema,
       projectId: z.string(),
       source: z.string(),
       snippet: z.string(),
@@ -173,7 +182,7 @@ export type ThreadRun = z.infer<typeof threadRunSchema>;
 
 export const threadReadSchema = z.looseObject({
   thread: z.looseObject({
-    threadId: z.string(),
+    threadId: responseThreadIdSchema,
     link: z.string().nullish(),
     projectId: z.string(),
     title: z.string(),
@@ -181,6 +190,11 @@ export const threadReadSchema = z.looseObject({
     latestRunId: z.string().nullable(),
     activeRunId: z.string().nullable(),
     pendingRequestCount: z.number().int(),
+    settled: z.boolean().optional(),
+    settledAt: z.string().nullable().optional(),
+    archived: z.boolean().optional(),
+    relationshipToParent: z.string().nullable().optional(),
+    runtimeMode: z.string().optional(),
     branch: z.string().nullable(),
     updatedAt: z.string(),
   }).transform(withThreadLink),
@@ -194,7 +208,7 @@ export type ThreadRead = z.infer<typeof threadReadSchema>;
 export const SEND_MODES = ['auto', 'queue', 'steer', 'restart'] as const;
 
 export const sendResultSchema = z.looseObject({
-  threadId: z.string(),
+  threadId: responseThreadIdSchema,
   messageId: z.string(),
   runId: z.string(),
   status: z.string(),
@@ -203,7 +217,7 @@ export const sendResultSchema = z.looseObject({
 export type SendResult = z.infer<typeof sendResultSchema>;
 
 export const interruptResultSchema = z.looseObject({
-  threadId: z.string(),
+  threadId: responseThreadIdSchema,
   runId: z.string().nullable(),
   status: z.string(),
 });
@@ -228,3 +242,20 @@ export const pendingRequestSchema = z.looseObject({
 export type PendingRequest = z.infer<typeof pendingRequestSchema>;
 
 export const respondResultSchema = z.looseObject({ sequence: z.number().int() });
+
+/** Metadata returned to T3 after its signed upload has received the bytes. */
+export interface T3Attachment {
+  id: string;
+  type: 'image' | 'file';
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+}
+export const attachmentUploadSchema = z.object({
+  attachmentId: z.string().min(1).max(256),
+  relativeUrl: z.string().min(1).max(4096),
+  expiresAt: z.number(),
+});
+export const attachmentSendSchema = z.object({
+  threadId: z.string().min(1), messageId: z.string().min(1), runId: z.string().min(1), status: z.string(),
+});

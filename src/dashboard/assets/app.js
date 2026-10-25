@@ -1,3 +1,5 @@
+import { isThreadLink } from './threadId.js';
+
 // t3-fleet-gateway operator dashboard: monitoring and private webhook connections.
 //
 // Security rules for this file, checked by test/dashboard-ui.test.ts:
@@ -8,7 +10,6 @@
 //   are cleared before awaiting a submission, and are never received back from the server.
 
 const API_HEADER = 'x-t3fg-dashboard';
-const SAFE_THREAD_LINK = /^t3-thread:\/\/v1\/[A-Za-z0-9._:-]{1,200}$/;
 const SAFE_ROUTE = /^#\/[A-Za-z0-9/_-]*$/;
 const VIEWS = ['overview', 'clients', 'hosts', 'jobs', 'checks', 'webhooks'];
 const SETUP_PROMPT = 'For the routine I want to connect, send clickable links to its Webhook URL, Webhook key and Authorization header panels. Send private panel links only; do not print the key or header value.';
@@ -43,7 +44,7 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const STALE_MS = 60_000;
 
 export function safeHref(value) {
-  return typeof value === 'string' && (SAFE_ROUTE.test(value) || SAFE_THREAD_LINK.test(value));
+  return typeof value === 'string' && (SAFE_ROUTE.test(value) || isThreadLink(value));
 }
 
 const ICONS = {
@@ -181,7 +182,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
   const button = (label, iconName, onClick, options = {}) => h('button', {
     type: 'button', class: `btn ${options.cls ?? ''}`.trim(), disabled: options.busy, 'aria-busy': options.busy ? 'true' : null, on: { click: onClick },
   }, icon(iconName, 'btn__icon'), h('span', { class: 'btn__label' }, label));
-  const threadButton = (link, small = true) => (SAFE_THREAD_LINK.test(link ?? '')
+  const threadButton = (link, small = true) => (isThreadLink(link)
     ? h('a', { class: `btn ${small ? 'btn--small' : ''}`, href: link, title: 'Opens the thread in the T3 app' }, h('span', null, 'Open in T3'), icon('external', 'btn__icon'))
     : null);
   const command = (text) => h('span', { class: 'cmd' }, h('code', null, text),
@@ -272,12 +273,14 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     const connection = (row) => {
       const managed = row.source === 'dashboard';
       const confirming = model.disconnectId === row.id;
-      return h('article', { class: 'panel webhook-connection', 'aria-label': `Connection for ${row.projects.join(', ') || 'all projects'}` },
-        h('div', { class: 'panel__head' }, h('h3', { class: 'panel__title' }, row.projects.join(', ') || 'All projects'),
+      const projects = [...row.projects, ...(row.targets ?? []).map((t) => t.projectId)].join(', ');
+      const hosts = [...row.hosts, ...(row.targets ?? []).map((t) => t.host)].join(', ');
+      return h('article', { class: 'panel webhook-connection', 'aria-label': `Connection for ${projects || 'all projects'} on ${hosts || 'all hosts'}` },
+        h('div', { class: 'panel__head' }, h('h3', { class: 'panel__title' }, projects || 'All projects'),
           pill(row.enabled === false ? 'unknown' : 'good', row.enabled === false ? 'Disabled' : 'Connected')),
         h('div', { class: 'panel__body' },
           kv([
-            ['Host', row.hosts.join(', ') || 'All hosts'],
+            ['Host', hosts || 'All hosts'],
             ['Managed by', managed ? 'Dashboard' : 'Configuration file'],
             ['Last test', testSummary(row.lastTest)],
           ]),
@@ -333,7 +336,10 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     });
     const project = replacing ? null : h('select', {
       id: 'webhook-project', required: true, disabled: busy || data.projects.length === 0, 'aria-describedby': 'webhook-project-help',
-    }, data.projects.map((item) => h('option', { value: item.alias }, `${item.alias} · ${item.host}`)));
+    }, [...new Set(data.projects.map((item) => item.host))].map((host) =>
+      h('optgroup', { label: host }, data.projects.filter((item) => item.host === host).map((item) =>
+        h('option', { value: item.alias }, item.name ? `${item.name} (${item.projectId})` : item.alias)))));
+    const unavailable = (data.hosts ?? []).filter((host) => host.status === 'unavailable');
     const clear = () => { url.value = ''; auth.value = ''; };
     return h('form', {
       class: 'panel__body webhook-form', autocomplete: 'off', 'aria-label': replacing ? 'Replace connection' : 'Connect webhook',
@@ -347,6 +353,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
         return actions.webhookOperation(replacing ? 'replace' : 'connect', fields);
       } },
     },
+    unavailable.map((host) => h('p', { class: 'sub' }, `${host.host}: unavailable. Configured aliases remain selectable; refresh to retry discovery.`)),
     replacing ? h('p', { class: 'webhook-replace-note' }, 'If you recreated the routine, paste its new URL and full authorization header. Leave the URL blank only if it has not changed. The current connection stays active unless the new test succeeds.') : null,
     h('div', { class: 'field' }, h('label', { for: 'webhook-url' }, replacing ? 'Webhook URL (if changed)' : 'Webhook URL'), url,
       h('p', { class: 'field__hint', id: 'webhook-url-help' }, 'Where the gateway sends updates. In Grok, copy the “POST to” address.')),
@@ -385,7 +392,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
       lede = `${plural(unchecked, 'host')} ${unchecked === 1 ? 'has' : 'have'} not been checked since the gateway started. Run checks to ask ${unchecked === 1 ? 'it' : 'them'} now.`;
     } else {
       headline = 'All clear';
-      lede = 'Every host answered its last check, and no job is waiting on you.';
+      lede = 'Every host answered its last observed call, and no job is waiting on you.';
     }
     return [
       pageHead('Overview', headline, lede, checksButton(),
@@ -413,7 +420,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     const tile = (href, tone, iconName, label, value, sub) => h('a', { class: `panel vital tone-edge-${tone}`, href },
       h('span', { class: 'vital__label' }, icon(iconName), label), h('span', { class: 'vital__value' }, value), h('span', { class: 'vital__sub' }, sub));
     const d = derived;
-    const hostSub = [d.unreachable && `${d.unreachable} unreachable`, d.hostWarn && `${d.hostWarn} ${d.hostWarn === 1 ? 'needs' : 'need'} attention`, d.unchecked && `${d.unchecked} not checked`].filter(Boolean).join(' · ') || 'all answered their last check';
+    const hostSub = [d.unreachable && `${d.unreachable} unreachable`, d.hostWarn && `${d.hostWarn} ${d.hostWarn === 1 ? 'needs' : 'need'} attention`, d.unchecked && `${d.unchecked} not checked`].filter(Boolean).join(' · ') || 'all answered their last observed call';
     const clientSub = [d.needsApproval && `${d.needsApproval} unusable`, d.neverSeen && `${d.neverSeen} never observed`, d.quiet && `${d.quiet} quiet`].filter(Boolean).join(' · ') || 'all seen in the last day';
     const waitingSub = [d.waiting && `${d.waiting} waiting on you`, snap.jobs.counts.queued && `${snap.jobs.counts.queued} queued`, snap.jobs.counts.running && `${snap.jobs.counts.running} running`].filter(Boolean).join(' · ') || 'nothing waiting';
     return h('div', { class: 'vitals' },
@@ -460,6 +467,15 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
             snap.hosts.length > shownHosts.length ? more(snap.hosts.length - shownHosts.length, '#/hosts', 'hosts') : null))));
   }
 
+  function settleAction(job) {
+    if (!job || !job.link || job.settlementAcknowledged || !['idle', 'failed', 'cancelled', 'released'].includes(job.state)) return null;
+    if (model.settleId === job.id) return h('span', { role: 'group', 'aria-label': 'Confirm settlement' },
+      h('span', null, 'Settle this thread in T3 and clear its attention alert? '),
+      button('Confirm settle', 'check', () => actions.settle(job.id), { busy: Boolean(model.settleBusy) }),
+      button('Keep open', 'x', () => actions.confirmSettle(null), { busy: Boolean(model.settleBusy) }));
+    return button('Settle', 'check', () => actions.confirmSettle(job.id), { busy: Boolean(model.settleBusy) });
+  }
+
   function attentionItem(item) {
     let action = null;
     if (item.action?.kind === 'link') action = threadButton(item.action.href);
@@ -468,7 +484,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     return h('li', { class: 'attention__item' },
       h('span', { class: `attention__icon tone-${item.tone}` }, icon(TONE_ICON[item.tone] ?? 'info')),
       h('div', null, h('p', { class: 'attention__title' }, item.title), h('p', { class: 'attention__detail' }, item.detail)),
-      h('div', { class: 'attention__foot' }, action, item.at ? h('span', { class: 'sub' }, time(item.at)) : null));
+      h('div', { class: 'attention__foot' }, action, item.kind === 'job' ? settleAction(jobIndex.get(item.ref)) : null, item.at ? h('span', { class: 'sub' }, time(item.at)) : null));
   }
 
   function eventItem(event) {
@@ -552,7 +568,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
   function hostsView() {
     return [
       pageHead('Hosts', 'T3 machines',
-        'Reachability is the last check this gateway made; this page never contacts T3 by itself. Transport notes are your own description from the config: the gateway checks only whether T3 answers at its URL.', checksButton()),
+        'Reachability reflects the last completed host call or background probe; this page never contacts T3 by itself. Transport notes are your own description from the config: the gateway checks only whether T3 answers at its URL.', checksButton()),
       h('div', { class: 'cards cards--wide' }, snap.hosts.map(hostCard)),
     ];
   }
@@ -580,8 +596,18 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
       h('div', { class: 'entity__cols entity__cols--3' },
         h('div', { class: 'entity__col' }, h('h3', null, icon('link'), 'Reachability'),
           kv([
-            ['Last check', r.checkedAt ? time(r.checkedAt) : h('span', { class: 'muted' }, 'none yet')],
+            ['Last observation', r.checkedAt ? time(r.checkedAt) : h('span', { class: 'muted' }, 'none yet')],
             ['Result', pill(reachTone, REACH_LABELS[r.state] ?? r.state)],
+            ['Model catalog', (() => {
+              const signal = host.signals?.find((entry) => entry.kind === 'models');
+              if (!signal) return h('span', { class: 'muted' }, 'not observed');
+              const tone = signal.stale ? 'unknown' : signal.problem ? 'bad' : 'good';
+              const label = signal.stale ? `Last failure: ${signal.code}` : signal.code ?? 'OK';
+              return [pill(tone, label), ' checked ', time(new Date(signal.checkedAt).toISOString())];
+            })()],
+            ...(host.signals ?? []).filter((signal) => signal.problem).map((signal) =>
+              [signal.kind, h('span', { class: signal.stale ? 'muted' : '' }, tag(signal.code, true), ` ${signal.message} Count: ${signal.problem.count}. First seen: `,
+                time(new Date(signal.problem.firstSeen).toISOString()), ' Last seen: ', time(new Date(signal.problem.lastSeen).toISOString()))]),
             r.t3Version ? ['T3 version', r.t3Version] : null,
             r.errorCode ? ['Code', tag(r.errorCode, true)] : null,
             host.engine ? ['Engine retries', ['next ', time(host.engine.nextAttemptAt)]] : null,
@@ -656,7 +682,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     if (job.error) flags.push(h('span', { class: 'tag tag--mono tone-bad', title: job.error.detail ?? 'Error code recorded on the job' }, job.error.code));
     return h('li', { class: 'panel job' },
       h('div', null,
-        h('p', { class: 'job__title' }, job.title, job.standing ? tag('standing') : null,
+        h('p', { class: 'job__title' }, job.title, job.origin === 'adopted' ? tag('adopted') : job.standing ? tag('standing') : null,
           ...(job.pullRequests ?? []).map((pr) => tag(`PR #${pr.number} ${pr.state ?? 'unknown'}`))),
         h('p', { class: 'job__meta' },
           h('span', { class: 'mono' }, job.projectName ? `${job.projectName}` : job.project),
@@ -666,7 +692,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
           h('span', { class: 'ref' }, `job ${job.id}`)),
         flags.length ? h('div', { class: 'job__flags' }, flags) : null,
         job.error?.detail ? h('p', { class: 'sub' }, job.error.detail) : null),
-      h('div', { class: 'job__side' }, h('span', { class: `state st-${job.state}` }, STATE_LABELS[job.state] ?? job.state), threadButton(job.link)));
+      h('div', { class: 'job__side' }, h('span', { class: `state st-${job.state}` }, STATE_LABELS[job.state] ?? job.state), threadButton(job.link), job.settlementAcknowledged ? tag('settled') : settleAction(job)));
   }
 
   // -------------------------------------------------------------- checks
@@ -757,6 +783,7 @@ export function boot(win, doc) {
   const route = parseRoute(win.location.hash);
   const model = {
     snapshot: null, route, error: null, notice: null, loading: false, checking: false, fetchedAt: 0, jobFilter: 'attention',
+    settleId: null, settleRequestId: null, settleBusy: false,
     webhooks: null, webhooksLoading: false, webhookBusy: null, webhookError: null, webhookNotice: null,
     webhookForm: route.view === 'webhooks' ? { mode: 'connect' } : null, disconnectId: null,
   };
@@ -787,6 +814,32 @@ export function boot(win, doc) {
     cache: 'no-store', credentials: 'same-origin', ...init, headers: { [API_HEADER]: '1', ...(init.headers ?? {}) },
   });
   const actions = {
+    confirmSettle(id) {
+      model.settleId = id;
+      model.settleRequestId = id ? win.crypto.randomUUID() : null;
+      draw();
+    },
+    async settle(id) {
+      if (model.settleBusy) return;
+      model.settleBusy = true;
+      draw();
+      try {
+        const response = await request('api/jobs/settle', { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ jobId: id, requestId: model.settleRequestId }) });
+        if (!response.ok) throw new Error(await readError(response));
+        model.snapshot = (await response.json()).snapshot;
+        model.settleId = null;
+        model.error = null;
+        model.notice = 'Thread settled. Its history is still available in Jobs.';
+        announce(model.notice);
+      } catch (error) {
+        model.error = String(error.message ?? error);
+        announce(model.error);
+      } finally {
+        model.settleBusy = false;
+        draw();
+      }
+    },
     async refresh() {
       if (model.loading) return;
       model.loading = true;

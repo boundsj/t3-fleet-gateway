@@ -24,6 +24,7 @@ describe('config', () => {
     assert.equal(config.publicUrl, 'https://gateway.example.ts.net');
     assert.deepEqual(config.listen, { host: '127.0.0.1', port: 3790 });
     assert.deepEqual(config.tokens, { accessTtlSeconds: 43200, refreshIdleTtlDays: 90 });
+    assert.deepEqual(config.reachability, { intervalMinutes: 5 });
     assert.deepEqual(config.renewal, { renewWhenDaysLeft: 5, checkEveryMinutes: 60 });
     assert.equal(config.hosts[0]?.access, 'auto');
     assert.equal(config.hosts[0]?.maxConcurrentJobs, 2);
@@ -38,6 +39,16 @@ describe('config', () => {
     for (const standingInstructions of [42, null, {}, [], '', ' \n\t', 'x'.repeat(4001)]) {
       invalid({ ...minimal, standingInstructions }, /standingInstructions/);
     }
+  });
+
+  test('reachability interval accepts whole minutes from 1 to 60 only', () => {
+    for (const intervalMinutes of [1, 5, 60]) {
+      assert.equal(parseConfig({ ...minimal, reachability: { intervalMinutes } }).reachability.intervalMinutes, intervalMinutes);
+    }
+    for (const intervalMinutes of [0, -1, 61, 1.5, '5', null]) {
+      invalid({ ...minimal, reachability: { intervalMinutes } }, /reachability.intervalMinutes/);
+    }
+    invalid({ ...minimal, reachability: { everyMinutes: 5 } }, /reachability/);
   });
 
   test('workspaceProbeCommand is opt-in, an exact bounded argv', () => {

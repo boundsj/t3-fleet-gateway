@@ -1,5 +1,7 @@
+import { threadLink } from '../threadId.js';
 import { configuredModel, isLoopbackHostname, mcpResource, type GatewayConfig, type HostConfig } from '../config.ts';
 import { SCHEMA_VERSION, schemaVersion, type Database } from '../db/database.ts';
+import { isCallSignal, SIGNAL_LABELS, type HostSignal } from '../hosts/signals.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import type { EngineStatus } from '../jobs/engine.ts';
 import { displayPullRequests } from '../jobs/pullRequests.ts';
@@ -13,6 +15,8 @@ import { DAY, type Clock } from '../time.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
 import type { CheckRun } from './checks.ts';
 import { describeEvent, explainHostError, explainJobError, explainRenewalError, explainRevocation, safeCode } from './explain.ts';
+
+export { threadLink } from '../threadId.js';
 
 /**
  * The operator dashboard's view of the gateway, built from the database and what this process holds in memory only.
@@ -65,10 +69,6 @@ function clip(text: string, max = TITLE_CHARS): string {
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
 }
 
-/** T3 thread ids are opaque; the link is built only from ids made of safe characters, in T3's documented form. */
-export function threadLink(threadId: string | null): string | null {
-  return threadId !== null && /^[A-Za-z0-9._:-]{1,200}$/.test(threadId) ? `t3-thread://v1/${threadId}` : null;
-}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Hosts
@@ -77,6 +77,7 @@ export interface HostView {
   id: string;
   label: string;
   transportNote: string | null;
+  signals: (HostSignal & { stale: boolean })[];
   t3Url: string;
   loopback: boolean;
   status: { tone: Tone; label: string };
@@ -121,13 +122,13 @@ function hostView(sources: DashboardSources, host: HostConfig, counts: Map<strin
   if (credential.state === 'missing') {
     reachability = { state: 'not_enrolled', checkedAt: iso(health?.checkedAt), t3Version: null, errorCode: 'host_not_enrolled', detail: explainHostError('host_not_enrolled') };
   } else if (!health) {
-    reachability = { state: 'unchecked', checkedAt: null, t3Version: null, errorCode: null, detail: 'Not checked since the gateway started. Run checks to ask T3 now.' };
+    reachability = { state: 'unchecked', checkedAt: null, t3Version: null, errorCode: null, detail: 'No host call or reachability probe has completed since the gateway started.' };
   } else if (health.credentialRejected) {
     reachability = { state: 'credential_rejected', checkedAt: iso(health.checkedAt), t3Version: null, errorCode: 't3_unauthorized', detail: explainHostError('t3_unauthorized') };
   } else if (health.reachable === true) {
     reachability = {
       state: 'reachable', checkedAt: iso(health.checkedAt), t3Version: safeVersion(health.t3Version), errorCode: null,
-      detail: 'T3 answered an authenticated read (t3_environment_read) with the stored credential.',
+      detail: 'T3 answered an authenticated host call with the stored credential.',
     };
   } else {
     const code = safeCode(health.error?.code ?? null);
@@ -151,6 +152,9 @@ function hostView(sources: DashboardSources, host: HostConfig, counts: Map<strin
   const renewalCode = credential.renewalError ? safeCode(credential.renewalError.code) : null;
   const view: HostView = {
     id: host.id,
+    signals: registry.signals(host.id).snapshot().map((signal) => ({
+      ...signal, stale: signal.problem !== null && sources.clock() - signal.problem.lastSeen > DAY,
+    })),
     label: clip(host.label ?? host.id, 80),
     transportNote: host.transportNote ? clip(host.transportNote, 80) : null,
     t3Url: host.t3Url,
@@ -204,6 +208,7 @@ function hostStatus(host: HostView): { tone: Tone; label: string } {
   if (host.reachability.state === 'not_enrolled') return { tone: 'warn', label: 'Not enrolled' };
   if (host.credential.state === 'expired') return { tone: 'bad', label: 'Credential expired' };
   if (host.reachability.state === 'unreachable' || host.engine) return { tone: 'bad', label: 'Unreachable' };
+  if (host.signals.some((signal) => signal.problem && !signal.stale)) return { tone: 'bad', label: 'Host problems' };
   if (host.reachability.state === 'unchecked') return { tone: 'unknown', label: 'Not checked' };
   if (host.credential.state === 'renewal_due' || host.credential.renewalError) return { tone: 'warn', label: 'Answering · renewal due' };
   return { tone: 'good', label: 'Answering' };
@@ -347,6 +352,7 @@ function replacementCommand(client: ClientView): string | null {
 // Jobs and events
 
 export interface JobView {
+  settlementAcknowledged: boolean;
   /** At most MAX_PULL_REQUESTS of the PRs the job follows (`displayPullRequests`): number and state only. */
   pullRequests: { number: number; state: string | null }[] | null;
   id: string;
@@ -357,6 +363,7 @@ export interface JobView {
   hostId: string;
   state: JobState;
   standing: boolean;
+  origin: Job['origin'];
   startedBy: { clientId: string | null; label: string };
   runtimeMode: string;
   createdAt: Time;
@@ -371,10 +378,11 @@ export interface JobView {
   link: string | null;
 }
 
-function jobView(job: Job, clientLabels: Map<string, string>): JobView {
+function jobView(job: Job, clientLabels: Map<string, string>, settlementAcknowledged: boolean): JobView {
   const errorCode = safeCode(job.lastErrorCode);
   const isOperator = job.clientId === OPERATOR_CLIENT_ID;
   return {
+    settlementAcknowledged,
     id: job.id,
     pullRequests: job.pullRequests === null ? null : displayPullRequests(job.pullRequests).map(({ number, state }) => ({ number, state })),
     // Launched jobs' titles end with their thread marker; the id is shown on its own.
@@ -384,6 +392,7 @@ function jobView(job: Job, clientLabels: Map<string, string>): JobView {
     hostId: job.hostId,
     state: job.state,
     standing: job.standing,
+    origin: job.origin,
     startedBy: isOperator ? { clientId: null, label: 'Operator (standing job)' } : { clientId: job.clientId, label: clientLabels.get(job.clientId) ?? 'Removed client' },
     runtimeMode: job.runtimeMode,
     createdAt: iso(job.createdAt),
@@ -458,6 +467,21 @@ function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[
       items.push({ tone: 'warn', kind: 'host', ref: host.id, title: `Credential renewal failed for ${name}`, detail: host.credential.renewalError.detail,
         at: host.credential.renewalError.at, action: { kind: 'command', label: 'Diagnose', command: 't3-fleet-gateway doctor' } });
     }
+    const coveredCodes = new Set<string>();
+    if (host.reachability.state === 'unreachable' || host.engine) {
+      const code = host.reachability.errorCode ?? host.engine?.errorCode;
+      if (code) coveredCodes.add(code);
+    }
+    if (host.reachability.state === 'credential_rejected' || host.credential.state === 'expired') coveredCodes.add('t3_unauthorized');
+    if (host.reachability.state === 'not_enrolled') coveredCodes.add('host_not_enrolled');
+    for (const signal of host.signals) {
+      if (!signal.problem || signal.stale || (isCallSignal(signal.kind) && signal.code && coveredCodes.has(signal.code))) continue;
+      const { firstSeen, lastSeen, count } = signal.problem;
+      items.push({ tone: 'bad', kind: 'host', ref: host.id,
+        title: `${SIGNAL_LABELS[signal.kind]} failing on ${host.label}`,
+        detail: `${signal.code}: ${signal.message} First seen: ${iso(firstSeen)}. Last seen: ${iso(lastSeen)}. Count: ${count}.`,
+        at: iso(lastSeen), action: { kind: 'view', label: 'Host details', view: `hosts/${host.id}` } });
+    }
   }
   // The last manual check run's failures and warnings, except what the snapshot shows live: a host's credential and
   // renewal state, and its T3 answer once a health result as new as the run is shown (a timed-out check has none).
@@ -500,6 +524,7 @@ function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[
     }
   }
   for (const job of jobs) {
+    if (job.settlementAcknowledged) continue;
     const where = `${job.project} on ${job.hostId}`;
     const link = job.link ? { kind: 'link' as const, label: 'Open in T3', href: job.link } : null;
     if (job.state === 'needs_input') {
@@ -510,6 +535,9 @@ function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[
       items.push({ tone: 'warn', kind: 'job', ref: job.id, title: `Launch of “${job.title}” is unconfirmed`, detail: `The gateway is looking for its thread in ${where}. It never launches twice.`, at: job.stateChangedAt, action: null });
     } else if (job.state === 'failed' && job.finishedAt !== null && now - Date.parse(job.finishedAt) <= DAY) {
       items.push({ tone: 'bad', kind: 'job', ref: job.id, title: `“${job.title}” failed`, detail: `${job.error?.detail ?? `Code ${job.error?.code ?? 'unknown'}.`} In ${where}.`, at: job.finishedAt, action: link });
+    } else if (job.state === 'idle' && job.error?.code === 't3_run_failed' && job.stateChangedAt !== null && now - Date.parse(job.stateChangedAt) <= DAY) {
+      items.push({ tone: 'bad', kind: 'job', ref: job.id, title: `“${job.title}” turn failed`,
+        detail: `${job.error.detail} Resume in T3 or use work_continue. In ${where}.`, at: job.stateChangedAt, action: link });
     } else if (job.state === 'idle' && job.delegated.endedAt !== null && job.delegated.following === 0 && job.delegated.untracked === 0) {
       items.push({ tone: 'info', kind: 'job', ref: job.id, title: `“${job.title}” did not resume after its delegated work ended`, detail: `An agent should ask it to check on that work (work_continue). In ${where}.`, at: job.delegated.endedAt, action: link });
     }
@@ -569,10 +597,10 @@ export function buildSnapshot(sources: DashboardSources): DashboardSnapshot {
     Number(a.revokedAt !== null) - Number(b.revokedAt !== null) || (b.lastUsedAt ?? b.createdAt) - (a.lastUsedAt ?? a.createdAt));
   const clients = ordered.slice(0, LIMITS.clients).flatMap((summary) => clientView(sources, summary, now) ?? []);
 
-  const view = (job: Job) => jobView(job, clientLabels);
+  const view = (job: Job) => jobView(job, clientLabels, store.settlementAcknowledged(job.id));
   const open = store.list({ states: OPEN_STATES, limit: LIMITS.openJobs }).map(view);
   const recent = store.list({ states: TERMINAL_STATES, limit: LIMITS.recentJobs }).map(view);
-  const attentionJobs = store.attention(now, DAY, LIMITS.jobAttention).map(view);
+  const attentionJobs = store.attention(now, DAY, LIMITS.jobAttention, {}, true).map(view);
   const openTotal = OPEN_STATES.reduce((sum, state) => sum + totals[state], 0);
 
   const events = store.latestEvents(LIMITS.events).map((event): EventView => {

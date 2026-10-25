@@ -2,6 +2,7 @@ import { isValidPkceVerifier, pkceChallenge, randomId, randomToken, safeEqual, s
 import { transaction, type Database } from '../db/database.ts';
 import { DAY, MINUTE, SECOND, type Clock } from '../time.ts';
 import { OAuthError } from './errors.ts';
+import { effectiveScopes } from './threadScopes.ts';
 import { formatScope, narrowScopes, parseScope, type Scope } from './scopes.ts';
 
 export const AUTHORIZATION_CODE_TTL = 60 * SECOND;
@@ -316,7 +317,7 @@ export class TokenService {
     return {
       clientId: row.client_id,
       familyId: row.family_id,
-      scopes: parseScope(row.scope) ?? [],
+      scopes: effectiveScopes(this.#db, row.client_id, parseScope(row.scope) ?? []),
       expiresAt: row.expires_at,
       resource: row.resource,
     };

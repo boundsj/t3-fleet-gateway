@@ -53,7 +53,8 @@ describe('dashboard demo fleet', () => {
       assert.equal(snap.clients.pending.count, 1);
       const states = snap.jobs.counts;
       assert.equal(states.needs_input, 2);
-      assert.equal(states.failed, 1);
+      assert.equal(states.failed, 0);
+      assert.ok(snap.jobs.open.some((job) => job.state === 'idle' && job.error?.code === 't3_run_failed'));
       assert.equal(states.cancelled, 1);
       assert.ok(snap.jobs.open.some((job) => job.standing && job.delegated.following === 2));
       assert.ok(snap.attention.filter((item) => item.tone === 'bad' || item.tone === 'warn').length >= 4);
@@ -79,13 +80,13 @@ describe('dashboard demo fleet', () => {
     });
   });
 
-  test('empty: a fresh install, unchecked and unconnected', async () => {
+  test('empty: freshly enrolled hosts and no connected agents', async () => {
     await withFleet('empty', (snap) => {
       assert.equal(snap.clients.items.length, 0);
       assert.equal(snap.jobs.openTotal, 0);
       assert.equal(snap.events.length, 0);
       assert.equal(snap.checks, null);
-      assert.ok(snap.hosts.every((host) => host.reachability.state === 'unchecked'));
+      assert.ok(snap.hosts.every((host) => host.reachability.state === 'reachable'));
     });
   });
 

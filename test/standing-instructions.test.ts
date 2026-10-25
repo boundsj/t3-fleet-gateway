@@ -58,3 +58,25 @@ test('maximum task and instructions fit T3 and adoption sends no instruction mes
   await agent.call('work_continue', { jobId: adopted.job.id, message: 'Synthetic adopted follow-up', requestId: 'standing-adopted' });
   assert.equal(fake.sends[0]?.message, 'Synthetic adopted follow-up');
 });
+
+test('standing instructions and native attachments reach the same initial turn', async (t) => {
+  const { fake, agent, tick } = await startJobHarness(t, { standingInstructions: 'Synthetic shared rule.' });
+  const bytes = Buffer.from('Synthetic attachment content');
+  await agent.call('work_start', {
+    project: 'pilot', task: 'Synthetic task with a file', requestId: 'standing-attachment',
+    attachments: [{ name: 'notes.txt', mimeType: 'text/plain', data: bytes.toString('base64') }],
+  });
+  await tick();
+  const launch = fake.launches[0]!;
+  assert.match(String(launch.message), /^<operator-standing-instructions>\nSynthetic shared rule\.\n<\/operator-standing-instructions>\n\nSynthetic task with a file/);
+  const sent = launch.attachments as { id: string; type: string }[];
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]?.type, 'file');
+  assert.deepEqual(fake.uploads.get(sent[0]!.id)?.bytes, bytes);
+  const replay = await agent.call<{ created: boolean }>('work_start', {
+    project: 'pilot', task: 'Synthetic task with a file', requestId: 'standing-attachment',
+    attachments: [{ name: 'notes.txt', mimeType: 'text/plain', data: bytes.toString('base64') }],
+  });
+  assert.equal(replay.created, false);
+  assert.equal(fake.launches.length, 1);
+});

@@ -761,3 +761,32 @@ describe('discovery: review fixes', () => {
     assert.deepEqual(placed.job.model, { source: 'explicit', selection: { instanceId: 'synthetic-provider', model: 'synthetic-model', options: { 'synthetic-effort': 'high' } } });
   });
 });
+
+
+test('compact capabilities keep discovery and explicit launches working with a malformed sibling option', async (t) => {
+  const { mini: host, gw, agent, tick } = await startFleet(t);
+  host.providers[0]!.models[0]!.options = [
+    { id: 'synthetic-effort', values: ['low', 'high'], default: 'low' },
+    { id: 'synthetic-fast', values: [false, true], default: false },
+    { id: 'synthetic-broken' },
+  ];
+  const page = await agent.call<{ hosts: HostPage<ModelEntry>[] }>('fleet_models', { host: 'mini', refresh: true });
+  assert.equal(page.hosts[0]!.available, true);
+  assert.deepEqual(page.hosts[0]!.models![0]!.options.map((option) => option.id), ['synthetic-effort', 'synthetic-fast']);
+  const selection = { instanceId: 'synthetic-provider', model: 'synthetic-model', options: { 'synthetic-effort': 'high', 'synthetic-fast': false } };
+  await agent.call('work_start', { target: { host: 'mini', projectId: 'project-2' }, task: 'Synthetic task', requestId: requestId(), modelSelection: selection });
+  await tick();
+  assert.deepEqual(host.launches[0]!.modelSelection, selection);
+  for (const modelSelection of [
+    { ...selection, model: 'missing-model' },
+    { ...selection, options: { 'synthetic-effort': 'missing-choice' } },
+    { ...selection, options: { 'synthetic-fast': 'false' } },
+    { ...selection, options: { 'synthetic-broken': true } },
+  ]) {
+    assert.equal((await agent.callError('work_start', {
+      target: { host: 'mini', projectId: 'project-2' }, task: 'Synthetic task', requestId: requestId(), modelSelection,
+    })).code, 'invalid_argument');
+  }
+  assert.ok(gw.logs.some((line) => JSON.parse(line).event === 'catalog.options_skipped'));
+  assertNotLogged(gw, ['synthetic-broken', 'synthetic-effort', 'missing-choice']);
+});

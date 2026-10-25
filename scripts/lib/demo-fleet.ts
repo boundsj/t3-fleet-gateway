@@ -226,6 +226,7 @@ export async function startDemoFleet(options: DemoOptions): Promise<DemoFleet> {
   const logger = options.logger ?? silentLogger;
   // Client labels are set once the clients exist (ids are random); the config object is the gateway's own.
   const gateway = await startGateway({
+    reachability: { autoStart: false },
     config, dataDir, logger, clock, dashboardDemoLabel: options.badge === undefined ? 'Synthetic demo' : options.badge ?? undefined,
     port: 0, dashboardPort: options.dashboardPort ?? 0, jobEngine: { autoStart: false },
     webhookManagement: { loopbackOnly: true, ...(options.webhookReceiver ? { allowLoopbackHttp: true, attemptTimeoutMs: 1000 } : {}) },
