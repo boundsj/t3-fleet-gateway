@@ -113,12 +113,19 @@ function causeCode(error: unknown): string | undefined {
  * replaced. A request timeout or a 5xx answer is a failure of that one request: the session stays,
  * and so do the other calls in flight on it.
  */
-function sessionFailed(error: unknown, sent: boolean): boolean {
-  if (!sent) return true;
+function sessionFailed(error: unknown, connected: boolean): boolean {
+  if (!connected) return true;
   if (error instanceof SdkError && error.code === SdkErrorCode.RequestTimeout) return false;
   const status = httpStatus(error);
   return status === undefined || status < 500;
 }
+
+const PENDING_ACTIONS: Readonly<Record<string, 'list' | 'read' | 'respond'>> = {
+  t3_pending_request_list: 'list', t3_pending_request_read: 'read', t3_pending_request_respond: 'respond',
+};
+const pendingToolsPageSchema = z.object({
+  tools: z.array(z.object({ name: z.string() })).max(1024), nextCursor: z.string().optional(),
+});
 
 interface Connection {
   client: Promise<Client>;
@@ -127,6 +134,7 @@ interface Connection {
   token: string;
   /** Increases with every new connection, so a late failure on an old one cannot close a newer one. */
   generation: number;
+  combinedPendingRequests?: Promise<boolean>;
 }
 
 /**
@@ -184,18 +192,26 @@ export class T3Client {
     const timeout = options.timeoutMs ?? this.#timeoutMs;
     for (let attempt = 0; ; attempt++) {
       let sent = false;
+      let connected = false;
       let connection: Connection | undefined;
       try {
         this.#signal?.throwIfAborted();
         connection = this.#connect(timeout);
         const client = await connection.client;
+        connected = true;
+        // Resolve before sending, on this exact session (including a reconnect after HTTP 404).
+        // A failed response never switches tool names: answers have no downstream retry key.
+        const action = PENDING_ACTIONS[name];
+        const combined = action !== undefined && await this.#usesCombinedPendingRequests(connection, client, timeout);
+        const toolName = combined ? 't3_pending_request' : name;
+        const input = combined ? { ...args, action } : args;
         sent = true;
-        const result = await client.callTool({ name, arguments: args }, { timeout, signal: this.#signal });
-        return parseToolResult(name, result, schema);
+        const result = await client.callTool({ name: toolName, arguments: input }, { timeout, signal: this.#signal });
+        return parseToolResult(toolName, result, schema);
       } catch (error) {
         if (this.#signal?.aborted) throw this.#signal.reason;
         if (error instanceof GatewayError) throw error;
-        if (connection && sessionFailed(error, sent)) await this.#reset(connection.generation);
+        if (connection && sessionFailed(error, connected)) await this.#reset(connection.generation);
         const translated = this.#translate(error, sent);
         const retryable =
           httpStatus(error) === 404 || (options.readOnly === true && (translated.code === 'host_unreachable' || translated.code === 't3_response_lost'));
@@ -203,6 +219,43 @@ export class T3Client {
         throw translated;
       }
     }
+  }
+
+  /** Only tool names are inspected; advertised input/output schemas never control response decoding. */
+  async #usesCombinedPendingRequests(connection: Connection, client: Client, timeout: number): Promise<boolean> {
+    if (!connection.combinedPendingRequests) {
+      const discovery = (async () => {
+        const names = new Set<string>();
+        const cursors = new Set<string>();
+        let cursor: string | undefined;
+        for (let page = 0; page < 32; page++) {
+          // request(), rather than listTools(), keeps advertised output schemas out of the SDK's validator cache.
+          const result = await client.request({ method: 'tools/list', params: cursor === undefined ? {} : { cursor } },
+            pendingToolsPageSchema, { timeout, signal: this.#signal });
+          for (const tool of result.tools) {
+            if (names.has(tool.name) || names.size >= 4096) {
+              throw new GatewayError('t3_invalid_response', 'T3 tool discovery returned duplicate tools or exceeded its bound.');
+            }
+            names.add(tool.name);
+          }
+          if (result.nextCursor === undefined) {
+            if (names.has('t3_pending_request')) return true;
+            if (Object.keys(PENDING_ACTIONS).every((name) => names.has(name))) return false;
+            throw new GatewayError('t3_invalid_response', 'T3 does not advertise a complete pending-request tool contract.');
+          }
+          if (cursors.has(result.nextCursor)) break;
+          cursors.add(result.nextCursor);
+          cursor = result.nextCursor;
+        }
+        throw new GatewayError('t3_invalid_response', 'T3 tool discovery did not finish within its bound.');
+      })();
+      connection.combinedPendingRequests = discovery;
+      // Share concurrent discovery, but never cache a failed/incomplete catalog.
+      void discovery.catch(() => {
+        if (connection.combinedPendingRequests === discovery) connection.combinedPendingRequests = undefined;
+      });
+    }
+    return connection.combinedPendingRequests;
   }
 
   /** Optional on older T3 builds. The watcher isolates all errors from this read. */
@@ -351,7 +404,7 @@ export class T3Client {
     return this.callTool('t3_thread_interrupt', withoutNulls(input), interruptResultSchema);
   }
 
-  /** Ids of the thread's pending user questions. T3 does not include permission approvals here. */
+  /** Ids of pending user questions (no approvals). Session discovery prefers the combined tool, else the legacy trio. */
   async listPendingRequests(threadId: string): Promise<string[]> {
     return (await this.callTool('t3_pending_request_list', { threadId }, pendingRequestListSchema, { readOnly: true })).requestIds;
   }

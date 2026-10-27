@@ -10,7 +10,8 @@ const TOOL = 't3_thread_read';
 const contract = (inputSchema: Record<string, unknown>, outputSchema?: Record<string, unknown>) => snapshotContract([
   { name: TOOL, inputSchema, ...(outputSchema === undefined ? {} : { outputSchema }) },
 ]);
-const permissiveTools = (): AdvertisedTool[] => REQUIRED_TOOLS.map((name) => ({ name, inputSchema: { type: 'object' } }));
+const permissiveTools = (): AdvertisedTool[] => REQUIRED_TOOLS.filter((name) => name !== 't3_pending_request')
+  .map((name) => ({ name, inputSchema: { type: 'object' } }));
 function inputCheck(name: string, inputSchema: Record<string, unknown>) {
   const tools = permissiveTools();
   tools.find((tool) => tool.name === name)!.inputSchema = inputSchema;
@@ -117,8 +118,8 @@ describe('T3 contract snapshots', () => {
 });
 
 describe('T3 advertised input checks', () => {
-  test('accepts the fake T3 published schemas without invoking any tool', async (t) => {
-    const fake = await startFakeT3();
+  for (const pendingRequestTools of ['legacy', 'combined', 'both'] as const) test(`accepts published schemas without invoking any tool (${pendingRequestTools})`, async (t) => {
+    const fake = await startFakeT3({ pendingRequestTools });
     const token = 'synthetic-discovery-token';
     fake.validTokens.add(token);
     const client = new Client({ name: 'compatibility-test', version: '0.0.0' });
@@ -126,9 +127,28 @@ describe('T3 advertised input checks', () => {
     await client.connect(new StreamableHTTPClientTransport(new URL('/mcp', fake.url), { authProvider: { token: async () => token } }));
     const tools = (await client.listTools()).tools;
     const checks = checkInputs(tools);
-    assert.equal(checks.length, 12);
+    assert.equal(checks.length, pendingRequestTools === 'legacy' ? 12 : 10);
     assert.ok(checks.every((check) => check.status === 'pass'), JSON.stringify(checks));
     assert.deepEqual(fake.calls, [], 'discovery and schema validation must not call mutation or read tools');
+  });
+
+  test('accepts compact optional schemas and validates all combined actions', () => {
+    const tools = permissiveTools().filter((tool) => !tool.name.startsWith('t3_pending_request_'));
+    const combined = { name: 't3_pending_request', inputSchema: {
+      type: 'object', required: ['action'], properties: {
+        action: { enum: ['list', 'read', 'respond'] }, threadId: { type: 'string' }, requestId: { type: 'string' }, answers: { type: 'object' },
+      },
+    } };
+    tools.push(combined);
+    assert.ok(checkInputs(tools).every((check) => check.status === 'pass'));
+    assert.ok(snapshotContract(tools).t3_pending_request);
+    assert.ok(!snapshotContract(tools).t3_pending_request_list);
+    combined.inputSchema.properties.action.enum = ['list', 'read'];
+    assert.deepEqual(checkInputs(tools).filter((check) => check.status !== 'pass'), [
+      { tool: 't3_pending_request', status: 'fail', code: 'sample_input_rejected' },
+    ]);
+    tools.pop();
+    assert.equal(checkInputs(tools).filter((check) => check.code === 'required_tool_missing').length, 3);
   });
 
   test('missing required tools fail, while extra tools are ignored', () => {

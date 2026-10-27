@@ -17,6 +17,8 @@ T3 Fleet Gateway connects Grok Bot, Notion and other MCP clients to your T3 serv
 
 You need an always-on machine with Node.js 24.22.1+ on 24.x or 26.12.1+ (older releases do not block the [compromised eMudhra intermediates](docs/security.md#compromised-emudhra-intermediates)), a running T3 Code server and its `t3` CLI. A coding agent on that machine can do the setup. The gateway runs from a Git checkout; it is not published to npm.
 
+Pending questions work with T3 0.1.2's separate tools and T3 0.1.3's combined `t3_pending_request` tool (including nightlies from `0.1.3-nightly.20261027.3748`). The gateway detects the tool contract per host MCP session; see [compatibility details](docs/design.md).
+
 ### 1. Ask your coding agent to set up the gateway
 
 ```text

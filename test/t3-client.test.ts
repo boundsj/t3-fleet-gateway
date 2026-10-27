@@ -216,8 +216,8 @@ describe('T3 thread tools', () => {
     assert.equal((await client.interruptThread({ threadId: launched.threadId, clientRequestId: 'c2' })).status, 'no_active_run');
   });
 
-  test('lists, reads and answers pending questions', async (t) => {
-    const { fake, client } = await setup(t);
+  for (const pendingRequestTools of ['legacy', 'combined', 'both'] as const) test(`lists, reads and answers pending questions (${pendingRequestTools})`, async (t) => {
+    const { fake, client } = await setup(t, { pendingRequestTools });
     const { threadId } = await client.launchThread(LAUNCH);
     const requestId = fake.askQuestion(threadId, [{ id: 'q1', header: 'Choice', question: 'Which one?', options: [{ label: 'A', description: 'first' }] }]);
     assert.deepEqual(await client.listPendingRequests(threadId), [requestId]);
@@ -225,7 +225,80 @@ describe('T3 thread tools', () => {
     assert.equal(typeof (await client.respondToPendingRequest(threadId, requestId, { q1: 'A' })), 'number');
     assert.deepEqual(await client.listPendingRequests(threadId), []);
     await assert.rejects(client.respondToPendingRequest(threadId, requestId, { q1: 'A' }), { t3Code: 'not_found' });
+    assert.equal(fake.toolsListCalls, 1, 'discovery is cached for all actions on this session');
+    assert.deepEqual(fake.calls.filter((name) => name.startsWith('t3_pending_request')), pendingRequestTools === 'legacy'
+      ? ['t3_pending_request_list', 't3_pending_request_read', 't3_pending_request_respond', 't3_pending_request_list', 't3_pending_request_respond']
+      : Array(5).fill('t3_pending_request'));
   });
+
+  test('shares paged discovery, ignores advertised output validators, and rediscovers after reconnect', async (t) => {
+    const { fake, client } = await setup(t, { pendingRequestTools: 'both' });
+    const { threadId } = await client.launchThread(LAUNCH);
+    const requestId = fake.askQuestion(threadId, [{ id: 'q', header: 'Choice', question: 'Pick?', options: [] }]);
+    fake.toolsListPages.set('', { tools: [{ name: 'unrelated' }], nextCursor: 'next' });
+    fake.toolsListPages.set('next', { tools: [{ name: 't3_pending_request',
+      inputSchema: { type: 'object' }, outputSchema: { type: 'object', required: ['impossible'] } }] });
+    await Promise.all([client.listPendingRequests(threadId), client.readPendingRequest(threadId, requestId)]);
+    assert.equal(fake.toolsListCalls, 2, 'concurrent actions share complete discovery');
+    assert.equal(fake.calls.filter((name) => name === 't3_pending_request').length, 2);
+    fake.pendingRequestTools = 'legacy';
+    fake.toolsListPages.clear();
+    await fake.forgetSessions();
+    // This call hits the forgotten session first; the 404 retry must select from the new session's catalog.
+    assert.equal(typeof await client.respondToPendingRequest(threadId, requestId, {}), 'number');
+    assert.equal(fake.toolsListCalls, 3);
+    assert.equal(fake.calls.at(-1), 't3_pending_request_respond');
+    fake.pendingRequestTools = 'combined';
+    await fake.forgetSessions();
+    assert.deepEqual(await client.listPendingRequests(threadId), []);
+    assert.equal(fake.calls.at(-1), 't3_pending_request');
+  });
+
+  test('incomplete, duplicate and nonconverging discovery fails closed before responding and is not cached', async (t) => {
+    const { fake, client } = await setup(t, { pendingRequestTools: 'both' });
+    const { threadId } = await client.launchThread(LAUNCH);
+    const requestId = fake.askQuestion(threadId, [{ id: 'q', header: 'Choice', question: 'Pick?', options: [] }]);
+    for (const page of [
+      { tools: [{ name: 't3_pending_request_list' }] },
+      { tools: [{ name: 't3_pending_request' }, { name: 't3_pending_request' }] },
+      { tools: [], nextCursor: 'loop' },
+    ]) {
+      fake.toolsListPages.set('', page);
+      fake.toolsListPages.set('loop', { tools: [], nextCursor: 'loop' });
+      await assert.rejects(client.respondToPendingRequest(threadId, requestId, {}), { code: 't3_invalid_response' });
+      assert.deepEqual(fake.responses, []);
+    }
+    fake.toolsListPages.clear();
+    await client.respondToPendingRequest(threadId, requestId, {});
+    assert.equal(fake.responses.length, 1);
+  });
+
+  test('a stale advertised name cannot cause a respond fallback', async (t) => {
+    const { fake, client } = await setup(t);
+    const { threadId } = await client.launchThread(LAUNCH);
+    const requestId = fake.askQuestion(threadId, [{ id: 'q', header: 'Choice', question: 'Pick?', options: [] }]);
+    fake.toolsListPages.set('', { tools: [{ name: 't3_pending_request' }] });
+    await assert.rejects(client.respondToPendingRequest(threadId, requestId, {}));
+    assert.deepEqual(fake.responses, []);
+    assert.ok(fake.threads.get(threadId)!.questions.has(requestId));
+    assert.ok(!fake.calls.includes('t3_pending_request_respond'), 'unknown-tool errors do not switch a mutation to another name');
+  });
+
+  for (const pendingRequestTools of ['legacy', 'both'] as const) {
+    const tool = pendingRequestTools === 'legacy' ? 't3_pending_request_respond' : 't3_pending_request';
+    for (const failure of ['lost', 'timeout', 'tool_error'] as const) test(`never resends an answer after ${failure} (${pendingRequestTools})`, async (t) => {
+      const { fake, client } = await setup(t, { pendingRequestTools });
+      const { threadId } = await client.launchThread(LAUNCH);
+      const requestId = fake.askQuestion(threadId, [{ id: 'q', header: 'Choice', question: 'Pick?', options: [] }]);
+      if (failure === 'lost') fake.dropResponseOnce.add(tool);
+      if (failure === 'timeout') fake.holdResponses.add(tool);
+      if (failure === 'tool_error') fake.failuresAfterEffect.set(tool, { code: 'not_found', message: 'Synthetic late failure.' });
+      await assert.rejects(client.respondToPendingRequest(threadId, requestId, {}), failure === 'tool_error'
+        ? { t3Code: 'not_found' } : transportFailure(failure === 'timeout' ? 't3_timeout' : 't3_response_lost', 'unknown'));
+      assert.equal(fake.responses.length, 1, 'the first call took effect');
+      assert.deepEqual(fake.calls.filter((name) => name.startsWith('t3_pending_request')), [tool], 'no resend on either tool name');
+    });
+  }
 
   test('T3 refuses thread listing without a project, like a client outside a T3 thread', async (t) => {
     const { client } = await setup(t);

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
+import { startFakeT3 } from './helpers/fakeT3.ts';
 import { HOUR, MINUTE } from '../src/time.ts';
 import { assertNotLogged, connectAgent, jobState, startJob, startJobHarness, type Agent } from './helpers/jobs.ts';
 
@@ -103,8 +104,10 @@ describe('work_respond', () => {
     assert.deepEqual(fake.responses, [{ threadId, requestId, answers: { scope: ['unit', 'Integration'] } }]);
   });
 
-  test('answers a pending question on the job, which then runs again', async (t) => {
-    const { fake, agent, tick } = await startJobHarness(t);
+  for (const pendingRequestTools of ['legacy', 'combined'] as const) test(`answers a pending question on the job, which then runs again (${pendingRequestTools})`, async (t) => {
+    const fake = await startFakeT3({ pendingRequestTools });
+    t.after(() => fake.close());
+    const { agent, tick } = await startJobHarness(t, { fake });
     const job = await startJob(agent);
     const other = await startJob(agent);
     await tick();

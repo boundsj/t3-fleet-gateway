@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { request } from 'node:http';
 import { describe, test, type TestContext } from 'node:test';
 import { parseArgs } from 'node:util';
+import { runDoctor } from '../src/cli/doctor.ts';
 import { parseConfig } from '../src/config.ts';
 import { DashboardChecks } from '../src/dashboard/checks.ts';
 import { buildSnapshot, LIMITS, threadLink, type DashboardSnapshot } from '../src/dashboard/snapshot.ts';
@@ -257,6 +258,22 @@ describe('dashboard: exposure', () => {
 });
 
 describe('dashboard: hosts', () => {
+  for (const pendingRequestTools of ['legacy', 'combined'] as const) test(`doctor and dashboard checks accept pending-request contract (${pendingRequestTools})`, async (t) => {
+    const fake = await startFakeT3({ pendingRequestTools });
+    t.after(() => fake.close());
+    const h = await startJobHarness(t, { fake, dashboard: { enabled: true } });
+    const job = await startJob(h.agent);
+    await h.tick();
+    fake.askQuestion(fake.threadForJob(job.jobId).threadId, [{ id: 'q', header: 'Choice', question: 'Pick?', options: [] }]);
+    await h.tick();
+    const checked = await runChecks(dashboardPort(h.gw));
+    assert.equal(checked.run.results.find((item) => item.id === 'host:main:t3')?.code, 'reachable');
+    assert.equal(checked.snapshot.hosts[0]?.status.label, 'Answering');
+    const diagnosis = await runDoctor(h.gw.services, h.gw.dataDir);
+    assert.deepEqual(diagnosis.filter((item) => item.level === 'fail'), []);
+    assert.ok(!h.gw.logs.some((line) => line.includes('t3_invalid_response')));
+  });
+
   test('a page load never contacts T3; checks do, read-only, and report reachability, refusal and outage honestly', async (t) => {
     const h = await harness(t);
     const before = h.fake.calls.length;
