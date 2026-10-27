@@ -100,6 +100,10 @@ export async function probeHost(options: {
       result.checks.push(...checkInputs(tools));
     }
 
+    const combinedPending = tools?.some((tool) => tool.name === 't3_pending_request');
+    const pendingListTool = combinedPending ? 't3_pending_request' : 't3_pending_request_list';
+    const pendingReadTool = combinedPending ? 't3_pending_request' : 't3_pending_request_read';
+
     // Separate client: smoke uses exactly the gateway's parsers, unaffected by discovery's output-schema cache.
     const environment = await step('t3_environment_read', 'environment_read', () => smoke.environmentRead());
     result.serverVersion = environment?.serverVersion ?? null;
@@ -131,8 +135,8 @@ export async function probeHost(options: {
     }
     if (!threadId) {
       skip('t3_thread_read', 'no_thread_sample');
-      skip('t3_pending_request_list', 'no_thread_sample');
-      skip('t3_pending_request_read', 'no_thread_sample');
+      skip(pendingListTool, 'no_thread_sample');
+      skip(pendingReadTool, 'no_thread_sample');
       return result;
     }
     for (const view of ['messages', 'activity'] as const) {
@@ -140,11 +144,11 @@ export async function probeHost(options: {
         threadId, view, limit: 1, runLimit: 1, maxCharsPerItem: 1,
       }));
     }
-    const requests = await step('t3_pending_request_list', 'pending_requests_read', () => smoke.listPendingRequests(threadId));
+    const requests = await step(pendingListTool, 'pending_requests_read', () => smoke.listPendingRequests(threadId));
     if (requests?.[0]) {
-      await step('t3_pending_request_read', 'pending_request_read', () => smoke.readPendingRequest(threadId, requests[0]!));
+      await step(pendingReadTool, 'pending_request_read', () => smoke.readPendingRequest(threadId, requests[0]!));
     } else {
-      skip('t3_pending_request_read', requests ? 'no_pending_request_sample' : 'pending_request_list_failed');
+      skip(pendingReadTool, requests ? 'no_pending_request_sample' : 'pending_request_list_failed');
     }
     return result;
   } catch (error) {

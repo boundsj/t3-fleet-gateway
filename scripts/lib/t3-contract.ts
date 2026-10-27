@@ -11,8 +11,14 @@ export type AdvertisedTool = {
 export const REQUIRED_TOOLS = [
   't3_environment_read', 't3_project_list', 'orchestrator_capabilities', 't3_thread_launch', 't3_thread_read', 't3_thread_list',
   't3_thread_search', 't3_thread_send', 't3_thread_interrupt', 't3_pending_request_list',
-  't3_pending_request_read', 't3_pending_request_respond',
+  't3_pending_request_read', 't3_pending_request_respond', 't3_pending_request',
 ] as const;
+
+/** Prefer the combined tool, otherwise require every legacy action. */
+function requiredTools(indexed: ReadonlyMap<string, AdvertisedTool>) {
+  return REQUIRED_TOOLS.filter((name) => indexed.has('t3_pending_request')
+    ? !name.startsWith('t3_pending_request_') : name !== 't3_pending_request');
+}
 
 export type Contract = Record<string, { inputSchema: Record<string, unknown>; outputSchema?: Record<string, unknown> }>;
 export type ContractChange = { tool: string; kind: 'added' | 'removed' | 'changed'; paths: string[] };
@@ -150,7 +156,7 @@ function indexTools(tools: readonly AdvertisedTool[]): Map<string, AdvertisedToo
 /** Only the gateway's dependencies belong in the baseline; unrelated new T3 tools are harmless. */
 export function snapshotContract(tools: readonly AdvertisedTool[]): Contract {
   const indexed = indexTools(tools);
-  return Object.fromEntries([...REQUIRED_TOOLS].sort().flatMap((name) => {
+  return Object.fromEntries([...requiredTools(indexed)].sort().flatMap((name) => {
     const tool = indexed.get(name);
     if (!tool) return [];
     return [[name, {
@@ -229,6 +235,11 @@ const INPUT_SAMPLES: Record<(typeof REQUIRED_TOOLS)[number], Record<string, unkn
     { threadId: THREAD_ID, clientRequestId: CLIENT_REQUEST_ID },
     { threadId: THREAD_ID, clientRequestId: CLIENT_REQUEST_ID, reason: 'Synthetic sample; never sent.' },
   ],
+  t3_pending_request: [
+    { action: 'list', threadId: THREAD_ID },
+    { action: 'read', threadId: THREAD_ID, requestId: REQUEST_ID },
+    { action: 'respond', threadId: THREAD_ID, requestId: REQUEST_ID, answers: { synthetic_question: { answers: ['blue'] } } },
+  ],
   t3_pending_request_list: [{ threadId: THREAD_ID }],
   t3_pending_request_read: [{ threadId: THREAD_ID, requestId: REQUEST_ID }],
   t3_pending_request_respond: [{ threadId: THREAD_ID, requestId: REQUEST_ID, answers: { synthetic_question: { answers: ['blue'] } } }],
@@ -264,7 +275,7 @@ function hasUnsupportedSchema(schema: unknown): boolean {
 
 export function checkInputs(tools: readonly AdvertisedTool[]): InputCheck[] {
   const indexed = indexTools(tools);
-  return REQUIRED_TOOLS.map((name): InputCheck => {
+  return requiredTools(indexed).map((name): InputCheck => {
     const tool = indexed.get(name);
     if (!tool) return { tool: name, status: 'fail', code: 'required_tool_missing' };
     try {

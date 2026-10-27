@@ -223,6 +223,7 @@ export const interruptResultSchema = z.looseObject({
 });
 export type InterruptResult = z.infer<typeof interruptResultSchema>;
 
+/** Both legacy pending-request tools and t3_pending_request actions return these same payloads. */
 export const pendingRequestListSchema = z.looseObject({ requestIds: z.array(z.string()) });
 
 export const pendingRequestSchema = z.looseObject({

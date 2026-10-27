@@ -40,8 +40,8 @@ describe('complete MCP discovery', () => {
 const SECRET_TOKEN = 'synthetic-token-never-in-report';
 const PRIVATE_TEXT = 'PRIVATE_WORKER_QUESTION_AND_RESPONSE';
 
-async function setup(t: TestContext, withThread = true) {
-  const fake = await startFakeT3();
+async function setup(t: TestContext, withThread = true, pendingRequestTools: 'legacy' | 'combined' = 'legacy') {
+  const fake = await startFakeT3({ pendingRequestTools });
   t.after(() => fake.close());
   fake.validTokens.add(SECRET_TOKEN);
   const dir = tempDir(t);
@@ -138,14 +138,15 @@ describe('on-demand developer compatibility tool', () => {
     assert.deepEqual((await f.run()).report.hosts[0]!.changes, []);
   });
 
-  test('reads a pending question without answering or storing its text', async (t) => {
-    const f = await setup(t);
+  for (const pendingRequestTools of ['legacy', 'combined'] as const) test(`reads a pending question without answering or storing its text (${pendingRequestTools})`, async (t) => {
+    const f = await setup(t, true, pendingRequestTools);
     const requestId = f.fake.askQuestion(f.threadId, [{
       id: 'q', header: PRIVATE_TEXT, question: PRIVATE_TEXT, options: [{ label: PRIVATE_TEXT, description: PRIVATE_TEXT }],
     }]);
     const result = await f.run(['--accept']);
     assert.equal(result.exitCode, 0);
-    assert.ok(result.report.hosts[0]!.checks.some((check) => check.tool === 't3_pending_request_read' && check.code === 'pending_request_read'));
+    const readTool = pendingRequestTools === 'combined' ? 't3_pending_request' : 't3_pending_request_read';
+    assert.ok(result.report.hosts[0]!.checks.some((check) => check.tool === readTool && check.code === 'pending_request_read'));
     assert.ok(f.fake.threads.get(f.threadId)!.questions.has(requestId));
     assert.equal(f.fake.responses.length, 0);
     assert.ok(!readFileSync(f.statePath, 'utf8').includes(PRIVATE_TEXT));

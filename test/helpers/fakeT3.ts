@@ -9,6 +9,7 @@ import { sendWebResponse, toWebRequest } from '../../src/http/web.ts';
 
 export interface FakeT3Options {
   serverVersion?: string;
+  pendingRequestTools?: 'legacy' | 'combined' | 'both';
   /** Lifetime of issued credentials, seconds. T3 uses 30 days. */
   tokenLifetimeSeconds?: number;
   projectCount?: number;
@@ -229,6 +230,10 @@ interface Session {
  */
 export class FakeT3 {
   readonly serverVersion: string;
+  pendingRequestTools: 'legacy' | 'combined' | 'both';
+  toolsListCalls = 0;
+  /** Synthetic tools/list pages keyed by the incoming cursor (empty string for the first page). */
+  readonly toolsListPages = new Map<string, Record<string, unknown>>();
   tokenLifetimeSeconds: number;
   /** `workspaceRoot` is the folder T3 reports for the project; the workspace probe reads it (src/jobs/workspace.ts). */
   readonly projects: { id: string; title: string; deletedAt: string | null; defaultModelSelection: Record<string, unknown> | null; workspaceRoot?: string }[];
@@ -306,6 +311,7 @@ export class FakeT3 {
 
   constructor(options: FakeT3Options = {}) {
     this.serverVersion = options.serverVersion ?? '0.0.0-test';
+    this.pendingRequestTools = options.pendingRequestTools ?? 'legacy';
     this.tokenLifetimeSeconds = options.tokenLifetimeSeconds ?? 30 * 86400;
     this.projects = Array.from({ length: options.projectCount ?? 3 }, (_, i) => ({
       id: `project-${i + 1}`,
@@ -640,6 +646,17 @@ export class FakeT3 {
       res.writeHead(401, { 'www-authenticate': `Bearer resource_metadata="${this.url}/.well-known/oauth-protected-resource"` }).end();
       return;
     }
+    if (body) {
+      const request = JSON.parse(body.toString());
+      if (request.method === 'tools/list') {
+        this.toolsListCalls++;
+        const page = this.toolsListPages.get(request.params?.cursor ?? '');
+        if (page) {
+          res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: page }));
+          return;
+        }
+      }
+    }
     const injected = toolName(body);
     const status = injected === undefined ? undefined : this.statusOnce.get(injected);
     if (injected !== undefined && status !== undefined) {
@@ -832,21 +849,40 @@ export class FakeT3 {
       if (key) this.#interruptResults.set(key, result);
       return result;
     });
-    tool('t3_pending_request_list', pendingListInput, (input) => ({
+    const listPending = (input: z.output<typeof pendingListInput>) => ({
       requestIds: [...this.#thread(this.#target(input.threadId, 'threadId')).questions.keys()],
-    }));
-    tool('t3_pending_request_read', pendingReadInput, (input) => {
+    });
+    const readPending = (input: z.output<typeof pendingReadInput>) => {
       const questions = this.#thread(this.#target(input.threadId, 'threadId')).questions.get(input.requestId);
       if (questions === undefined) throw new FakeFailure('not_found', 'No such pending request.');
       return { requestId: input.requestId, questions };
-    });
-    tool('t3_pending_request_respond', pendingRespondInput, (input) => {
+    };
+    const respondPending = (input: z.output<typeof pendingRespondInput>) => {
       const thread = this.#thread(this.#target(input.threadId, 'threadId'));
       if (!thread.questions.delete(input.requestId)) throw new FakeFailure('not_found', 'No such pending request.');
       this.responses.push({ threadId: thread.threadId, requestId: input.requestId, answers: input.answers });
       if (thread.questions.size === 0 && thread.approvalsPending === 0) this.#resume(thread);
       return { sequence: ++this.#sequence };
-    });
+    };
+    if (this.pendingRequestTools !== 'combined') {
+      tool('t3_pending_request_list', pendingListInput, listPending);
+      tool('t3_pending_request_read', pendingReadInput, readPending);
+      tool('t3_pending_request_respond', pendingRespondInput, respondPending);
+    }
+    if (this.pendingRequestTools !== 'legacy') {
+      tool('t3_pending_request', z.strictObject({
+        action: z.enum(['list', 'read', 'respond']), threadId: nullable(z.string()),
+        requestId: nullable(z.string()), answers: nullable(z.record(z.string(), z.unknown())),
+      }), (input) => {
+        switch (input.action) {
+          case 'list': return listPending(pendingListInput.parse({ threadId: input.threadId }));
+          case 'read': return readPending(pendingReadInput.parse({ threadId: input.threadId, requestId: input.requestId }));
+          case 'respond': return respondPending(pendingRespondInput.parse({
+            threadId: input.threadId, requestId: input.requestId, answers: input.answers,
+          }));
+        }
+      });
+    }
     return server;
   }
 
