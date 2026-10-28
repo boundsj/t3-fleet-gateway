@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Preserve environment-scoped T3 v2 thread links from autolink and bare responses through launch, reconciliation, adoption, job views, webhooks and the dashboard. Legacy v1 links still work; unusable supplied links now fall back to a canonical v1 link instead of losing the Open link. Both v2 segments are bounded and validated before use.
+
 - Malformed HTTP request targets now return `400` with `invalid_request` instead of causing an uncaught URL parsing error and an unauthenticated restart loop. The request log records only `(invalid)` and status 400, without the raw target. Valid request routing is unchanged.
 
 ## 0.2.1 (2026-10-22)

@@ -1,4 +1,4 @@
-import { threadLink } from '../threadId.js';
+import { isThreadLink, threadLink } from '../threadId.js';
 import { configuredModel, isLoopbackHostname, mcpResource, type GatewayConfig, type HostConfig } from '../config.ts';
 import { SCHEMA_VERSION, schemaVersion, type Database } from '../db/database.ts';
 import { isCallSignal, SIGNAL_LABELS, type HostSignal } from '../hosts/signals.ts';
@@ -404,7 +404,7 @@ function jobView(job: Job, clientLabels: Map<string, string>, settlementAcknowle
     delegated: { following: job.delegatedWork.length, untracked: job.delegatedUntracked, endedAt: iso(job.delegatedEndedAt) },
     hostUnreachableSince: iso(job.hostUnreachableSince),
     error: errorCode ? { code: errorCode, detail: explainJobError(errorCode) } : null,
-    link: threadLink(job.threadId),
+    link: isThreadLink(job.threadLink) ? job.threadLink : threadLink(job.threadId),
   };
 }
 

@@ -5,7 +5,7 @@ import { isThreadLink } from './threadId.js';
 // Security rules for this file, checked by test/dashboard-ui.test.ts:
 // - The DOM is built with createElement, createTextNode and setAttribute only. No innerHTML, outerHTML,
 //   insertAdjacentHTML, document.write, eval or Function: every value from the server is text, never markup.
-// - Links are hash routes inside the dashboard or T3 thread links of the documented form t3-thread://v1/<id>.
+// - Links are hash routes inside the dashboard or validated T3 v1/v2 thread links.
 // - No browser storage or cookies. Pasted webhook credentials live only in the form and its outgoing request,
 //   are cleared before awaiting a submission, and are never received back from the server.
 
