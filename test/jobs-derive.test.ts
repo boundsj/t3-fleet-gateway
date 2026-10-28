@@ -84,7 +84,7 @@ function read(
   return {
     thread: {
       threadId: 'thread-1',
-      link: '[t [job:job1]](t3-thread://v1/env-synthetic/thread-1)',
+      link: '[t [job:job1]](t3-thread://v1/thread-1)',
       projectId: 'p',
       title: 't [job:job1]',
       status: thread.status,
@@ -272,7 +272,7 @@ describe('thread links', () => {
   });
 
   test('takes the URL out of the markdown link T3 returns', () => {
-    assert.equal(threadLinkTarget('[Fix (the) parser [job:abc]](t3-thread://v1/env-synthetic/thread-1)'), 't3-thread://v1/env-synthetic/thread-1');
+    assert.equal(threadLinkTarget('[Fix (the) parser [job:abc]](t3-thread://v1/thread-1)'), 't3-thread://v1/thread-1');
     assert.equal(threadLinkTarget('https://t3.example.com/threads/thread-1'), 'https://t3.example.com/threads/thread-1');
     for (const unusable of ['', 'synthetic', '[x](javascript:alert(1))', '[x](not a url)', `[x](t3-thread://v1/${'a'.repeat(3000)})`]) {
       assert.equal(threadLinkTarget(unusable), null, unusable);
@@ -280,8 +280,8 @@ describe('thread links', () => {
   });
 
   test('the first read records the link; later reads leave it', () => {
-    assert.equal(observe(job(), read({ status: 'running', activeRunId: 'run-1' }), []).link, 't3-thread://v1/env-synthetic/thread-1');
-    assert.equal(observe(job({ threadLink: 't3-thread://v1/env-synthetic/thread-1' }), read({ status: 'running', activeRunId: 'run-1' }), []).link, undefined);
+    assert.equal(observe(job(), read({ status: 'running', activeRunId: 'run-1' }), []).link, 't3-thread://v1/thread-1');
+    assert.equal(observe(job({ threadLink: 't3-thread://v1/thread-1' }), read({ status: 'running', activeRunId: 'run-1' }), []).link, undefined);
   });
 });
 

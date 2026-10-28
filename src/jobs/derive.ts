@@ -1,12 +1,11 @@
-import { isThreadLink } from '../threadId.js';
+import { threadLinkTarget } from '../threadId.js';
+export { threadLinkTarget } from '../threadId.js';
 import { ACTIVE_RUN_STATUSES, THREAD_STATUSES, type ThreadItem, type ThreadRead } from '../t3/schemas.ts';
 import type { JobState } from './states.ts';
 import type { Job } from './store.ts';
 
 /** The worker message excerpt kept per job, in characters. Also passed to T3 as `maxCharsPerItem`. */
 export const EXCERPT_CHARS = 2000;
-const MAX_LINK_CHARS = 2048;
-const LINK_SCHEMES = new Set(['t3-thread:', 'https:', 'http:']);
 
 /** Timeline item statuses that mean the item may still change (for example a message being streamed). */
 const UNSETTLED_ITEM_STATUSES = new Set(['pending', 'running', 'waiting']);
@@ -143,23 +142,6 @@ export interface Observation {
   /** Running delegated tasks beyond `delegatedWork`, not followed (see Job.delegatedUntracked). */
   delegatedUntracked: number;
   delegatedUntrackedRunId: string | null;
-}
-
-/**
- * The URL in a T3 thread link. Older T3 returns markdown; current responses are normalized to a bare
- * t3-thread URL by the client schemas. Returns null for invalid links or other URL schemes.
- */
-export function threadLinkTarget(link: string | null | undefined): string | null {
-  if (link == null) return null;
-  const text = link.trim();
-  const target = /\]\(([^()\s]+)\)$/.exec(text)?.[1] ?? text;
-  if (isThreadLink(target)) return target;
-  if (target.length > MAX_LINK_CHARS) return null;
-  try {
-    return LINK_SCHEMES.has(new URL(target).protocol) ? target : null;
-  } catch {
-    return null;
-  }
 }
 
 /**

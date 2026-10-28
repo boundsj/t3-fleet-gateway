@@ -12,7 +12,7 @@ import { silentLogger } from '../src/log.ts';
 import { HOUR, MINUTE } from '../src/time.ts';
 import { MAX_PAYLOAD_BYTES } from '../src/webhooks/store.ts';
 import { testClock, type TestClock } from './helpers/clock.ts';
-import { startFakeT3, type FakeT3 } from './helpers/fakeT3.ts';
+import { FAKE_ENVIRONMENT_ID, startFakeT3, type FakeT3 } from './helpers/fakeT3.ts';
 import type { FrontDoor } from './helpers/frontDoor.ts';
 import { startTestGateway } from './helpers/gateway.ts';
 import { assertNotLogged, connectAgent, startJob, type Agent } from './helpers/jobs.ts';
@@ -169,6 +169,20 @@ async function cli(h: Awaited<ReturnType<typeof harness>>, args: string[], confi
 }
 
 describe('outbound job webhooks through MCP, watcher and HTTP', () => {
+  test('delivers the owning environment in validated v2 links', async (t) => {
+    const sink = await receiver(t);
+    const h = await harness(t, [subscription(sink.url)]);
+    h.fake.threadLinkFormat = 'v2';
+    const job = await startJob(h.agent);
+    await h.tick();
+    const threadId = h.fake.threadForJob(job.jobId).threadId;
+    h.fake.finishTurn(threadId, 'Synthetic reply');
+    await h.tick();
+    await h.deliver();
+    assert.equal(sink.received.length, 1);
+    assert.equal(sink.received[0]!.payload.link, `t3-thread://v2/${FAKE_ENVIRONMENT_ID}/${threadId}`);
+  });
+
   test('idle, needs_input and failed each emit once with the source feed sequence and event-time metadata', async (t) => {
     const sink = await receiver(t);
     const h = await harness(t, [subscription(sink.url)]);

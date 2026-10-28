@@ -24,7 +24,7 @@ interface Status {
 describe('watcher', () => {
   test('recovers an existing job after T3 stops supplying links and clears the old shape error', async (t) => {
     const { fake, gw, agent, tick } = await startJobHarness(t);
-    fake.legacyThreadLinks = true;
+    fake.threadLinkFormat = 'v1';
     const job = await startJob(agent);
     await tick();
     const { threadId } = fake.threadForJob(job.jobId);
@@ -33,7 +33,7 @@ describe('watcher', () => {
     await tick();
     assert.equal((await agent.call<Status>('work_status', { jobId: job.jobId })).lastError?.code, 't3_invalid_response');
     fake.brokenReads.delete(threadId);
-    fake.legacyThreadLinks = false;
+    fake.threadLinkFormat = 'omitted';
     fake.finishTurn(threadId, 'Synthetic reply after the T3 upgrade');
     await tick();
     const status = await agent.call<Status & { link: string | null }>('work_status', { jobId: job.jobId });

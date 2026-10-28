@@ -1,5 +1,5 @@
 import * as z from 'zod';
-import { threadLink } from '../threadId.js';
+import { threadLink, threadLinkTarget } from '../threadId.js';
 import { responseThreadIdSchema } from './threadId.ts';
 
 /** The fields of `t3_environment_read` the gateway relies on. Extra fields are kept, not validated. */
@@ -104,10 +104,10 @@ export type LaunchThreadInput = {
   | { scratch: true; projectId?: never; workspaceStrategy?: never }
 );
 
-/** Current T3 omits links. Keep older supplied links and normalize newer responses at the boundary. */
+/** Prefer T3's usable link (v2 names its environment); missing or unusable links get a canonical v1 fallback. */
 function withThreadLink<T extends { threadId: string; link?: string | null }>(thread: T) {
   const canonical = threadLink(thread.threadId);
-  return { ...thread, link: canonical === null ? null : thread.link ?? canonical };
+  return { ...thread, link: canonical === null ? null : threadLinkTarget(thread.link) ?? canonical };
 }
 
 export const launchResultSchema = z.looseObject({

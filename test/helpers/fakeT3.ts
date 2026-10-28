@@ -283,8 +283,8 @@ export class FakeT3 {
   launchWithoutRun = false;
   /** A synthetic T3-minted id for the next launch. */
   nextThreadId: string | undefined;
-  /** Older T3 versions supplied links; current published thread tools omit them. */
-  legacyThreadLinks = false;
+  /** Model both older responses without links and the v1/v2 forms supplied by T3. */
+  threadLinkFormat: 'omitted' | 'v1' | 'v2' | 'bare-v2' = 'omitted';
   /** When set, interrupts are accepted but take effect only on completeInterrupts(). */
   deferInterrupts = false;
   /** When set, an interrupt leaves the thread's pending questions listed (T3 may keep them). */
@@ -996,7 +996,9 @@ export class FakeT3 {
       threadId,
       projectId,
       title: input.title,
-      link: `[${input.title}](t3-thread://v1/${FAKE_ENVIRONMENT_ID}/${threadId})`,
+      link: this.threadLinkFormat === 'v1' ? `[${input.title}](t3-thread://v1/${threadId})`
+        : this.threadLinkFormat === 'bare-v2' ? `t3-thread://v2/${FAKE_ENVIRONMENT_ID}/${threadId}`
+        : `<t3-thread://v2/${FAKE_ENVIRONMENT_ID}/${threadId}>`,
       status: 'idle',
       runtimeMode: input.runtimeMode ?? 'full-access',
       branch: strategy && 'branch' in strategy ? (strategy.branch ?? null) : null,
@@ -1018,7 +1020,7 @@ export class FakeT3 {
     }
     return {
       threadId,
-      ...(this.legacyThreadLinks ? { link: thread.link } : {}),
+      ...(this.threadLinkFormat !== 'omitted' ? { link: thread.link } : {}),
       projectId,
       modelSelection: input.modelSelection ?? { model: 'synthetic-model' },
       runId: run?.runId ?? null,
@@ -1050,7 +1052,7 @@ export class FakeT3 {
   #summary(thread: FakeThread): Record<string, unknown> {
     return {
       threadId: thread.threadId,
-      ...(this.legacyThreadLinks ? { link: thread.link } : {}),
+      ...(this.threadLinkFormat !== 'omitted' ? { link: thread.link } : {}),
       title: thread.title,
       createdBy: 'agent',
       creationSource: 'mcp',

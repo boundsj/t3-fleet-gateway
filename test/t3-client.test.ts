@@ -4,7 +4,7 @@ import * as z from 'zod';
 import { T3Client, T3TransportError } from '../src/t3/client.ts';
 import { parseToolResult, T3ToolError } from '../src/t3/results.ts';
 import { launchResultSchema } from '../src/t3/schemas.ts';
-import { startFakeT3 } from './helpers/fakeT3.ts';
+import { FAKE_ENVIRONMENT_ID, startFakeT3 } from './helpers/fakeT3.ts';
 
 async function setup(t: import('node:test').TestContext, options: Parameters<typeof startFakeT3>[0] = {}) {
   const fake = await startFakeT3(options);
@@ -163,12 +163,13 @@ describe('T3 session sharing', () => {
 });
 
 describe('T3 thread tools', () => {
-  for (const legacy of [false, true]) {
-    test(`launch, list and both read views accept ${legacy ? 'legacy links' : 'current responses without links'}`, async (t) => {
+  for (const format of ['omitted', 'v1', 'v2', 'bare-v2'] as const) {
+    test(`launch, list and both read views normalize ${format} thread links`, async (t) => {
       const { fake, client } = await setup(t);
-      fake.legacyThreadLinks = legacy;
+      fake.threadLinkFormat = format;
       const launched = await client.launchThread(LAUNCH);
-      const expected = legacy ? fake.threads.get(launched.threadId)!.link : `t3-thread://v1/${launched.threadId}`;
+      const expected = format === 'omitted' || format === 'v1' ? `t3-thread://v1/${launched.threadId}`
+        : `t3-thread://v2/${FAKE_ENVIRONMENT_ID}/${launched.threadId}`;
       assert.equal(launched.link, expected);
       assert.equal((await client.listThreads({ projectId: 'project-1' })).threads[0]?.link, expected);
       for (const view of ['messages', 'activity'] as const) {

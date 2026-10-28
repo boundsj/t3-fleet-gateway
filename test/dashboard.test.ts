@@ -12,7 +12,7 @@ import { buildSnapshot, LIMITS, threadLink, type DashboardSnapshot } from '../sr
 import { newJobId } from '../src/jobs/ids.ts';
 import { scopesForGrant } from '../src/oauth/scopes.ts';
 import { DAY, HOUR, MINUTE } from '../src/time.ts';
-import { startFakeT3 } from './helpers/fakeT3.ts';
+import { FAKE_ENVIRONMENT_ID, startFakeT3 } from './helpers/fakeT3.ts';
 import { loadApp } from './helpers/dashboardApp.ts';
 import { FakeDocument } from './helpers/fakeDom.ts';
 import { startTestGateway, type TestGateway } from './helpers/gateway.ts';
@@ -555,6 +555,21 @@ describe('dashboard: clients', () => {
 });
 
 describe('dashboard: jobs and privacy', () => {
+  test('preserves a validated v2 environment link in the snapshot and rendered anchors', async (t) => {
+    const h = await harness(t);
+    h.fake.threadLinkFormat = 'v2';
+    const job = await startJob(h.agent);
+    await h.tick();
+    const link = `t3-thread://v2/${FAKE_ENVIRONMENT_ID}/${h.fake.threadForJob(job.jobId).threadId}`;
+    const snap = await snapshot(h.port);
+    assert.equal(snap.jobs.open.find((item) => item.id === job.jobId)?.link, link);
+    const app = await loadApp();
+    const doc = new FakeDocument();
+    const root = doc.createElement('div');
+    app.render(doc, root, { snapshot: snap, route: { view: 'jobs', id: null }, jobFilter: 'open' }, {}, h.gw.clock());
+    assert.ok(root.elements('a').some((anchor) => anchor.getAttribute('href') === link));
+  });
+
   test('attention, links and code-only events; no task, reply, question or delegated title anywhere', async (t) => {
     const h = await harness(t);
     const approval = await startJob(h.agent, TASK);
