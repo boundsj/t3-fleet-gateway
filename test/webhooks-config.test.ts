@@ -28,7 +28,7 @@ describe('webhook configuration and private header files', () => {
     assert.equal(entry.enabled, false);
     assert.equal(entry.excerptChars, 0);
     assert.equal(entry.allowLoopbackHttp, false);
-    assert.deepEqual(new Set(entry.events), new Set(['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended']));
+    assert.deepEqual(new Set(entry.events), new Set(['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended', 'credential_alert', 'credential_resolved']));
   });
 
   test('HTTPS defaults reject credentials, fragments and HTTP; opt-in HTTP is literal loopback only', () => {

@@ -258,7 +258,7 @@ describe('dashboard webhook connections: running browser handlers', () => {
     assert.match(page.root.textContent, /POST to/);
     assert.match(page.root.textContent, /value labelled “header”/);
     assert.match(page.root.textContent, /Reply excerpts are off/);
-    assert.match(page.root.textContent, /ready for follow-up, needs input, failed, cancelled, and delegated work ended/);
+    assert.match(page.root.textContent, /ready for follow-up, needs input, failed, cancelled, delegated work ended, credential alerts and resolutions/);
     await page.button('Copy setup prompt').dispatch('click');
     assert.match(page.win.copied[0]!, /clickable links to its Webhook URL, Webhook key and Authorization header panels/);
     assert.match(page.win.copied[0]!, /do not print the key or header value/);
@@ -543,4 +543,32 @@ test('precise dashboard filters submit bounded JSON lists and render health as t
   assert.match(page.root.textContent, /Failure streak/);
   assert.match(page.root.textContent, /Dead-lettered events/);
   page.assertNoSecrets();
+});
+
+test('dashboard re-pair runs only after explicit confirmation and disables duplicate clicks', async () => {
+  const app = await loadApp();
+  const doc = new FakeDocument();
+  const root = doc.createElement('div'); root.setAttribute('id', 'app'); doc.body.append(root);
+  const snap = hostileSnapshot();
+  const calls: { url: string; body: Record<string, string> }[] = [];
+  const win = new FakeWindow(async (url, init) => {
+    if (url === 'api/snapshot') return Response.json(snap);
+    calls.push({ url, body: JSON.parse(String(init?.body)) });
+    if (url.endsWith('/prepare')) return Response.json({ confirmationId: 'synthetic-confirmation' });
+    return Response.json({ ok: true, snapshot: snap });
+  });
+  win.location.hash = '#/hosts';
+  await app.boot(win, doc).ready;
+  const button = (text: string) => root.elements('button').find((node) => node.textContent === text)!;
+  await button('Re-pair').dispatch('click');
+  assert.deepEqual(calls.map((call) => call.url), ['api/hosts/repair/prepare']);
+  assert.match(root.textContent, /old credential stays until the replacement is verified/);
+  await button('Cancel').dispatch('click');
+  assert.equal(calls.length, 1);
+  await button('Re-pair').dispatch('click');
+  await button('Confirm re-pair').dispatch('click');
+  assert.equal(calls.at(-1)!.url, 'api/hosts/repair/confirm');
+  assert.equal(calls.at(-1)!.body.confirmationId, 'synthetic-confirmation');
+  assert.match(root.textContent, /Credential verified and installed/);
+  assertSafeTree(root);
 });

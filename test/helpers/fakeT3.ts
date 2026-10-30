@@ -260,6 +260,12 @@ export class FakeT3 {
   readonly decisions: { access: string }[] = [];
   /** When set, the decision endpoint refuses every pairing code. */
   rejectDecisions = false;
+  /** Synthetic protocol failures and redirect denials; tests generate any sensitive sentinel at runtime. */
+  pairingError: { status: number; body: unknown } | undefined;
+  pairingDenial: string | undefined;
+  readonly persistentStatus = new Map<string, number>();
+  /** Restrict transport negotiation when simulating an older T3 host. */
+  protocolVersions: string[] | undefined;
   /** Delay before answering tool calls, milliseconds. */
   toolDelayMs = 0;
   /** Per-tool delay before answering, milliseconds; overrides toolDelayMs for that tool. */
@@ -609,6 +615,12 @@ export class FakeT3 {
         authorization: { client_id: string; redirect_uri: string; code_challenge: string; state: string; resource: string };
         decision: { _tag: string; access: string; code: string };
       };
+      if (this.pairingError) return json(this.pairingError.status, this.pairingError.body);
+      if (this.pairingDenial) {
+        const redirect = new URL(input.authorization.redirect_uri);
+        redirect.searchParams.set('error', this.pairingDenial);
+        return json(200, { redirectTo: redirect.href });
+      }
       if (this.rejectDecisions || input.decision._tag !== 'pairing-code' || !this.#pairingCodes.delete(input.decision.code)) {
         return json(400, { _tag: 'AuthMcpApprovalError', message: 'The pairing code is invalid or expired.' });
       }
@@ -666,7 +678,7 @@ export class FakeT3 {
       }
     }
     const injected = toolName(body);
-    const status = injected === undefined ? undefined : this.statusOnce.get(injected);
+    const status = injected === undefined ? undefined : this.statusOnce.get(injected) ?? this.persistentStatus.get(injected);
     if (injected !== undefined && status !== undefined) {
       this.statusOnce.delete(injected);
       res.writeHead(status).end();
@@ -687,6 +699,7 @@ export class FakeT3 {
       transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         enableJsonResponse: true,
+        ...(this.protocolVersions ? { supportedProtocolVersions: this.protocolVersions } : {}),
         onsessioninitialized: (id) => {
           this.#sessions.set(id, { transport, token });
         },

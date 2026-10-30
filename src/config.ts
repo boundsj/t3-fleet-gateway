@@ -191,8 +191,9 @@ const configSchema = z
       .strictObject({
         renewWhenDaysLeft: z.int().min(1).max(29).default(5),
         checkEveryMinutes: z.int().min(1).max(1440).default(60),
+        alertDaysLeft: z.array(z.int().min(1).max(29)).min(1).max(8).default([7, 2]),
       })
-      .default({ renewWhenDaysLeft: 5, checkEveryMinutes: 60 }),
+      .default({ renewWhenDaysLeft: 5, checkEveryMinutes: 60, alertDaysLeft: [7, 2] }),
     reachability: z
       .strictObject({ intervalMinutes: z.int().min(1).max(60).default(5) })
       .default({ intervalMinutes: 5 }),

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DashboardConfig } from '../config.ts';
@@ -107,6 +107,7 @@ export function dashboardHandler(
 ): (req: IncomingMessage, res: ServerResponse) => void {
   const { dashboard, sources, checks, logger } = options;
   const assets = loadAssets();
+  const repairs = new Map<string, { host: string; until: number; done?: boolean; result?: Promise<boolean> }>();
   const base = dashboard.basePath === '/' ? '' : dashboard.basePath;
   const allowedHosts = new Set(dashboard.allowedHosts.map((host) => host.toLowerCase()));
   const isAllowedHost = (host: string | undefined): boolean => {
@@ -192,6 +193,47 @@ export function dashboardHandler(
       },
     },
   ];
+  for (const action of ['prepare', 'confirm'] as const) {
+    routes.push({ path: `${base}/api/hosts/repair/${action}`, methods: { POST: async (req, res) => {
+      res.setHeader('cache-control', 'no-store');
+      if (!apiRequest(req, res) || !mutationRequest(req, res)) return;
+      if (!options.available?.()) { sendJson(res, 503, { error: 'unavailable' }); return; }
+      const body = await readJson(req, 1024) as Record<string, unknown> | null;
+      if (!body || typeof body.host !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(body.host) ||
+          Object.keys(body).some((key) => !['host', 'confirmationId'].includes(key))) {
+        sendJson(res, 400, { error: 'invalid_request' }); return;
+      }
+      if (!sources.registry.hosts.some((host) => host.id === body.host)) { sendJson(res, 404, { error: 'not_found' }); return; }
+      if (!options.available?.()) { sendJson(res, 503, { error: 'unavailable' }); return; }
+      const now = sources.clock();
+      // Keep pending operations until drained, and successful/failed results for replay within the confirmation window.
+      for (const [id, repair] of repairs) if (repair.until <= now && (!repair.result || repair.done)) repairs.delete(id);
+      if (action === 'prepare') {
+        if (body.confirmationId !== undefined) { sendJson(res, 400, { error: 'invalid_request' }); return; }
+        if (repairs.size >= 100) { sendJson(res, 409, { error: 'request_limit' }); return; }
+        const confirmationId = randomUUID();
+        repairs.set(confirmationId, { host: body.host, until: now + 5 * 60_000 });
+        sendJson(res, 200, { confirmationId }); return;
+      }
+      const repair = typeof body.confirmationId === 'string' ? repairs.get(body.confirmationId) : undefined;
+      if (!repair || repair.host !== body.host || repair.until <= now) {
+        sendJson(res, 409, { error: 'confirmation_required' }); return;
+      }
+      if (!repair.result) {
+        repair.result = sources.registry.enroll(body.host).then(() => true, () => false);
+        settlements.add(repair.result);
+        void repair.result.finally(() => {
+          settlements.delete(repair.result!);
+          // Expire completed confirmation records without allowing a retry to mint again.
+          repair.done = true;
+          repair.until = sources.clock() + 5 * 60_000;
+        });
+      }
+      const ok = await repair.result;
+      sendJson(res, ok ? 200 : 409, { ok, detail: ok ? 'Credential verified and installed.' :
+        'Re-pair failed. The previous credential was kept. Check the pairing command and try again.', snapshot: buildSnapshot(sources) });
+    } } });
+  }
   if (options.jobs) {
     const jobs = options.jobs;
     routes.push({ path: `${base}/api/jobs/settle`, methods: { POST: async (req, res) => {

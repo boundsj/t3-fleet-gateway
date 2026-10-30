@@ -82,6 +82,13 @@ export async function runDoctor(services: GatewayServices, dataDir: string): Pro
     const name = `host ${host.id}`;
     // Even a host with no credential needs a usable command for its first enrollment.
     const credential = registry.credentialStatus(host.id);
+    for (const alert of registry.credentialAlerts(host.id)) {
+      results.push({ level: alert.resolvedAt === null ? 'warn' : 'ok', name: `${name} credential alert`,
+        detail: `${alert.kind}: ${alert.resolvedAt === null ? 'active; re-pair from the private dashboard or hosts enroll' : 'resolved'}` });
+    }
+    if (credential.renewalError) {
+      results.push({ level: 'warn', name, detail: `last renewal failed: ${credential.renewalError.code}: ${credential.renewalError.message}` });
+    }
     if (credential.state === 'missing') {
       for (const check of await registry.preflight(host.id)) {
         results.push({ level: check.level, name: `${name} pairing command`, detail: check.detail });
@@ -92,9 +99,6 @@ export async function runDoctor(services: GatewayServices, dataDir: string): Pro
     if (credential.state === 'expired') results.push({ level: 'fail', name, detail: `credential expired. Run: t3-fleet-gateway hosts enroll ${host.id}` });
     else if (credential.state === 'renewal_due') results.push({ level: 'warn', name, detail: `credential expires in ${credential.daysLeft} day(s); renewal is due` });
     else results.push({ level: 'ok', name, detail: `credential valid for ${credential.daysLeft} more day(s)` });
-    if (credential.renewalError) {
-      results.push({ level: 'warn', name, detail: `last renewal failed: ${credential.renewalError.code}: ${credential.renewalError.message}` });
-    }
     const health = await registry.health(host.id, { fresh: true });
     for (const check of await registry.preflight(host.id, { serverVersion: health.t3Version })) {
       results.push({ level: check.level, name: `${name} pairing command`, detail: check.detail });

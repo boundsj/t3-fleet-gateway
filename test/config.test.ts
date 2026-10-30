@@ -25,7 +25,7 @@ describe('config', () => {
     assert.deepEqual(config.listen, { host: '127.0.0.1', port: 3790 });
     assert.deepEqual(config.tokens, { accessTtlSeconds: 43200, refreshIdleTtlDays: 90 });
     assert.deepEqual(config.reachability, { intervalMinutes: 5 });
-    assert.deepEqual(config.renewal, { renewWhenDaysLeft: 5, checkEveryMinutes: 60 });
+    assert.deepEqual(config.renewal, { renewWhenDaysLeft: 5, checkEveryMinutes: 60, alertDaysLeft: [7, 2] });
     assert.equal(config.hosts[0]?.access, 'auto');
     assert.equal(config.hosts[0]?.maxConcurrentJobs, 2);
     assert.deepEqual(config.hosts[0]?.mintPairingCode, ['t3', 'auth', 'pairing', 'create', '--ttl', '5m', '--json']);

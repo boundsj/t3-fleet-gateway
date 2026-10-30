@@ -443,6 +443,39 @@ CREATE TABLE webhook_job_bindings (
   PRIMARY KEY (subscription_id, revision, job_id)
 ) STRICT;`,
   },
+  {
+    version: 19,
+    name: 'credential alerts and outbox',
+    sql: `CREATE TABLE credential_alerts (
+  host_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  expires_at INTEGER,
+  raised_at INTEGER NOT NULL,
+  resolved_at INTEGER,
+  PRIMARY KEY (host_id, kind)
+) STRICT;
+CREATE TABLE credential_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subscription_id TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  feed_sequence INTEGER,
+  payload TEXT,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  next_attempt_at INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'sending', 'delivered', 'expired', 'cancelled')),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  lease TEXT,
+  lease_until INTEGER,
+  UNIQUE (subscription_id, revision, event_id)
+) STRICT;
+CREATE INDEX credential_delivery_due ON credential_deliveries(state, next_attempt_at);
+CREATE INDEX credential_delivery_subscription ON credential_deliveries(subscription_id, id);
+CREATE VIEW notification_deliveries AS
+  SELECT *, 'job' AS source FROM webhook_deliveries UNION ALL
+  SELECT *, 'credential' AS source FROM credential_deliveries;`,
+  },
 ];
 
 /**
