@@ -19,9 +19,8 @@ export interface ModelSelection {
 export type ModelSource = 'explicit' | 'project' | 'host' | 't3_default';
 
 /**
- * Version 2 records scratch launches only (T3's own scratch project, no worktree or branch). Version 1 is a worktree launch
- * from the project's configured base ref, from the local branch; version 3 is a launch whose workspace the host's probe
- * decides at dispatch (see workspace.ts), so it records the intent only.
+ * v1: worktree from the configured local base ref. v2: T3 scratch workspace, no worktree or branch.
+ * v3: workspace intent, resolved by the host's probe at dispatch (workspace.ts).
  */
 const scratchWorkspaceSchema = z.strictObject({ kind: z.literal('scratch') });
 
@@ -66,26 +65,21 @@ const launchSpecSchema = z.union([
 ]);
 
 /**
- * What a job started through a direct target, an explicit model selection or a scratch alias resolved to when it was created
- * (`jobs.launch_spec`): the dispatcher launches from this record, so a later config change, catalog change or alias ambiguity
- * cannot move the job. Alias-only worktree jobs have none and dispatch from the configuration. `source` is `alias` when a
- * configured project's policy governs and `discovered` when the host's discovery policy does; `model.selection` is the exact
- * `modelSelection` sent to T3 (null leaves the choice to the T3 project's default). Version 2 is a scratch launch; version 3
- * a project launch whose workspace is decided at dispatch. Never holds task text.
+ * Recorded launch plan (`jobs.launch_spec`), pinned against later config/catalog changes and alias ambiguity.
+ * Alias-only worktree jobs without a workspace probe have no spec and dispatch from configuration.
+ * `source` names the governing policy; `model.selection` is sent unchanged (null uses T3's project default).
+ * No task text is stored here.
  */
 export type LaunchSpec = z.infer<typeof launchSpecSchema>;
 
 /**
- * What `jobs.launch_spec` holds, as this build reads it: nothing (an alias job, launched from the configuration), a spec it
- * understands, or a record it cannot read (damaged, or written by a build that knows more).
+ * A missing spec dispatches from configuration. Damaged or newer records are explicitly unreadable.
  */
 export type StoredLaunchSpec = { kind: 'none' } | { kind: 'spec'; spec: LaunchSpec } | { kind: 'unreadable' };
 
 /**
- * Read the stored text of one job's launch spec. Never throws, and never reports an unreadable record as nothing:
- * "nothing" dispatches the job from the configuration as a worktree job, which for a scratch job (or one started with a
- * model selection) is the wrong launch. Nor does an unreadable record fail the read: one bad row must not stop the
- * reads of every other job. The text, and what is wrong with it, are not kept: they may hold anything.
+ * Never throw or treat unreadable data as a missing plan: that could launch scratch or explicitly selected work
+ * as a default worktree. One bad row must not block other jobs. Discard parse errors and raw text.
  */
 export function readLaunchSpec(text: string | null): StoredLaunchSpec {
   if (text === null) return { kind: 'none' };

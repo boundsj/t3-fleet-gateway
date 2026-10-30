@@ -2,7 +2,7 @@ import { configuredModel, runtimeModeAllowed, type GatewayConfig, type HostConfi
 import { describeError, GatewayError } from '../errors.ts';
 import type { CatalogService } from '../hosts/catalog.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
-import { resolveProjectId } from '../hosts/projects.ts';
+import { resolveProject } from '../hosts/projects.ts';
 import type { Logger } from '../log.ts';
 import { T3TransportError } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
@@ -935,7 +935,7 @@ export class JobEngine {
   async #projectId(project: ProjectConfig): Promise<string> {
     const cached = this.#projectIds.get(project.alias);
     if (cached) return cached;
-    const id = await resolveProjectId(this.#options.registry, project);
+    const { id } = await resolveProject(this.#options.registry, project);
     this.#projectIds.set(project.alias, id);
     return id;
   }

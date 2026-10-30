@@ -3,14 +3,10 @@ import type { ThreadItem } from '../t3/schemas.ts';
 import { isDelegatedWorkActive, type ActivityRead, type DelegatedTask } from './derive.ts';
 
 /**
- * Reads of a thread's activity view, where delegated work shows. T3's `t3_thread_read` has two views
- * over the same positions: `messages` (the default) returns only user messages, assistant messages and
- * proposed plans; `activity` returns every timeline item, including `subagent` items (work delegated to
- * other threads), reasoning, tool calls, commands and checkpoints. The excerpt, the job's state and its
- * `readPosition` come from the messages view; the activity view is read only for `subagent` items, with
- * its own cursor (`activityPosition`) so a busy coordinator's reasoning and tool items never slow the
- * messages read, and with one character per item: a `subagent` item's title is a field of its own, and
- * its text (the child's task prompt while it runs, its summary once done) is never used.
+ * Delegated work lives in T3's activity view. It shares positions with the messages view, which
+ * supplies replies, state and `readPosition`. A separate `activityPosition` keeps tool/reasoning
+ * traffic from delaying message reads. Only subagent metadata is used; task text and summaries
+ * are ignored, so each item requests the minimum text budget.
  */
 
 const PAGE_SIZE = 100;
@@ -30,8 +26,8 @@ function readPage(client: T3Client, threadId: string, afterPosition: number | nu
 }
 
 /**
- * The activity after `afterPosition`, at most MAX_ACTIVITY_PAGES pages. Nothing holds the position
- * back: delegated work still running is followed by item id (refreshDelegated), not re-read in place.
+ * Read forward up to MAX_ACTIVITY_PAGES. Active tasks do not hold the cursor back;
+ * refreshDelegated follows them by item id.
  */
 export async function readActivity(client: T3Client, threadId: string, afterPosition: number | null): Promise<ActivityRead> {
   const items: ThreadItem[] = [];
@@ -46,14 +42,9 @@ export async function readActivity(client: T3Client, threadId: string, afterPosi
 }
 
 /**
- * The activity at adoption: the position where the thread's activity ends now (reached from `anchor`,
- * the last position the messages view returned, so the read is short), and the delegated work still
- * running, from a bounded scan backwards from `anchor`, PAGE_SIZE positions per page, while SCAN_PAGES
- * last. The tail reads at most SCAN_TAIL_PAGES, so the work just before the anchor (where a coordinator
- * waiting on delegated work has it) is always looked at. Positions are shared by both views, so any
- * position is a valid place to start reading. Delegated work further back is not found; a tail longer
- * than SCAN_TAIL_PAGES leaves the position short of the end, and the watcher catches up from there
- * (delegated work in the rest of the tail is found then).
+ * At adoption, scan forward from the last messages position, then look back for active delegated
+ * work in PAGE_SIZE-position windows. SCAN_TAIL_PAGES caps forward reads, reserving at least five
+ * of SCAN_PAGES for lookback. Older tasks can be missed; an unfinished tail is caught up by the watcher.
  */
 export async function scanActivity(client: T3Client, threadId: string, anchor: number | null): Promise<ActivityRead> {
   const items: ThreadItem[] = [];
@@ -86,10 +77,8 @@ export async function scanActivity(client: T3Client, threadId: string, anchor: n
 }
 
 /**
- * The current version of each followed task that `read` (this tick's activity) did not return, because
- * the activity position has moved past it, or null when T3 no longer has it. Read in the activity view
- * from the earliest such item on, matched by item id, so tasks near each other cost one read; at most
- * MAX_REFRESH_PAGES reads, and tasks not reached are kept as they were.
+ * Refresh followed tasks absent from this tick's activity, earliest first, matching by item id.
+ * Nearby tasks share a read. Missing items become null; tasks beyond MAX_REFRESH_PAGES stay unchanged.
  */
 export async function refreshDelegated(
   client: T3Client,

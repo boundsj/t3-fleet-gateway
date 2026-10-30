@@ -18,14 +18,9 @@ export async function resolveProject(registry: HostRegistry, project: ProjectCon
   throw new GatewayError('not_found', `Project "${project.alias}": ${problem} "${project.t3ProjectTitle}" on host ${project.host}; set t3ProjectId instead`);
 }
 
-export async function resolveProjectId(registry: HostRegistry, project: ProjectConfig): Promise<string> {
-  return (await resolveProject(registry, project)).id;
-}
-
 /**
- * Where launches in a project get their model: the gateway config (the project's `modelSelection`,
- * else its host's `defaultModelSelection`), else the T3 project's own default. `ok` is false when
- * there is none, which makes T3 refuse every launch with `invalid_request`.
+ * Model precedence: project config, host config, then T3 project default.
+ * Without any model, T3 refuses the launch with `invalid_request`.
  */
 export function checkProjectModel(config: GatewayConfig, project: ProjectConfig, t3Project: T3Project): { ok: boolean; detail: string } {
   const configured = configuredModel(config, project);
@@ -45,9 +40,8 @@ export function checkProjectModel(config: GatewayConfig, project: ProjectConfig,
 }
 
 /**
- * At startup, warn about projects whose launches T3 would refuse for want of a model. Never throws.
- * A host whose project list cannot be read is skipped for its remaining projects, and the check
- * stops when `signal` aborts (shutdown does not wait for it).
+ * Warn at startup when a project has no model. Skip remaining projects on an unreadable host.
+ * Errors are logged; abort stops the check, and shutdown does not wait for it.
  */
 export async function warnProjectsWithoutModel(
   config: GatewayConfig,
@@ -68,8 +62,7 @@ export async function warnProjectsWithoutModel(
       }
     } catch (error) {
       if (signal?.aborted) return;
-      // not_found concerns this project only; any other failure is reading the host's project list,
-      // which every other project on the host would repeat.
+      // not_found is project-specific; other failures would repeat for every project on this host.
       if (!(error instanceof GatewayError && error.code === 'not_found')) failedHosts.add(project.host);
       logger.debug('project.model_check_failed', { project: project.alias, hostId: project.host, errorCode: describeError(error).code });
     }

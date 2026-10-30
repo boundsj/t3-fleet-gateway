@@ -3,7 +3,7 @@ import { configuredModel, RUNTIME_MODES, runtimeModeAllowed, type GatewayConfig,
 import { sha256Hex } from '../crypto.ts';
 import { describeError, GatewayError } from '../errors.ts';
 import type { CatalogProject, CatalogService } from '../hosts/catalog.ts';
-import { resolveProjectId } from '../hosts/projects.ts';
+import { resolveProject } from '../hosts/projects.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import type { Logger } from '../log.ts';
 import { THREAD_READ_SCOPE, THREAD_CONTROL_SCOPE, permits, permittedHosts, type AccessLevel, type Scope } from '../oauth/scopes.ts';
@@ -799,7 +799,8 @@ export class JobService {
     const project = this.project(input.project);
     const existing = this.store.openJobForThread(input.threadId, project.host);
     if (existing?.standing && existing.projectAlias === project.alias) return { job: existing, created: false };
-    return this.#adoptThread(project, await resolveProjectId(this.#registry, project), input);
+    const { id } = await resolveProject(this.#registry, project);
+    return this.#adoptThread(project, id, input);
   }
 
   async #adoptThread(project: { alias: string; host: string }, projectId: string, input: AdoptInput,
