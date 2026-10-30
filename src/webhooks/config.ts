@@ -26,6 +26,13 @@ export function destinationAllowed(value: string, allowLoopbackHttp: boolean): b
   } catch { return false; }
 }
 
+export const preciseFilters = {
+  jobs: z.array(z.string().min(1).max(64)).min(1).max(100).optional(),
+  clients: z.array(z.string().min(1).max(300)).min(1).max(100).optional(),
+  events: z.array(z.enum(WEBHOOK_EVENTS)).min(1).max(WEBHOOK_EVENTS.length).optional(),
+};
+export type PreciseFilters = { jobs?: string[]; clients?: string[]; events?: WebhookEventType[] };
+
 const subscriptionSchema = z.strictObject({
   id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
   enabled: z.boolean().default(false),
@@ -39,10 +46,13 @@ const subscriptionSchema = z.strictObject({
   hosts: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/)).min(1).max(100).optional(),
   targets: z.array(z.strictObject({ host: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/),
     projectId: z.string().min(1).max(300) })).min(1).max(100).optional(),
+  ...preciseFilters,
+  ownerClientId: z.string().min(1).max(300).optional(),
   events: z.array(z.enum(WEBHOOK_EVENTS)).min(1).max(WEBHOOK_EVENTS.length).default(DEFAULT_WEBHOOK_EVENTS),
   excerptChars: z.int().min(0).max(500).default(0),
   allowLoopbackHttp: z.boolean().default(false),
-}).refine((value) => destinationAllowed(value.url, value.allowLoopbackHttp));
+}).refine((value) => destinationAllowed(value.url, value.allowLoopbackHttp))
+  .refine((value) => !value.ownerClientId || (!!value.hosts?.length && value.excerptChars === 0));
 
 export const webhooksSchema = z.strictObject({
   subscriptions: z.array(subscriptionSchema).max(32).default([]),

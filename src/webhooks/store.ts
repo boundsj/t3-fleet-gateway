@@ -4,8 +4,9 @@ import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
 import { displayPullRequests } from '../jobs/pullRequests.ts';
 import type { Job, JobEvent } from '../jobs/store.ts';
+import { permits, type Scope } from '../oauth/scopes.ts';
 import type { Clock } from '../time.ts';
-import { DEFAULT_WEBHOOK_EVENTS, loadRoute, type SubscriptionConfig, type WebhookEventType, type WebhookRoute, type WebhooksConfig } from './config.ts';
+import { DEFAULT_WEBHOOK_EVENTS, loadRoute, type PreciseFilters, type SubscriptionConfig, type WebhookEventType, type WebhookRoute, type WebhooksConfig } from './config.ts';
 
 export const RETRY_WINDOW_MS = 60 * 60_000;
 export const MAX_PENDING_PER_SUBSCRIPTION = 10_000;
@@ -13,6 +14,24 @@ export const MAX_ATTEMPTS_PER_SUBSCRIPTION = 100;
 export const MAX_PAYLOAD_BYTES = 16 * 1024;
 export const MAX_SUBSCRIPTIONS = 32;
 const MAX_HISTORY = 1000;
+export const ARCHIVE_RETENTION_MS = 7 * 24 * 60 * 60_000;
+export const MAX_ARCHIVE_EVENTS = 10_000;
+export const MAX_JOB_BINDINGS = 100;
+export interface NotificationCaller { clientId: string; scopes: readonly Scope[] }
+export interface ReplayInput { afterCursor?: string; since?: string; limit?: number }
+export interface ReplayResult { queued: number; skipped: number; nextCursor: string; hasMore: boolean; retentionGap: boolean }
+export interface WebhookHealth {
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  failureStreak: number;
+  deadLettered: number;
+  pending: number;
+  overflowCount: number;
+  replayFloorCursor: string;
+  oldestReplayAt: string | null;
+}
+function notFound(): never { throw new GatewayError('not_found', 'Notification connection or job was not found.'); }
+
 export type AttemptOutcome = 'in_progress' | 'delivered' | 'http_error' | 'redirect' | 'network_error' | 'tls_error' |
   'timeout' | 'response_too_large' | 'stopped' | 'abandoned' | 'expired' | 'cancelled';
 export interface AttemptResult { outcome: AttemptOutcome; statusCode: number | null }
@@ -24,6 +43,10 @@ export interface WebhookConnection {
   projects: string[];
   hosts: string[];
   targets: { host: string; projectId: string }[];
+  jobs: string[];
+  clients: string[];
+  events: WebhookEventType[];
+  ownerClientId: string | null;
   lastTest: { at: string; outcome: AttemptOutcome; statusCode: number | null } | null;
 }
 export type WebhookConnectionErrorCode = 'not_found' | 'connection_conflict' | 'file_managed' | 'connection_limit' | 'test_failed';
@@ -59,7 +82,7 @@ export interface WebhookPayload {
   excerpt?: string | null;
   excerptTruncated?: boolean;
 }
-type SubscriptionSettings = Pick<SubscriptionConfig, 'events' | 'projects' | 'hosts' | 'targets' | 'excerptChars'>;
+type SubscriptionSettings = Pick<SubscriptionConfig, 'events' | 'projects' | 'hosts' | 'targets' | 'excerptChars' | 'jobs' | 'clients' | 'ownerClientId'>;
 interface SubscriptionRow {
   id: string; revision: string; identity: string; settings: string; route: string; source: WebhookConnection['source'];
   last_test_at: number | null; last_test_outcome: AttemptOutcome | null; last_test_status_code: number | null;
@@ -92,6 +115,7 @@ function connection(row: SubscriptionRow): WebhookConnection {
   const settings = JSON.parse(row.settings) as SubscriptionSettings;
   return {
     id: row.id, revision: row.revision, source: row.source, projects: settings.projects ?? [], hosts: settings.hosts ?? [], targets: settings.targets ?? [],
+    jobs: settings.jobs ?? [], clients: settings.clients ?? [], events: settings.events, ownerClientId: settings.ownerClientId ?? null,
     lastTest: row.last_test_at === null || row.last_test_outcome === null ? null
       : { at: new Date(row.last_test_at).toISOString(), outcome: row.last_test_outcome, statusCode: row.last_test_status_code },
   };
@@ -153,7 +177,7 @@ export class WebhookStore {
   }
 
   /** Call only after the synthetic ping finishes; no network operation belongs inside these transactions. */
-  connectDashboard(id: string, project: string, host: string, route: WebhookRoute, test: DashboardTest, projectId?: string): WebhookConnection {
+  connectDashboard(id: string, project: string, host: string, route: WebhookRoute, test: DashboardTest, projectId?: string, filters: PreciseFilters = {}): WebhookConnection {
     return transaction(this.#db, () => {
       const existing = this.#db.prepare('SELECT source FROM webhook_subscriptions WHERE id = ?').get(id);
       if (existing) throw new WebhookConnectionError(existing.source === 'config' ? 'file_managed' : 'connection_conflict');
@@ -162,7 +186,7 @@ export class WebhookStore {
       this.#requireSuccessfulTest(test);
       const settings: SubscriptionSettings = {
         ...(projectId ? { targets: [{ host, projectId }] } : { projects: [project], hosts: [host] }),
-        events: [...DEFAULT_WEBHOOK_EVENTS], excerptChars: 0,
+        ...filters, events: filters.events ?? [...DEFAULT_WEBHOOK_EVENTS], excerptChars: 0,
       };
       this.#db.prepare(`INSERT INTO webhook_subscriptions (id, revision, identity, settings, route, source)
         VALUES (?, ?, ?, ?, ?, 'dashboard')`)
@@ -213,7 +237,9 @@ export class WebhookStore {
     const matches = rows.filter((row) => {
       const s = JSON.parse(row.settings) as SubscriptionSettings;
       return (!s.targets || s.targets.some((t) => t.host === job.hostId && t.projectId === job.t3ProjectId)) &&
-        s.events.includes(type) && (!s.projects || s.projects.includes(job.projectAlias)) && (!s.hosts || s.hosts.includes(job.hostId));
+        s.events.includes(type) && (!s.projects || s.projects.includes(job.projectAlias)) && (!s.hosts || s.hosts.includes(job.hostId)) &&
+        (!s.jobs || s.jobs.includes(job.id)) && (!s.clients || s.clients.includes(job.clientId)) &&
+        (!s.ownerClientId || (s.ownerClientId === job.clientId && this.#bindingMatches(row, job.id, type)));
     });
     if (!matches.length) return;
     const turn = turnRunId === null ? undefined : this.#db.prepare('SELECT client_id FROM job_turns WHERE job_id = ? AND run_id = ?')
@@ -238,6 +264,12 @@ export class WebhookStore {
         body.excerptTruncated = job.latestMessageTruncated || (body.excerpt?.length ?? 0) < (job.latestMessageExcerpt?.length ?? 0);
       }
       const json = JSON.stringify(body);
+      this.#ensureHealth(row.id, event.id - 1);
+      if (Buffer.byteLength(json) <= MAX_PAYLOAD_BYTES) {
+        this.#db.prepare(`INSERT INTO webhook_archive (subscription_id, revision, feed_sequence, event_id, payload, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)`).run(row.id, row.revision, event.id, body.eventId, json, event.createdAt);
+        this.#pruneArchive(row.id);
+      }
       const pending = this.#db.prepare("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE subscription_id = ? AND state IN ('pending', 'sending')")
         .get(row.id) as { n: number };
       const overflow = Buffer.byteLength(json) > MAX_PAYLOAD_BYTES ? 'payload_limit'
@@ -258,9 +290,14 @@ export class WebhookStore {
   claim(limit: number, leaseMs: number): ClaimedDelivery[] {
     return transaction(this.#db, () => {
       const now = this.#clock();
+      const abandoned = this.#db.prepare("SELECT subscription_id FROM webhook_deliveries WHERE state = 'sending' AND lease_until <= ?").all(now);
+      for (const row of abandoned) this.#failure(String(row.subscription_id), now);
       this.#db.prepare("UPDATE webhook_attempts SET outcome = 'abandoned', lease = NULL WHERE outcome = 'in_progress' AND delivery_id IN " +
         "(SELECT id FROM webhook_deliveries WHERE state = 'sending' AND lease_until <= ?)").run(now);
       this.#db.prepare("UPDATE webhook_deliveries SET state = 'pending', lease = NULL, lease_until = NULL WHERE state = 'sending' AND lease_until <= ?").run(now);
+      // Recovered leases may already be past their retry window; count them before clearing payloads.
+      const expired = this.#db.prepare("SELECT subscription_id, COUNT(*) AS n FROM webhook_deliveries WHERE state = 'pending' AND expires_at <= ? GROUP BY subscription_id").all(now);
+      for (const row of expired) this.#deadLetters(String(row.subscription_id), Number(row.n));
       this.#db.prepare("UPDATE webhook_deliveries SET state = 'expired', payload = NULL WHERE state = 'pending' AND expires_at <= ?").run(now);
       // One in-flight request per subscription, enforced across DB connections. A failed receiver
       // cannot occupy all sender slots while other subscriptions have work ready.
@@ -281,6 +318,7 @@ export class WebhookStore {
         claims.push({ id: row.id, subscriptionId: row.subscription_id, revision: row.revision, eventId: row.event_id, payload: row.payload,
           lease, attempt: row.attempt_count + 1, expiresAt: row.expires_at, route: JSON.parse(row.route) as WebhookRoute });
       }
+      for (const row of this.#db.prepare('SELECT id FROM webhook_subscriptions').all()) this.#pruneArchive(String(row.id));
       this.#prune();
       return claims;
     });
@@ -296,6 +334,11 @@ export class WebhookStore {
       if (!this.active(claim)) return;
       const now = this.#clock();
       const state = result.outcome === 'delivered' ? 'delivered' : now >= claim.expiresAt ? 'expired' : 'pending';
+      if (result.outcome === 'delivered') {
+        this.#ensureHealth(claim.subscriptionId);
+        this.#db.prepare('UPDATE webhook_health SET last_success_at = ?, failure_streak = 0 WHERE subscription_id = ?').run(now, claim.subscriptionId);
+      } else if (result.outcome !== 'stopped') this.#failure(claim.subscriptionId, now);
+      if (state === 'expired') this.#deadLetters(claim.subscriptionId, 1);
       const delay = result.outcome === 'stopped' ? 0 : Math.min(300_000, 5000 * 2 ** Math.min(claim.attempt - 1, 10));
       this.#db.prepare('UPDATE webhook_attempts SET status_code = ?, outcome = ?, lease = NULL WHERE lease = ?')
         .run(result.statusCode, result.outcome, claim.lease);
@@ -323,7 +366,159 @@ export class WebhookStore {
       .all(...(id === undefined ? [] : [id]));
     const attempts = this.#db.prepare(`SELECT subscription_id, event_id, attempted_at, status_code, outcome FROM webhook_attempts
       ${id === undefined ? '' : 'WHERE subscription_id = ?'} ORDER BY id DESC LIMIT ?`).all(...(id === undefined ? [] : [id]), bounded);
-    return { subscriptions, deliveries, attempts };
+    return { subscriptions, deliveries, attempts, health: this.health(id) };
+  }
+
+  /** Safe aggregate delivery state; pings do not mask a failing delivery stream. */
+  health(id?: string): { id: string; health: WebhookHealth }[] {
+    return this.listConnections().filter((row) => id === undefined || row.id === id).map((row) => {
+      const h = this.#db.prepare(`SELECT h.*, s.overflow_count,
+        (SELECT COUNT(*) FROM webhook_deliveries d WHERE d.subscription_id = s.id AND d.state IN ('pending', 'sending')) AS pending,
+        (SELECT MIN(created_at) FROM webhook_archive a WHERE a.subscription_id = s.id AND a.created_at > ?) AS oldest
+        FROM webhook_subscriptions s LEFT JOIN webhook_health h ON h.subscription_id = s.id WHERE s.id = ?`)
+        .get(this.#clock() - ARCHIVE_RETENTION_MS, row.id)!;
+      const iso = (value: unknown) => typeof value === 'number' ? new Date(value).toISOString() : null;
+      return { id: row.id, health: { lastSuccessAt: iso(h.last_success_at), lastFailureAt: iso(h.last_failure_at),
+        failureStreak: Number(h.failure_streak ?? 0), deadLettered: Number(h.dead_lettered ?? 0), pending: Number(h.pending),
+        overflowCount: Number(h.overflow_count), replayFloorCursor: String(h.archive_floor ?? 0), oldestReplayAt: iso(h.oldest) } };
+    });
+  }
+
+  /** Destination authority comes from operator config; OAuth grants gate each management call. */
+  ownedConnections(caller: NotificationCaller) {
+    return this.listConnections().filter((row) => row.ownerClientId === caller.clientId && row.hosts.length > 0 &&
+      row.hosts.every((host) => permits(caller.scopes, 'read', host))).map((row) => ({ ...row,
+      health: this.health(row.id)[0]!.health,
+      subscriptions: this.#db.prepare('SELECT job_id AS jobId, events FROM webhook_job_bindings WHERE subscription_id = ? AND revision = ? ORDER BY job_id LIMIT ?')
+        .all(row.id, row.revision, MAX_JOB_BINDINGS).map((b) => ({ jobId: String(b.jobId), events: JSON.parse(String(b.events)) as WebhookEventType[] })),
+    }));
+  }
+
+  subscribe(caller: NotificationCaller, id: string, jobId: string, events?: WebhookEventType[], remove = false): void {
+    transaction(this.#db, () => {
+      const row = this.#owned(caller, id);
+      const settings = JSON.parse(row.settings) as SubscriptionSettings;
+      // Authorize in SQL, before parsing a stored job or revealing any other client's job.
+      const hosts = settings.hosts!;
+      const job = this.#db.prepare(`SELECT id, project_alias, t3_project_id, host_id FROM jobs WHERE id = ? AND client_id = ?
+        AND origin = 'gateway' AND host_id IN (${hosts.map(() => '?').join(',')})`).get(jobId, caller.clientId, ...hosts);
+      if (!job || (settings.jobs && !settings.jobs.includes(jobId)) || (settings.clients && !settings.clients.includes(caller.clientId)) ||
+        (settings.projects && !settings.projects.includes(String(job.project_alias))) ||
+        (settings.targets && !settings.targets.some((t) => t.host === job.host_id && t.projectId === job.t3_project_id))) notFound();
+      if (remove) {
+        this.#db.prepare('DELETE FROM webhook_job_bindings WHERE subscription_id = ? AND revision = ? AND job_id = ?').run(id, row.revision, jobId);
+        return;
+      }
+      const chosen = [...new Set(events ?? settings.events)];
+      if (!chosen.length || chosen.some((event) => !settings.events.includes(event))) {
+        throw new GatewayError('invalid_argument', 'Choose events permitted by the notification connection.');
+      }
+      const existing = this.#db.prepare('SELECT 1 FROM webhook_job_bindings WHERE subscription_id = ? AND revision = ? AND job_id = ?').get(id, row.revision, jobId);
+      const count = this.#db.prepare('SELECT COUNT(*) AS n FROM webhook_job_bindings WHERE subscription_id = ?').get(id)!;
+      if (!existing && Number(count.n) >= MAX_JOB_BINDINGS) throw new GatewayError('invalid_argument', 'Notification job subscription limit reached.');
+      this.#db.prepare(`INSERT INTO webhook_job_bindings (subscription_id, revision, job_id, events) VALUES (?, ?, ?, ?)
+        ON CONFLICT(subscription_id, revision, job_id) DO UPDATE SET events = excluded.events`).run(id, row.revision, jobId, JSON.stringify(chosen));
+    });
+  }
+
+  replayOwned(caller: NotificationCaller, id: string, input: ReplayInput): ReplayResult {
+    // The ownership and host ceiling are checked again in the same write transaction as replay.
+    return transaction(this.#db, () => this.#replay(this.#owned(caller, id), input));
+  }
+
+  /** Operator-only local CLI path; does not apply configuration or read a receiver credential. */
+  replay(id: string, input: ReplayInput): ReplayResult {
+    return transaction(this.#db, () => {
+      const row = this.#row(id);
+      if (!row) notFound();
+      return this.#replay(row, input);
+    });
+  }
+
+  #replay(row: SubscriptionRow, input: ReplayInput): ReplayResult {
+    if ((input.afterCursor === undefined) === (input.since === undefined) ||
+      (input.afterCursor !== undefined && (!/^\d{1,16}$/.test(input.afterCursor) || !Number.isSafeInteger(Number(input.afterCursor)))) ||
+      (input.since !== undefined && !Number.isFinite(Date.parse(input.since))) ||
+      (input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 200))) {
+      throw new GatewayError('invalid_argument', 'Replay needs exactly one afterCursor or ISO time since, and a limit from 1 to 200.');
+    }
+    this.#ensureHealth(row.id);
+    this.#pruneArchive(row.id);
+    const h = this.#db.prepare('SELECT archive_floor, archive_floor_at FROM webhook_health WHERE subscription_id = ?').get(row.id)!;
+    const cursor = Number(input.afterCursor ?? 0);
+    const since = input.since === undefined ? null : Date.parse(input.since);
+    const limit = input.limit ?? 200;
+    const events = this.#db.prepare(`SELECT * FROM webhook_archive WHERE subscription_id = ? AND revision = ? AND feed_sequence > ?
+      AND (? IS NULL OR created_at >= ?) ORDER BY feed_sequence LIMIT ?`).all(row.id, row.revision, cursor, since, since, limit + 1);
+    const page = events.slice(0, limit);
+    let queued = 0;
+    let skipped = 0;
+    let nextCursor = input.afterCursor ?? String(events[0] ? Number(events[0].feed_sequence) - 1 : h.archive_floor);
+    const now = this.#clock();
+    let pending = Number(this.#db.prepare("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE subscription_id = ? AND state IN ('pending', 'sending')").get(row.id)!.n);
+    let blocked = false;
+    for (const event of page) {
+      const existing = this.#db.prepare('SELECT state FROM webhook_deliveries WHERE subscription_id = ? AND revision = ? AND event_id = ?')
+        .get(row.id, row.revision, event.event_id!);
+      if (existing?.state === 'pending' || existing?.state === 'sending') { skipped++; nextCursor = String(event.feed_sequence); continue; }
+      if (pending >= MAX_PENDING_PER_SUBSCRIPTION) { blocked = true; break; }
+      this.#db.prepare(`INSERT INTO webhook_deliveries
+        (subscription_id, revision, event_id, feed_sequence, payload, created_at, expires_at, next_attempt_at, state)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending') ON CONFLICT(subscription_id, revision, event_id) DO UPDATE SET
+        payload = excluded.payload, expires_at = excluded.expires_at, next_attempt_at = excluded.next_attempt_at,
+        state = 'pending', attempt_count = 0, lease = NULL, lease_until = NULL`)
+        .run(row.id, row.revision, event.event_id!, event.feed_sequence!, event.payload!, event.created_at!, now + RETRY_WINDOW_MS, now);
+      queued++; pending++; nextCursor = String(event.feed_sequence);
+    }
+    return { queued, skipped, nextCursor, hasMore: blocked || events.length > limit,
+      retentionGap: since === null ? cursor < Number(h.archive_floor) :
+        since < now - ARCHIVE_RETENTION_MS || (typeof h.archive_floor_at === 'number' && since <= h.archive_floor_at) };
+  }
+
+  #owned(caller: NotificationCaller, id: string): SubscriptionRow {
+    const row = this.#row(id);
+    if (!row) notFound();
+    const settings = JSON.parse(row.settings) as SubscriptionSettings;
+    if (settings.ownerClientId !== caller.clientId || !settings.hosts?.length ||
+      !settings.hosts.every((host) => permits(caller.scopes, 'operate', host))) notFound();
+    return row;
+  }
+
+  #bindingMatches(row: SubscriptionRow, jobId: string, type: WebhookEventType): boolean {
+    const binding = this.#db.prepare('SELECT events FROM webhook_job_bindings WHERE subscription_id = ? AND revision = ? AND job_id = ?')
+      .get(row.id, row.revision, jobId);
+    return !!binding && (JSON.parse(String(binding.events)) as WebhookEventType[]).includes(type);
+  }
+
+  #ensureHealth(id: string, floor?: number): void {
+    this.#db.prepare(`INSERT OR IGNORE INTO webhook_health (subscription_id, archive_floor, archive_floor_at)
+      SELECT id, ?, ? FROM webhook_subscriptions WHERE id = ?`)
+      .run(floor ?? Number(this.#db.prepare('SELECT COALESCE(MAX(id), 0) AS n FROM job_events').get()!.n), this.#clock(), id);
+  }
+
+  #failure(id: string, at: number): void {
+    this.#ensureHealth(id);
+    this.#db.prepare('UPDATE webhook_health SET last_failure_at = ?, failure_streak = failure_streak + 1 WHERE subscription_id = ?').run(at, id);
+  }
+
+  #deadLetters(id: string, count: number): void {
+    this.#ensureHealth(id);
+    this.#db.prepare('UPDATE webhook_health SET dead_lettered = dead_lettered + ? WHERE subscription_id = ?').run(count, id);
+  }
+
+  #pruneArchive(id: string): void {
+    // Indexed by connection/revision/sequence. Keep original content bounded even after queue completion.
+    const cutoff = this.#clock() - ARCHIVE_RETENTION_MS;
+    const overflow = this.#db.prepare('SELECT feed_sequence FROM webhook_archive WHERE subscription_id = ? ORDER BY feed_sequence DESC LIMIT 1 OFFSET ?')
+      .get(id, MAX_ARCHIVE_EVENTS);
+    const floor = Number(overflow?.feed_sequence ?? 0);
+    const removed = this.#db.prepare(`SELECT MAX(feed_sequence) AS sequence, MAX(created_at) AS at FROM webhook_archive
+      WHERE subscription_id = ? AND (created_at <= ? OR feed_sequence <= ?)`).get(id, cutoff, floor)!;
+    if (removed.sequence !== null) {
+      this.#db.prepare('UPDATE webhook_health SET archive_floor = MAX(archive_floor, ?), archive_floor_at = MAX(COALESCE(archive_floor_at, 0), ?) WHERE subscription_id = ?')
+        .run(removed.sequence!, removed.at!, id);
+      this.#db.prepare('DELETE FROM webhook_archive WHERE subscription_id = ? AND (created_at <= ? OR feed_sequence <= ?)').run(id, cutoff, floor);
+    }
   }
 
   #row(id: string): SubscriptionRow | undefined {
@@ -358,6 +553,9 @@ export class WebhookStore {
   }
 
   #cancel(id: string): void {
+    this.#db.prepare('DELETE FROM webhook_archive WHERE subscription_id = ?').run(id);
+    this.#db.prepare('DELETE FROM webhook_job_bindings WHERE subscription_id = ?').run(id);
+    this.#db.prepare('DELETE FROM webhook_health WHERE subscription_id = ?').run(id);
     this.#db.prepare("UPDATE webhook_attempts SET outcome = 'cancelled', lease = NULL WHERE delivery_id IN " +
       "(SELECT id FROM webhook_deliveries WHERE subscription_id = ? AND state = 'sending') AND outcome = 'in_progress'").run(id);
     this.#db.prepare("UPDATE webhook_deliveries SET state = 'cancelled', payload = NULL, lease = NULL, lease_until = NULL " +

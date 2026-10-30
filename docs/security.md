@@ -167,3 +167,24 @@ Subscriptions are trusted operator choices made through the private dashboard or
 For config-owned subscriptions, auth values come from private, owned, regular files in the data directory; empty, unreadable, oversized, symlinked or invalid-header values prevent an enabled route from starting. Files are opened without following symlinks and without blocking, so a FIFO is rejected before reading. For dashboard-owned subscriptions, the operator pastes the full header once; the gateway tests it and stores the route in the existing private database without writing a new secret file or changing global configuration. Route URLs and auth are private database material and never included in logs, API responses or diagnostic output. The two ownership types are separate: startup reconciles only config-owned rows and the dashboard cannot replace or disconnect them. Treat config and backups as secrets. Attempt logs contain fixed outcomes/status/timestamps/IDs only, no raw errors or responses. Response bodies are discarded under size and time limits.
 
 Notifications contain job metadata including title; titles can be derived from task text, so choose a non-sensitive title. Worker excerpts are absent by default and should stay off when replies may contain secrets. A deliberate per-subscription opt-in sends at most 500 characters of worker text; arbitrary secrets cannot be reliably recognized or redacted. No task body, questions or transcripts are added. Reading details still requires the receiver's separate gateway MCP credentials and grant. A failed setup or replacement test never destroys a working route. A successful replacement checks the expected revision again after the network request, so a concurrent disconnect or newer replacement cannot be overwritten. Shutdown rejects new management work and aborts/drains pending tests before closing the database. Disabling/revising a route cancels old queued payloads and clears them; an already transmitted request cannot be recalled. Completed and expired payloads are cleared too. The normal private SQLite files, including WAL/backups, can retain old pages: clearing a payload is logical retention, not secure erasure.
+
+### Bot-owned notifications and replay storage
+
+The operator can assign a config connection to one `ownerClientId` with an explicit host ceiling and no
+excerpts. MCP tools accept only connection/job IDs and event/cursor selectors. They cannot create,
+replace, test or reveal receiver URLs, auth headers or keys. The owner must also hold the required grant
+on every connection host, and can subscribe only its own gateway-started jobs. Other owners and hidden
+hosts/jobs are indistinguishable from unknown IDs. Job/client/host/project/event filters intersect.
+
+Outbound authority is the operator-provisioned connection, independent of OAuth token lifetime or
+revocation: a token expiring does not silently disconnect an authenticated receiver. Remove/disable the
+connection to revoke outgoing delivery; token revocation prevents future MCP management. Removing a job
+binding stops future capture only. Already transmitted requests cannot be recalled.
+
+The existing protected database additionally retains original notification bytes for at most seven days
+and 10,000 events per connection, even after successful delivery. An operator's existing opt-in excerpt
+policy also applies to archived payloads; bot-owned routes require excerpts off. Archives can contain job
+titles and PR references and must be protected with the ledger and backups. Replay uses the same receiver
+authentication, revision and transport limits; original event IDs must be deduplicated by receivers.
+Route replacement deletes the old archive and bindings. Aggregate health and replay acknowledgments
+contain no payloads, destination material or raw network errors.

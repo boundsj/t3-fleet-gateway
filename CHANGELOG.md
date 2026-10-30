@@ -2,7 +2,15 @@
 
 ## Unreleased
 
+### Upgrading
+
+- **Migration 18, forward only.** Adds notification archive, job bindings and persistent delivery health without rewriting existing connection routes, revisions, queues or attempts. Archive/health begin at upgrade; no historical snapshots are invented. Stop all ledger users and back up before opening the new build. Older builds refuse the new schema; rollback requires restoring the pre-upgrade backup and loses subsequent writes. No key rotation or receiver re-registration is needed.
+
 ### Added
+
+- Precise webhook job/original-client filters, intersected with existing host/project/event filters; optional precise filters in dashboard setup.
+- Operator-provisioned bot-owned connections, `work_notifications`, `work_subscribe` and `work_replay`. Bots subscribe their own jobs with host-grant checks and bounded job bindings, without supplying destinations or credentials.
+- Persistent per-connection delivery health in the dashboard, doctor and agent tools. Cursor/time replay through MCP or `webhooks replay` reuses original payloads and event IDs from a seven-day/10,000-event archive, including events omitted from a full pending queue. Retention gaps require durable feed catch-up. See [operations](docs/operations.md#precise-bot-notifications-and-recovery).
 
 - Optional `standingInstructions` configuration text is prepended to every new job's first message ([#43](https://github.com/boundsj/t3-fleet-gateway/pull/43)). See [README](README.md#standing-instructions-for-workers) and [configuration](docs/configuration.md#standinginstructions).
 

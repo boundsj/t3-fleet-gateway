@@ -410,3 +410,26 @@ test('all enrolled discovery hosts are listed; a remote alias and direct target 
   assert.ok(degraded.projects.some((p: { host: string; projectId?: string }) => p.host === 'host-b' && p.projectId === 'project-2'));
   assert.ok(degraded.projects.some((p: { alias: string }) => p.alias === 'remote'));
 });
+
+test('dashboard connections accept precise filters and expose persistent delivery health without route material', async (t) => {
+  const f = await fixture(t);
+  const input = { session: f.session, requestId: randomUUID(), project: 'pilot', url: f.target.origin + '/accept', authHeader: HEADER,
+    jobs: ['filtered01'], clients: ['synthetic-client'], events: ['cancelled'] };
+  const response = await f.api.post('connect', input);
+  assert.equal(response.status, 200, response.text);
+  const saved = (await f.api.list()).connections[0]!;
+  assert.deepEqual(saved.jobs, input.jobs); assert.deepEqual(saved.clients, input.clients); assert.deepEqual(saved.events, input.events);
+  enqueue(f.gw, 'filtered01'); enqueue(f.gw, 'filtered02');
+  const claim = f.gw.services.webhooks.claim(1, 30_000)[0]!;
+  assert.equal(JSON.parse(claim.payload).jobId, 'filtered01');
+  f.gw.services.webhooks.finish(claim, { outcome: 'http_error', statusCode: 503 });
+  const result = await raw(f.api.port, '/fleet/api/webhooks', 'GET', API);
+  const health = JSON.parse(result.text).connections[0].health;
+  assert.equal(health.failureStreak, 1);
+  assert.equal(health.pending, 1);
+  assert.equal(health.lastSuccessAt, null);
+  for (const secret of [f.target.origin, HEADER, 'synthetic-private:key']) assert.equal(result.text.includes(secret), false);
+  const invalid = await f.api.post('connect', { ...input, requestId: randomUUID(), events: ['unrecognized'] });
+  assert.equal(invalid.status, 400);
+  assert.equal(f.target.receipts.length, 1, 'invalid filters fail before sending a test');
+});
