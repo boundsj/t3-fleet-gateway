@@ -244,3 +244,21 @@ test('migration 18 preserves populated v17 routes, revisions, queued payloads an
   assert.throws(() => migrate(db, MIGRATIONS.slice(0, 17)), /newer than this build supports/);
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
 });
+
+test('restart after an abandoned lease and expired window counts the dead letter exactly once', (t) => {
+  const f = fixture(t);
+  f.create('crashed1'); f.cancel('crashed1');
+  const lost = f.store.claim(1, 30_000)[0]!;
+  f.clock.advance(RETRY_WINDOW_MS);
+  const db = openDatabase(join(f.dir, 'gateway.db')); t.after(() => db.close());
+  const restarted = new WebhookStore(db, f.clock);
+  assert.deepEqual(restarted.claim(1, 30_000), []);
+  assert.equal(restarted.health()[0]!.health.deadLettered, 1);
+  assert.equal(restarted.health()[0]!.health.failureStreak, 1);
+  assert.equal(db.prepare('SELECT outcome FROM webhook_attempts WHERE delivery_id = ?').get(lost.id)!.outcome, 'abandoned');
+  assert.equal(db.prepare('SELECT state FROM webhook_deliveries WHERE id = ?').get(lost.id)!.state, 'expired');
+  restarted.claim(1, 30_000);
+  f.store.finish(lost, { outcome: 'delivered', statusCode: 204 });
+  assert.equal(restarted.health()[0]!.health.deadLettered, 1);
+  assert.equal(restarted.health()[0]!.health.lastSuccessAt, null);
+});

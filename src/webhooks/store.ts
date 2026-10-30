@@ -292,11 +292,12 @@ export class WebhookStore {
       const now = this.#clock();
       const abandoned = this.#db.prepare("SELECT subscription_id FROM webhook_deliveries WHERE state = 'sending' AND lease_until <= ?").all(now);
       for (const row of abandoned) this.#failure(String(row.subscription_id), now);
-      const expired = this.#db.prepare("SELECT subscription_id, COUNT(*) AS n FROM webhook_deliveries WHERE state = 'pending' AND expires_at <= ? GROUP BY subscription_id").all(now);
-      for (const row of expired) this.#deadLetters(String(row.subscription_id), Number(row.n));
       this.#db.prepare("UPDATE webhook_attempts SET outcome = 'abandoned', lease = NULL WHERE outcome = 'in_progress' AND delivery_id IN " +
         "(SELECT id FROM webhook_deliveries WHERE state = 'sending' AND lease_until <= ?)").run(now);
       this.#db.prepare("UPDATE webhook_deliveries SET state = 'pending', lease = NULL, lease_until = NULL WHERE state = 'sending' AND lease_until <= ?").run(now);
+      // Recovered leases may already be past their retry window; count them before clearing payloads.
+      const expired = this.#db.prepare("SELECT subscription_id, COUNT(*) AS n FROM webhook_deliveries WHERE state = 'pending' AND expires_at <= ? GROUP BY subscription_id").all(now);
+      for (const row of expired) this.#deadLetters(String(row.subscription_id), Number(row.n));
       this.#db.prepare("UPDATE webhook_deliveries SET state = 'expired', payload = NULL WHERE state = 'pending' AND expires_at <= ?").run(now);
       // One in-flight request per subscription, enforced across DB connections. A failed receiver
       // cannot occupy all sender slots while other subscriptions have work ready.
