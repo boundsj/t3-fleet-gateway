@@ -14,7 +14,7 @@ The data directory is created with mode `0700` and holds `gateway.db` (SQLite, w
 
 ## Validation
 
-The file is validated on every start. Unknown keys are errors, so typos surface. Errors name the exact field:
+The gateway validates the file on every start and rejects unknown keys. Errors name the exact field:
 
 ```
 error (config_invalid): Invalid configuration:

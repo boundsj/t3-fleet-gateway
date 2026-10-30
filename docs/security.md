@@ -1,6 +1,6 @@
 # Security
 
-This document covers the threat model, what the gateway stores and where, and how it obtains access to T3 on your behalf. To report a vulnerability, see [SECURITY.md](../SECURITY.md).
+This document describes threats, stored data and how the gateway obtains T3 access. Report vulnerabilities through [SECURITY.md](../SECURITY.md).
 
 ## What the gateway protects
 

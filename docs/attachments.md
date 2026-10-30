@@ -24,7 +24,7 @@ Add that field alongside `project`, `task` and `requestId` for `work_start`, or 
 - `name` is optional: 1–128 ASCII letters, digits, spaces, dots, underscores or hyphens, starting with a letter or digit. It is a display filename, never a path. Without it the gateway uses `attachment-1.png`, `attachment-2.txt`, etc., with an extension inferred from MIME type (`bin` for octet-stream).
 - Extra item fields, unsafe filenames, unsupported MIME types, invalid encoding and excessive attachment bounds return `invalid_argument`. JSON type/required-field errors use the MCP schema-validation error. The HTTP body limit is 15 MiB; requests exceeding it fail before tool handling.
 
-URLs are deliberately unsupported. Fetching arbitrary caller URLs would let an agent reach internal services through the gateway and would require DNS, redirect and address-policy enforcement. Sending bounded bytes avoids that SSRF surface and lets request IDs identify immutable content.
+URLs are unsupported: fetching caller URLs could expose internal services and would need DNS, redirect and address checks. Bounded bytes avoid that SSRF risk and let request IDs identify immutable content.
 
 ## Delivery and retries
 

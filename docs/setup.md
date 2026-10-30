@@ -1,6 +1,6 @@
 # Manual setup
 
-These are the steps behind the [README's setup prompts](../README.md#get-going-with-prompts). Use them yourself or give them to a coding agent on the gateway machine. Field-level options live in [configuration](configuration.md); service maintenance and recovery live in [operations](operations.md).
+Follow these steps yourself or give them to a coding agent on the gateway machine. They expand the [README's setup prompts](../README.md#get-going-with-prompts). See [configuration](configuration.md) for fields and [operations](operations.md) for maintenance and recovery.
 
 ## Before you start
 
@@ -9,7 +9,7 @@ These are the steps behind the [README's setup prompts](../README.md#get-going-w
 - An HTTPS tunnel to the gateway for cloud clients. The gateway listens on loopback; Tailscale Funnel, Cloudflare Tunnel or another tunnel can carry its public MCP endpoint.
 - A separate private route if you enable the operator dashboard. Use a tailnet-only proxy such as Tailscale Serve for that listener, never a public tunnel.
 
-The package runs TypeScript directly from a checkout, without a build step. It is not published to npm. Give the service its own clone so editing a development checkout cannot change the next service restart.
+Node runs TypeScript directly from a checkout; there is no build step or npm release. Give the service its own clone so development edits cannot change what runs at the next service restart.
 
 ## Install and configure
 
