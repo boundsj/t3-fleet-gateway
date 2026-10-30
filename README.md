@@ -2,9 +2,7 @@
 
 [![CI](https://github.com/boundsj/t3-fleet-gateway/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/boundsj/t3-fleet-gateway/actions/workflows/check.yml)
 
-Ask your bot to get something done. Let [T3 Code](https://github.com/pingdotgg/t3code) do the coding on your machines.
-
-T3 Fleet Gateway connects Grok Bot, Notion and other MCP clients to your T3 servers through one connection. Your agent can find projects, start work, answer worker questions and bring back the result. Each new job gets a T3 thread you can open in T3 whenever you want: a named project's job gets its own git worktree and branch, and work with no named project can run in a machine's T3 scratch workspace.
+Connect Grok Bot, Notion and other MCP clients to your [T3 Code](https://github.com/pingdotgg/t3code) servers through one gateway. Your agent can find projects, start work, answer worker questions and read the result. Each new job gets a thread you can open in T3: named projects use a fresh git worktree and branch by default; work with no named project can use a machine's T3 scratch workspace.
 
 ![A bot connects to one gateway, which routes coding work to T3 projects on several machines.](docs/images/architecture.svg)
 
@@ -33,7 +31,7 @@ listener. Keep discovery off and project approval settings at their
 defaults. Run doctor, then give me the MCP URL and dashboard URL.
 ```
 
-> **What this does:** gives your cloud agent a secure way to reach T3 while keeping the operator dashboard private. The gateway handles T3 credential renewal after enrollment.
+The gateway renews T3 credentials after enrollment. Cloud agents use the public MCP endpoint; the operator dashboard stays private.
 
 Prefer doing it yourself? The same steps are in the [manual setup guide](docs/setup.md).
 
@@ -41,7 +39,7 @@ Prefer doing it yourself? The same steps are in the [manual setup guide](docs/se
 
 Add the returned `/mcp` URL as a remote MCP connection in Grok Bot or your chosen client. For OAuth clients, ask the setup agent to mint a one-time approval code. Enter it on the gateway's approval page, choose **Read** or **Operate**, and select the machines.
 
-> **Pick the right access:** Read follows work; Operate also starts and steers it. All machines includes hosts you add later. Selected machines stays limited to those you approve.
+Read follows work; Operate also starts and steers it. All machines includes hosts you add later. Selected machines stays limited to those you approve.
 
 If your client only accepts a bearer token, as Notion's custom MCP connections do, ask the setup agent:
 
@@ -68,7 +66,7 @@ the smallest fix. Run the relevant checks and bring me the result for
 review. Don't merge or deploy it.
 ```
 
-> **What happens next:** the gateway starts a T3 thread in a fresh worktree, tracks it, and lets your bot read the result. Worker questions can come back through the bot. Permission approvals still need your click in T3; [unattended projects](docs/configuration.md#approvals-and-unattended-projects) can use a different runtime mode.
+The gateway starts a T3 thread in a fresh worktree and follows it. Your bot can read the result and answer worker questions. Permission approvals still need your click in T3; [unattended projects](docs/configuration.md#approvals-and-unattended-projects) can use a different runtime mode.
 
 ## Settle finished work
 
@@ -113,11 +111,11 @@ The gateway tests the connection, saves it privately and starts delivering updat
 
 If you recreate the routine or rotate its credentials, copy both fields again: the **POST to** URL can change along with the key.
 
-> **What success means:** “Test accepted” means the receiver accepted the HTTP request. Check your Grok conversation for its reply to confirm that the routine ran. An already-idle job doesn't produce a new event just because you connected.
+“Test accepted” means the receiver accepted the HTTP request. Check your Grok conversation for its reply to confirm that the routine ran. Connecting does not produce a new event for an already-idle job.
 
 The default events cover finished turns (`idle`), questions or approvals (`needs_input`), failures, cancellations and delegated work ending. Excerpts are off by default. Delivery may be retried, so routines should deduplicate events and keep feed catch-up enabled. [Delivery and recovery details](docs/design.md#outbound-job-webhooks).
 
-Using another receiver? Generic HTTPS subscriptions support its own authentication header and project, machine and event filters. See [webhook configuration](docs/configuration.md#webhooks). The quick connection flow needs a routine created in Grok first: two pasted fields and one button, rather than automatic account linking.
+Other HTTPS receivers can use their own authentication header and project, machine and event filters. See [webhook configuration](docs/configuration.md#webhooks). Create the Grok routine before using the quick connection flow; it does not link accounts automatically.
 
 ## See what's happening
 
@@ -139,7 +137,7 @@ Which PRs came out of that job? Show me what's open and what's merged.
 
 `work_status` and `work_list` include cached PR links and states, even for text-only clients: up to 20 per job, open ones first and then the newest. A job follows up to 200 PRs, so a merge among the others is still noticed, and the text says so when it shows only part (`20 of 35 shown`). The dashboard shows a small **PR #21 open** badge beside the job. Workers need to register their PR with T3's `link_pull_request`; a coordinator should link its children's PRs too.
 
-> **What this means:** you can follow the result of a job without searching GitHub. PRs refresh about once a minute while the job is followed, on top of T3's own sync delay. Unknown means not yet readable; a finished or released job keeps its last snapshot.
+PRs refresh about once a minute while the job is followed, on top of T3's own sync delay. Unknown means not yet readable; a finished or released job keeps its last snapshot.
 
 Want your bot to wake when a PR opens or merges? Add `pull_request_opened` and `pull_request_merged` to a [configured webhook subscription](docs/configuration.md#webhooks). These are opt-in; dashboard connections keep their existing five events.
 
@@ -188,7 +186,7 @@ workspace probe (scripts/workspace-probe.js). Restart and run doctor.
 
 Your bot can also ask for a workspace with `work_start`'s `workspace`: `{ "type": "root" }` for the project's own folder, or `{ "type": "worktree" }` to insist on a worktree. Only one gateway job at a time works in the same folder: another one waits in the queue, and resuming an idle job is refused with `workspace_root_busy` while the folder is taken.
 
-> **What this means:** a job in a project's own folder edits that checkout directly, with no branch of its own to review. Machines without the probe behave exactly as before. [Workspace probe settings](docs/configuration.md#workspace-probe).
+A job in a project's own folder edits that checkout directly, with no branch of its own to review. Machines without the probe keep the default behavior. [Workspace probe settings](docs/configuration.md#workspace-probe).
 
 ## Standing instructions for workers
 
@@ -200,13 +198,9 @@ Set the optional top-level `standingInstructions` in your gateway config to give
 }
 ```
 
-This is a partial config snippet. You can also put house style, commit message or PR conventions, or shared safety rules here. The default is off: omit the setting to keep launch text unchanged. When present, it must be a string, non-empty after trimming, with at most 4,000 characters after trimming. Empty strings are configuration errors.
+This is a partial config snippet. Use the setting for shared house style, commit or PR conventions, or safety rules. It is off by default and accepts 1–4,000 characters after trimming; empty strings are errors.
 
-At dispatch, the gateway prepends the text inside an `<operator-standing-instructions>` block before the caller's task, followed by the existing job footer. Putting the rules first gives the worker context before it reads the task. The 20,000-character caller task limit is unchanged; the combined message, including delimiters and footer, stays below T3's 120,000-character limit.
-
-The block is sent once on `work_start`, including scratch and discovered-project launches. `work_continue` sends the caller's message unchanged: the initial rules are already in the conversation. Adopting a standing job does not insert rules into that existing thread, and its follow-ups are unchanged too. Messages or automatic turns started inside T3 are outside this feature. These are prompt instructions, not an enforcement mechanism.
-
-Configuration is loaded at gateway startup. Queued jobs use the instructions loaded when they dispatch, including after a restart; running threads are not updated. Retrying the same `work_start` input and `requestId` returns the same job even if the instructions changed: the hash covers caller input only. Instruction text is never included in gateway diagnostics or logs.
+The gateway sends the rules once, before the caller's task on `work_start`, including scratch and discovered projects. Follow-ups, adoption and turns started inside T3 add no rules; running threads are not updated. These are prompt instructions, not enforcement. Queued jobs use the configuration loaded when they dispatch; retries still return the same job if the instructions change. Text stays out of diagnostics and logs. See [configuration](docs/configuration.md#standinginstructions) for message format, limits and restart behavior.
 
 ## Send images and files
 

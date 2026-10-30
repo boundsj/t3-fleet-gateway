@@ -4,9 +4,7 @@ Status: accepted for v0.1. This document is the build specification and stays as
 
 ## Outcome
 
-Long-running AI agents hosted in the cloud, starting with Grok Bot, can hand coding work to the T3 Code servers on your own machines and follow it to completion. The agent says *what* to do in *which project*, or on *which machine* when no project is named. The gateway decides *where* and *how*: which machine, which T3 project, a fresh git worktree per job (or the machine's T3 scratch workspace when no project is named), the T3 thread, and watching it. The person supervising never has to pick worktrees or threads, or keep checking threads by hand.
-
-T3 Code stays the execution surface. Every job is an ordinary T3 thread the person can open, read, and interrupt.
+Cloud agents, starting with Grok Bot, can hand coding work to T3 Code servers on your machines and follow it to completion. The agent names the task and project, or a machine when no project is named. The gateway routes the task, starts its workspace and T3 thread, and watches it. Named projects use a fresh git worktree per job by default; unnamed work can use the machine's T3 scratch workspace. Every job is an ordinary T3 thread you can open, read and interrupt.
 
 ### In scope for v0.1
 
