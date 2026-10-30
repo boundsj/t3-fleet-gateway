@@ -419,6 +419,38 @@ Management requests carry a session identifier from the read API and a UUID requ
 
 Migration 15 is a data-free schema-version barrier for paired webhook targets. It changes no existing subscription settings, enabled/disabled configuration, route/key, revision, pending delivery or diagnostic. Legacy alias-plus-host connections keep their exact matching behavior. New discovered connections are scoped to a host/project-ID pair. Older builds refuse the version-15 ledger rather than ignore that filter and broadcast a delivery; rollback to an older build requires restoring a pre-upgrade database backup (and loses subsequent ledger changes). No re-registration or key rotation is required by the migration. Connect activates immediately after a successful synthetic test: there is no separate gateway “saved” or enable operation. Receiver-side routine activation and credential rotation remain receiver operations. A successful HTTP response proves endpoint acceptance, not routine execution.
 
+### Precise notifications, health and replay
+
+Connections keep their existing config/dashboard ownership and private receiver authentication. Optional
+`jobs` and `clients` filters intersect existing hosts, aliases, paired targets and event filters; `clients`
+means the client that originally started the job, independently of the current turn initiator.
+An operator can pin `ownerClientId` and an explicit host ceiling on a config connection. That connection
+sends only jobs its owner explicitly subscribes with `work_subscribe`, after starting work. MCP never
+accepts a destination or credential. The bot must own the job and hold Operate on every connection host;
+unknown and other-owner connections/jobs are indistinguishable. Each connection allows 100 job bindings.
+An unsubscribe stops future capture; already captured events remain eligible for delivery/replay.
+Operator-provisioned outbound authority persists independently of OAuth token lifetimes; remove or disable
+the connection to revoke it. No bot may manage config/dashboard destinations or another client's jobs.
+
+The ledger owns a bounded, immutable per-connection event archive (seven days, 10,000 events, 16 KiB each,
+excerpts off) in addition to the existing retry outbox. Capture and archive commit with the source event,
+even when the pending queue is full. Replay uses original bytes and eventId, never today's job snapshot,
+and runs against the current connection revision. Replacing a route cancels its queue and invalidates its
+archive/bindings. Cursor/time replay scans at most 200 events per call, skips active duplicates, and resets
+terminal deliveries with a fresh retry window. A persisted retention floor reports gaps; older history
+requires authorized `work_feed` catch-up. Replay cannot recreate events predating the upgrade or connection.
+
+Persistent per-connection last success, last failure, failure streak and expired-event totals survive
+attempt-history pruning. Pending counts and retained replay bounds supplement these totals in the dashboard,
+`doctor`, offline webhook diagnostics and owner-only `work_notifications`. Existing bounded attempt history,
+one-hour exponential retries, delivery leases and shutdown behavior remain in force. Operator replay is an
+offline CLI operation; owner replay is an Operate MCP tool with the same host ceiling as subscription.
+
+Migration 18 adds archive, bindings and health state without rewriting existing routes, revisions or pending
+payloads. Health begins at upgrade; no historical success or event snapshots are invented. Stop all ledger
+users and back up before upgrading. Older builds refuse the new schema; rollback requires restoring the
+pre-upgrade backup and loses subsequent ledger changes. No version bump or live deployment is part of this work.
+
 ## Downstream T3 credentials
 
 Per host, the gateway obtains a T3 MCP credential with T3's documented pairing-code approval, with no browser:
