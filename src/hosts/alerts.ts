@@ -49,7 +49,7 @@ export class CredentialAlerts {
       const now = this.clock();
       const wanted = new Set<string>();
       if (status.renewalError) wanted.add('renewal_failed');
-      if (status.expiresAt !== null) {
+      if (status.expiresAt !== null && status.renewalError) {
         for (const days of new Set(this.config.renewal.alertDaysLeft)) {
           if (status.expiresAt - now <= days * DAY) wanted.add(`expiry_${days}`);
         }

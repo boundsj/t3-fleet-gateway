@@ -4,6 +4,7 @@ import * as z from 'zod';
 import type { T3Access } from '../config.ts';
 import { pkceChallenge, randomToken } from '../crypto.ts';
 import { GatewayError } from '../errors.ts';
+import { EnrollmentError } from './enrollmentDiagnostics.ts';
 import { SECOND, type Clock } from '../time.ts';
 
 const COMMAND_TIMEOUT_MS = 60 * SECOND;
@@ -49,8 +50,8 @@ export interface CommandOptions {
 /** Run a command without a shell and return stdout. Output is never logged: it holds a pairing code. */
 export function runCommand(argv: readonly string[], options: CommandOptions = {}): Promise<string> {
   const [file, ...args] = argv;
-  if (!file) return Promise.reject(new GatewayError('pairing_command_failed', 'mintPairingCode is empty'));
-  if (options.signal?.aborted) return Promise.reject(new GatewayError('pairing_command_failed', 'Configured command cancelled.'));
+  if (!file) return Promise.reject(new EnrollmentError('pairing_command_failed', 'mint', 'command_failed'));
+  if (options.signal?.aborted) return Promise.reject(new EnrollmentError('pairing_command_failed', 'mint', 'command_cancelled'));
   return new Promise((resolve, reject) => {
     let onAbort: (() => void) | undefined;
     const child = execFile(file, args, {
@@ -62,9 +63,9 @@ export function runCommand(argv: readonly string[], options: CommandOptions = {}
     }, (error, stdout) => {
       if (onAbort) options.signal?.removeEventListener('abort', onAbort);
       if (error) {
-        const exit = typeof error.code === 'number' ? `exit code ${error.code}`
-          : error.code === 'ENOENT' ? 'executable missing' : error.code === 'EACCES' ? 'not executable' : 'failed';
-        reject(new GatewayError('pairing_command_failed', `Configured command failed (${exit}). Run it by hand to see why.`));
+        const reason = error.code === 'ENOENT' ? 'executable_missing' : error.code === 'EACCES' ? 'executable_not_executable' : 'command_failed';
+        reject(new EnrollmentError('pairing_command_failed', 'mint', reason,
+          { ...(typeof error.code === 'number' ? { exit: error.code } : {}) }));
         return;
       }
       resolve(stdout);
@@ -87,7 +88,7 @@ async function unusedLoopbackPort(): Promise<number> {
   return address.port;
 }
 
-async function postJson(step: string, url: string, body: unknown, init: RequestInit = {}): Promise<unknown> {
+async function postJson(step: 'registration' | 'approval' | 'token', url: string, body: unknown, init: RequestInit = {}): Promise<unknown> {
   let response: Response;
   try {
     response = await fetch(url, {
@@ -99,22 +100,27 @@ async function postJson(step: string, url: string, body: unknown, init: RequestI
       body: typeof body === 'string' ? body : JSON.stringify(body),
     });
   } catch (error) {
-    throw new GatewayError('host_unreachable', `T3 ${step} request failed: ${(error as Error).name}`, { cause: error });
+    throw new EnrollmentError('host_unreachable', step, 'request_failed', { cause: error });
   }
   const text = await response.text();
   if (!response.ok) {
-    throw new GatewayError('enrollment_failed', `T3 ${step} returned HTTP ${response.status}`);
+    let upstream: unknown;
+    try {
+      const body = JSON.parse(text) as Record<string, unknown>;
+      upstream = body?.error ?? body?.code ?? body?._tag;
+    } catch { /* HTTP status remains useful without a recognized body. */ }
+    throw new EnrollmentError('enrollment_failed', step, 'http_error', { status: response.status, upstream });
   }
   try {
     return JSON.parse(text);
   } catch {
-    throw new GatewayError('enrollment_failed', `T3 ${step} returned a non-JSON response`);
+    throw new EnrollmentError('enrollment_failed', step, 'invalid_response');
   }
 }
 
-function expect<T>(step: string, schema: z.ZodType<T>, value: unknown): T {
+function expect<T>(step: 'registration' | 'approval' | 'token', schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
-  if (!parsed.success) throw new GatewayError('enrollment_failed', `T3 ${step} response has an unexpected shape`);
+  if (!parsed.success) throw new EnrollmentError('enrollment_failed', step, 'invalid_response');
   return parsed.data;
 }
 
@@ -145,10 +151,10 @@ export async function obtainCredential(options: PairingFlowOptions): Promise<Obt
     pairingOutput = JSON.parse(await run(options.mintPairingCode, { ...(options.commandEnv ? { env: options.commandEnv } : {}) }));
   } catch (error) {
     if (error instanceof GatewayError) throw error;
-    throw new GatewayError('pairing_command_failed', 'Pairing command did not print JSON. Include --json in mintPairingCode.');
+    throw new EnrollmentError('pairing_command_failed', 'mint', 'command_json_invalid');
   }
   const pairing = pairingOutputSchema.safeParse(pairingOutput);
-  if (!pairing.success) throw new GatewayError('pairing_command_failed', 'Pairing command output has no "credential" field');
+  if (!pairing.success) throw new EnrollmentError('pairing_command_failed', 'mint', 'pairing_code_missing');
 
   const verifier = randomToken(48);
   const state = randomToken(16);
@@ -172,13 +178,13 @@ export async function obtainCredential(options: PairingFlowOptions): Promise<Obt
   try {
     redirect = new URL(decision.redirectTo);
   } catch {
-    throw new GatewayError('enrollment_failed', 'T3 approval returned an invalid redirect');
+    throw new EnrollmentError('enrollment_failed', 'approval', 'invalid_response');
   }
   const deniedWith = redirect.searchParams.get('error');
-  if (deniedWith) throw new GatewayError('enrollment_failed', 'T3 refused the approval');
+  if (deniedWith) throw new EnrollmentError('enrollment_failed', 'approval', 'denied', { upstream: deniedWith });
   const code = redirect.searchParams.get('code');
   if (!code || redirect.searchParams.get('state') !== state) {
-    throw new GatewayError('enrollment_failed', 'T3 approval redirect is missing the code or has the wrong state');
+    throw new EnrollmentError('enrollment_failed', 'approval', 'invalid_response');
   }
 
   const issuedAt = options.clock();
@@ -199,7 +205,7 @@ export async function obtainCredential(options: PairingFlowOptions): Promise<Obt
       { headers: { 'content-type': 'application/x-www-form-urlencoded' } },
     ),
   );
-  if (token.token_type.toLowerCase() !== 'bearer') throw new GatewayError('enrollment_failed', 'Unsupported T3 token type');
+  if (token.token_type.toLowerCase() !== 'bearer') throw new EnrollmentError('enrollment_failed', 'token', 'invalid_response');
   return {
     accessToken: token.access_token,
     t3ClientId: registration.client_id,

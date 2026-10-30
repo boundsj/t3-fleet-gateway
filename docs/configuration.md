@@ -109,7 +109,7 @@ An agent's `modelSelection` (`{ instanceId, model, options? }`) is checked again
 
 #### Credential alert thresholds
 
-`renewal.alertDaysLeft` defaults to `[7, 2]` and accepts one to eight integer days from 1 to 29. Each threshold raises once for the current credential; repeated checks do not repeat an active alert. `renewWhenDaysLeft` and `checkEveryMinutes` retain their existing meanings. Alerts use the existing webhook connections and event filters (`credential_alert`, `credential_resolved`); see [credential renewal](operations.md#credential-renewal) for upgrading existing connections and confirmed dashboard re-pair.
+`renewal.alertDaysLeft` defaults to `[7, 2]` and accepts one to eight integer days from 1 to 29. Expiry thresholds apply only after a renewal attempt fails; healthy renewal cycles remain silent. Each threshold raises once for the current credential while failure persists; repeated checks do not repeat an active alert. `renewWhenDaysLeft` and `checkEveryMinutes` retain their existing meanings. Alerts use the existing webhook connections and event filters (`credential_alert`, `credential_resolved`); see [credential renewal](operations.md#credential-renewal) for upgrading existing connections and confirmed dashboard re-pair.
 
 #### Renewal command preflight
 

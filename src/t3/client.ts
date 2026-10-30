@@ -61,6 +61,8 @@ export interface T3ClientOptions {
   contact?: (error?: unknown, serverVersion?: string) => void;
   /** Completed logical calls only, after retries; no input or response content. */
   observe?: (name: string, error?: unknown) => void;
+  /** Dedicated enrollment probes only: numeric MCP POST status, before the SDK can discard it during authorization. */
+  observeHttpStatus?: (status: number) => void;
 }
 
 export interface CallOptions {
@@ -155,9 +157,11 @@ export class T3Client {
   readonly #observe: T3ClientOptions['observe'];
   readonly #contact: T3ClientOptions['contact'];
   readonly #signal: AbortSignal | undefined;
+  readonly #observeHttpStatus: T3ClientOptions['observeHttpStatus'];
 
   constructor(options: T3ClientOptions) {
     this.#observe = options.observe;
+    this.#observeHttpStatus = options.observeHttpStatus;
     this.#contact = options.contact;
     this.#signal = options.signal;
     this.hostId = options.hostId;
@@ -482,7 +486,19 @@ export class T3Client {
     if (this.#connection && this.#connection.token !== token) void this.#reset(this.#connection.generation);
     if (!this.#connection) {
       const client = new Client({ name: GATEWAY_NAME, version: GATEWAY_VERSION });
-      const transport = new StreamableHTTPClientTransport(this.#url, { authProvider: { token: async () => token } });
+      const transport = new StreamableHTTPClientTransport(this.#url, {
+        authProvider: { token: async () => token },
+        ...(this.#observeHttpStatus ? { fetch: async (...args: Parameters<typeof fetch>) => {
+          const response = await fetch(...args);
+          const [input, init] = args;
+          const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+          const url = new URL(response.url);
+          if (method === 'POST' && url.origin === this.#url.origin && url.pathname === this.#url.pathname) {
+            this.#observeHttpStatus!(response.status);
+          }
+          return response;
+        } } : {}),
+      });
       // The SDK does not pass the request signal to notifications/initialized. Close the transport
       // directly on lifetime cancellation, even when connect() has not finished that notification.
       const cancel = () => { void client.close().catch(() => {}); };

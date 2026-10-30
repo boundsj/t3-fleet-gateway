@@ -1,3 +1,4 @@
+import { safeEnrollmentDetail } from '../t3/enrollmentDiagnostics.ts';
 import { isThreadLink, threadLink } from '../threadId.js';
 import { configuredModel, isLoopbackHostname, mcpResource, type GatewayConfig, type HostConfig } from '../config.ts';
 import { SCHEMA_VERSION, schemaVersion, type Database } from '../db/database.ts';
@@ -172,7 +173,7 @@ function hostView(sources: DashboardSources, host: HostConfig, counts: Map<strin
       expiresAt: iso(credential.expiresAt),
       daysLeft: credential.daysLeft,
       renewalError: credential.renewalError
-        ? { code: renewalCode, at: iso(credential.renewalError.at), detail: explainRenewalError(renewalCode) }
+        ? { code: renewalCode, at: iso(credential.renewalError.at), detail: safeEnrollmentDetail(credential.renewalError.message) ?? explainRenewalError(renewalCode) }
         : null,
     },
     access: host.access,

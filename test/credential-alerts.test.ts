@@ -9,6 +9,7 @@ import { runDoctor } from '../src/cli/doctor.ts';
 import { parseConfig } from '../src/config.ts';
 import { migrate } from '../src/db/database.ts';
 import { MIGRATIONS } from '../src/db/migrations.ts';
+import { T3Client } from '../src/t3/client.ts';
 import { CredentialAlerts } from '../src/hosts/alerts.ts';
 import { CredentialStore } from '../src/hosts/credentials.ts';
 import { HostRegistry } from '../src/hosts/registry.ts';
@@ -70,12 +71,13 @@ test('renewal failure alerts once across repeated checks and registry restart; s
 });
 
 test('7-day and 2-day expiry warnings escalate once, including equality and expired credentials', async (t) => {
-  const f = await fixture(t);
+  const f = await fixture(t, { renewal: { renewWhenDaysLeft: 8 } });
+  f.fake.rejectDecisions = true;
   f.expiresIn(7);
   await f.services.registry.renewDue();
-  assert.deepEqual(f.bodies().map((b) => b.thresholdDays), [7]);
+  assert.deepEqual(f.bodies().filter((b) => b.reason === 'expiry').map((b) => b.thresholdDays), [7]);
   await f.services.registry.renewDue();
-  assert.equal(f.bodies().length, 1);
+  assert.equal(f.bodies().length, 2);
   f.fake.rejectDecisions = true;
   f.clock.advance(5 * DAY);
   await f.services.registry.renewDue();
@@ -87,11 +89,12 @@ test('7-day and 2-day expiry warnings escalate once, including equality and expi
   assert.equal(f.services.registry.credentialStatus('main').state, 'expired');
 });
 
-test('threshold configuration is bounded and used independently of renewal timing', async (t) => {
-  const f = await fixture(t, { renewal: { alertDaysLeft: [9, 3, 3] } });
+test('threshold configuration is bounded and expiry warnings require failed renewal', async (t) => {
+  const f = await fixture(t, { renewal: { renewWhenDaysLeft: 10, alertDaysLeft: [9, 3, 3] } });
   f.expiresIn(9);
+  f.fake.rejectDecisions = true;
   await f.services.registry.renewDue();
-  assert.deepEqual(f.bodies().map((b) => b.thresholdDays), [9]);
+  assert.deepEqual(f.bodies().filter((b) => b.reason === 'expiry').map((b) => b.thresholdDays), [9]);
   for (const days of [[], [0], [30], Array(9).fill(1)]) {
     assert.throws(() => parseConfig({ publicUrl: 'https://gateway.example.ts.net', renewal: { alertDaysLeft: days } }));
   }
@@ -169,7 +172,8 @@ test('dashboard re-pair requires explicit fresh confirmation and existing mutati
 
 test('credential delivery uses shared retry/health and disconnect cancels pending alerts', async (t) => {
   const f = await fixture(t);
-  f.expiresIn(7); await f.services.registry.renewDue();
+  f.fake.rejectDecisions = true;
+  await assert.rejects(f.services.registry.enroll('main'));
   const first = f.services.webhooks.claim(1, 30_000)[0]!;
   assert.equal(first.source, 'credential');
   f.services.webhooks.finish(first, { outcome: 'http_error', statusCode: 503 });
@@ -180,7 +184,7 @@ test('credential delivery uses shared retry/health and disconnect cancels pendin
   f.services.webhooks.finish(second, { outcome: 'delivered', statusCode: 200 });
   assert.equal(f.services.webhooks.health()[0]!.health.failureStreak, 0);
   assert.ok(f.services.webhooks.health()[0]!.health.lastSuccessAt);
-  f.fake.rejectDecisions = true; f.clock.advance(5 * DAY);
+  f.expiresIn(2);
   await f.services.registry.renewDue();
   f.services.webhooks.reconcile({ subscriptions: [] }, f.dataDir);
   assert.equal(f.services.webhooks.claim(4, 30_000).length, 0);
@@ -212,10 +216,10 @@ test('owner routes require matching bound jobs and permitted credential events',
   jobs.create({ id: 'owned-job', clientId: 'client-a', requestId: 'owned-job', inputHash: 'owned-job', projectAlias: 'pilot',
     hostId: 'main', t3ProjectId: 'project-1', task: 'Synthetic task', title: 'Synthetic title', branch: '', runtimeMode: 'auto' });
   f.subscribe({ ownerClientId: 'client-a', hosts: ['main'] });
-  f.expiresIn(7); await f.services.registry.renewDue();
+  f.expiresIn(4); f.fake.rejectDecisions = true; await f.services.registry.renewDue();
   assert.equal(f.bodies().length, 0);
   f.services.webhooks.subscribe({ clientId: 'client-a', scopes: ['host:main:operate'] }, 'bot', 'owned-job', ['credential_alert', 'credential_resolved']);
-  f.clock.advance(5 * DAY); f.fake.rejectDecisions = true;
+  f.clock.advance(2 * DAY); f.fake.rejectDecisions = true;
   await f.services.registry.renewDue();
   assert.equal(f.bodies().filter((b) => b.reason === 'expiry' && b.thresholdDays === 2).length, 1);
 });
@@ -275,6 +279,7 @@ test('doctor shows the same persisted failure alert even when initial enrollment
   } } };
   const checks = await runDoctor(services, f.dataDir);
   assert.ok(checks.some((check) => check.name === 'host main credential alert' && check.detail.includes('renewal_failed: active')));
+  assert.ok(checks.some((check) => check.detail.includes('HTTP 400') && check.detail.includes('T3 AuthMcpApprovalError')));
 });
 
 test('existing dashboard event filters stay deliberate and can explicitly enable credential alerts', async (t) => {
@@ -284,17 +289,18 @@ test('existing dashboard event filters stay deliberate and can explicitly enable
   const ping = { eventId: randomUUID(), at: f.clock(), result: { outcome: 'delivered' as const, statusCode: 200 } };
   const connection = f.services.webhooks.connectDashboard('legacy-bot', 'pilot', 'main', route, ping, 'project-1',
     { events: ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended'] });
-  f.expiresIn(7); await f.services.registry.renewDue();
+  f.expiresIn(4); f.fake.rejectDecisions = true; await f.services.registry.renewDue();
   assert.equal(f.bodies().length, 0);
   f.services.webhooks.replaceDashboard(connection.id, connection.revision, route, ping, [...connection.events, 'credential_alert', 'credential_resolved']);
-  f.clock.advance(5 * DAY); f.fake.rejectDecisions = true;
+  f.clock.advance(2 * DAY); f.fake.rejectDecisions = true;
   await f.services.registry.renewDue();
   assert.ok(f.bodies().some((b) => b.thresholdDays === 2));
 });
 
 test('failed success bookkeeping rolls back verified replacement and its resolution outbox', async (t) => {
   const f = await fixture(t);
-  f.expiresIn(7); await f.services.registry.renewDue();
+  f.expiresIn(4); f.fake.rejectDecisions = true; await f.services.registry.renewDue();
+  f.fake.rejectDecisions = false;
   const before = f.credentials.get('main');
   f.services.db.exec(`CREATE TRIGGER synthetic_resolution_failure BEFORE UPDATE ON credential_alerts
     WHEN NEW.resolved_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;`);
@@ -306,7 +312,8 @@ test('failed success bookkeeping rolls back verified replacement and its resolut
 
 test('abandoned credential leases recover once, expire as dead letters, and leave job replay untouched', async (t) => {
   const f = await fixture(t);
-  f.expiresIn(7); await f.services.registry.renewDue();
+  f.fake.rejectDecisions = true;
+  await assert.rejects(f.services.registry.enroll('main'));
   const first = f.services.webhooks.claim(1, 30_000)[0]!;
   f.clock.advance(31_000);
   const second = f.services.webhooks.claim(1, 30_000)[0]!;
@@ -348,4 +355,144 @@ test('unchanged file configuration with omitted events preserves legacy selectio
   f.services.webhooks.reconcile(explicit, f.dataDir);
   assert.ok(f.services.webhooks.listConnections()[0]!.events.includes('credential_alert'));
   assert.notEqual(f.services.webhooks.listConnections()[0]!.revision, before[0]![0]!.revision);
+});
+
+test('healthy automatic renewal cycles emit no failure, expiry or resolution notifications', async (t) => {
+  const f = await fixture(t);
+  for (let day = 0; day < 90; day++) {
+    f.clock.advance(DAY);
+    await f.services.registry.renewDue();
+  }
+  assert.ok(f.fake.registeredClientNames.length >= 4, 'several automatic renewals actually ran');
+  assert.deepEqual(f.bodies(), []);
+  assert.deepEqual(f.services.registry.credentialAlerts('main'), []);
+});
+
+test('local renewal diagnostics preserve HTTP status and recognized T3 code across log, doctor and dashboard only', async (t) => {
+  const f = await fixture(t);
+  const secret = randomUUID();
+  f.fake.pairingError = { status: 403, body: { error: 'access_denied', message: secret } };
+  f.expiresIn(4);
+  await f.services.registry.renewDue();
+  const message = f.services.registry.credentialStatus('main').renewalError!.message;
+  assert.match(message, /approval: http_error; HTTP 403; T3 access_denied/);
+  assert.equal(f.credentials.renewal('main')!.errorMessage, message);
+  assert.ok(f.logs.some((line) => line.includes('host.enrollment_failed') && JSON.parse(line).detail === message));
+  const origin = `http://127.0.0.1:${f.gateway.dashboard!.port}`;
+  const snapshot = await (await fetch(origin + '/api/snapshot', { headers: { 'x-t3fg-dashboard': '1' } })).json() as
+    { hosts: { credential: { renewalError: { detail: string } } }[] };
+  assert.equal(snapshot.hosts[0]!.credential.renewalError.detail, message);
+  const checks = await runDoctor({ ...f.services, config: { ...f.services.config, dashboard: { ...f.services.config.dashboard,
+    listen: { host: '127.0.0.1', port: f.gateway.dashboard!.port } } } }, f.dataDir);
+  assert.ok(checks.some((check) => check.detail.includes(message)));
+  const payloads = JSON.stringify(f.bodies());
+  assert.doesNotMatch(payloads, /HTTP 403|access_denied|http_error/);
+  assert.ok(!(message + f.logs.join('') + JSON.stringify(snapshot) + JSON.stringify(checks) + payloads).includes(secret));
+});
+
+test('redirect denial codes remain diagnosable while unknown short codes and raw text stay redacted', async (t) => {
+  const f = await fixture(t);
+  f.fake.pairingDenial = 'access_denied';
+  await assert.rejects(f.services.registry.enroll('main'), { message: /approval: denied; T3 access_denied/ });
+  assert.match(f.credentials.renewal('main')!.errorMessage!, /T3 access_denied/);
+  const secret = randomUUID();
+  for (const bad of [secret, secret.replaceAll('-', '_')]) {
+    f.fake.pairingDenial = bad;
+    await assert.rejects(f.services.registry.enroll('main'), { message: /T3 unrecognized/ });
+    assert.ok(!f.logs.join('').includes(bad));
+    assert.ok(!f.credentials.renewal('main')!.errorMessage!.includes(bad));
+  }
+});
+
+test('candidate verification retains a safe T3 code, never the code-shaped secret or message', async (t) => {
+  const f = await fixture(t);
+  const secret = randomUUID();
+  f.fake.failures.set('t3_environment_read', { code: 'unavailable', message: secret });
+  await assert.rejects(f.services.registry.enroll('main'), { message: /verification: t3_tool_failed; T3 unavailable/ });
+  f.fake.failures.set('t3_environment_read', { code: secret, message: secret });
+  await assert.rejects(f.services.registry.enroll('main'), { message: /T3 unrecognized/ });
+  const output = f.logs.join('') + JSON.stringify(f.services.registry.credentialStatus('main')) + JSON.stringify(f.bodies());
+  for (const value of [secret, f.old.accessToken, f.old.t3ClientId]) assert.ok(!output.includes(value));
+});
+
+test('preflight and command failures use the same bounded local diagnostic format', async (t) => {
+  const f = await fixture(t);
+  f.services.registry.host('main').mintPairingCode.splice(0, 10, '/missing/synthetic-command');
+  f.expiresIn(4);
+  await f.services.registry.renewDue();
+  const preflight = f.credentials.renewal('main')!.errorMessage!;
+  assert.match(preflight, /preflight: executable_missing/);
+  assert.ok(f.logs.some((line) => line.includes('host.pairing_preflight') && JSON.parse(line).detail === preflight));
+  f.services.registry.host('main').mintPairingCode.splice(0, 10, process.execPath, '-e', 'process.exit(3)');
+  await assert.rejects(f.services.registry.enroll('main'), { message: /mint: command_failed; exit code 3/ });
+  assert.match(f.credentials.renewal('main')!.errorMessage!, /mint: command_failed; exit code 3/);
+});
+
+test('legacy stored raw renewal messages fail closed at the read boundary', async (t) => {
+  const f = await fixture(t);
+  const secret = randomUUID();
+  f.credentials.recordRenewal('main', f.clock(), { ok: false, code: 'enrollment_failed', message: secret });
+  assert.ok(!JSON.stringify(f.services.registry.credentialStatus('main')).includes(secret));
+});
+
+test('a late healthy check and a successful short-lived replacement stay silent', async (t) => {
+  const f = await fixture(t);
+  f.fake.tokenLifetimeSeconds = 86400;
+  f.expiresIn(1);
+  await f.services.registry.renewDue();
+  assert.notEqual(f.credentials.get('main')!.accessToken, f.old.accessToken);
+  assert.deepEqual(f.bodies(), []);
+});
+
+for (const status of [401, 403, 429, 503]) {
+  test(`candidate verification preserves HTTP ${status} locally without replacing the old credential`, async (t) => {
+    const f = await fixture(t);
+    f.fake.persistentStatus.set('t3_environment_read', status);
+    await assert.rejects(f.services.registry.enroll('main'), { message: new RegExp(`verification: [a-z0-9_]+; HTTP ${status}`) });
+    assert.deepEqual(f.credentials.get('main'), f.old);
+    const message = f.credentials.renewal('main')!.errorMessage!;
+    assert.match(message, new RegExp(`HTTP ${status}`));
+    assert.equal(f.services.registry.credentialStatus('main').renewalError!.message, message);
+    const origin = `http://127.0.0.1:${f.gateway.dashboard!.port}`;
+    const snapshot = await (await fetch(origin + '/api/snapshot', { headers: { 'x-t3fg-dashboard': '1' } })).json() as
+      { hosts: { credential: { renewalError: { detail: string } } }[] };
+    assert.equal(snapshot.hosts[0]!.credential.renewalError.detail, message);
+    if (status === 503) assert.match(message, /t3_response_lost/);
+    assert.ok(f.logs.some((line) => line.includes('host.enrollment_failed') && JSON.parse(line).detail === message));
+    assert.ok(!JSON.stringify(f.bodies()).includes(`HTTP ${status}`));
+  });
+}
+
+test('candidate probe status observation excludes background SSE GET HTTP 405', { timeout: 5000 }, async (t) => {
+  const f = await fixture(t);
+  f.fake.protocolVersions = ['2025-06-18'];
+  f.fake.persistentStatus.set('t3_environment_read', 401);
+  const originalFetch = globalThis.fetch;
+  const getReturned = Promise.withResolvers<void>();
+  let getStatus: number | undefined;
+  t.mock.method(globalThis, 'fetch', async (...args: Parameters<typeof fetch>) => {
+    const [input, init] = args;
+    const url = input instanceof Request ? new URL(input.url) : new URL(input);
+    if (url.pathname !== '/mcp') return originalFetch(...args);
+    const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+    if (method === 'GET') {
+      // A legacy host may support only POST. Its unsupported background stream is normal SDK behavior.
+      const response = new Response(null, { status: 405 });
+      Object.defineProperty(response, 'url', { value: url.href });
+      getStatus = response.status;
+      getReturned.resolve();
+      return response;
+    }
+    const body = input instanceof Request ? await input.clone().text() : String(init?.body ?? '');
+    if (body.includes('t3_environment_read')) await getReturned.promise;
+    const response = await originalFetch(...args);
+    return response;
+  });
+  const statuses: number[] = [];
+  const client = new T3Client({ hostId: 'main', t3Url: f.fake.url, token: () => f.old.accessToken,
+    observeHttpStatus: (status) => statuses.push(status) });
+  try { await assert.rejects(client.environmentRead()); } finally { await client.close(); }
+  assert.equal(getStatus, 405, 'the SDK attempted its unsupported background stream');
+  assert.ok(statuses.includes(401));
+  assert.ok(!statuses.includes(405), 'background stream responses must not enter verification diagnostics');
 });

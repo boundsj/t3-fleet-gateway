@@ -65,11 +65,11 @@ describe('host enrollment', () => {
 
   test('reports a failing or malformed pairing command and stores nothing', async (t) => {
     const failing = await setup(t, { mint: () => [process.execPath, '-e', 'process.exit(3)'] });
-    await assert.rejects(failing.registry.enroll('main'), { code: 'pairing_command_failed', message: /pairing command/ });
+    await assert.rejects(failing.registry.enroll('main'), { code: 'pairing_command_failed', message: /mint:/ });
     assert.equal(failing.store.get('main'), undefined);
     assert.equal(failing.registry.credentialStatus('main').renewalError?.code, 'pairing_command_failed');
     const garbled = await setup(t, { mint: () => [process.execPath, '-e', 'console.log("Pairing code: ABC")'] });
-    await assert.rejects(garbled.registry.enroll('main'), { code: 'pairing_command_failed', message: /pairing command/ });
+    await assert.rejects(garbled.registry.enroll('main'), { code: 'pairing_command_failed', message: /mint:/ });
   });
 
   test('a rejected pairing code fails enrollment', async (t) => {
