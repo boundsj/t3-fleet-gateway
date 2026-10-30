@@ -235,6 +235,8 @@ describe('T3 thread tools', () => {
   test('shares paged discovery, ignores advertised output validators, and rediscovers after reconnect', async (t) => {
     const { fake, client } = await setup(t, { pendingRequestTools: 'both' });
     const { threadId } = await client.launchThread(LAUNCH);
+    await client.close();
+    fake.toolsListCalls = 0;
     const requestId = fake.askQuestion(threadId, [{ id: 'q', header: 'Choice', question: 'Pick?', options: [] }]);
     fake.toolsListPages.set('', { tools: [{ name: 'unrelated' }], nextCursor: 'next' });
     fake.toolsListPages.set('next', { tools: [{ name: 't3_pending_request',
@@ -258,6 +260,8 @@ describe('T3 thread tools', () => {
   test('incomplete, duplicate and nonconverging discovery fails closed before responding and is not cached', async (t) => {
     const { fake, client } = await setup(t, { pendingRequestTools: 'both' });
     const { threadId } = await client.launchThread(LAUNCH);
+    await client.close();
+    fake.toolsListCalls = 0;
     const requestId = fake.askQuestion(threadId, [{ id: 'q', header: 'Choice', question: 'Pick?', options: [] }]);
     for (const page of [
       { tools: [{ name: 't3_pending_request_list' }] },
@@ -277,6 +281,8 @@ describe('T3 thread tools', () => {
   test('a stale advertised name cannot cause a respond fallback', async (t) => {
     const { fake, client } = await setup(t);
     const { threadId } = await client.launchThread(LAUNCH);
+    await client.close();
+    fake.toolsListCalls = 0;
     const requestId = fake.askQuestion(threadId, [{ id: 'q', header: 'Choice', question: 'Pick?', options: [] }]);
     fake.toolsListPages.set('', { tools: [{ name: 't3_pending_request' }] });
     await assert.rejects(client.respondToPendingRequest(threadId, requestId, {}));
@@ -400,4 +406,129 @@ test('unfamiliar bounded thread ids survive launch, read, list, search, send and
     assert.equal((await client.sendToThread({ threadId, message: 'Synthetic follow-up', clientRequestId: `send-${fake.threads.size}` })).threadId, threadId);
     assert.equal((await client.interruptThread({ threadId, clientRequestId: `stop-${fake.threads.size}` })).threadId, threadId);
   }
+});
+
+describe('launch retry keys and model search compatibility', () => {
+  test('a timed-out keyed launch retries on the same session and creates one thread and turn', async (t) => {
+    const { fake, client } = await setup(t, { launchRetryKeys: true });
+    await client.environmentRead();
+    fake.holdResponses.add('t3_thread_launch');
+    const launched = client.launchThread({ ...LAUNCH, clientRequestId: 't3fg-launch-synthetic' }, { timeoutMs: 150 });
+    const releasing = (async () => {
+      for (let i = 0; i < 200 && fake.calls.filter((name) => name === 't3_thread_launch').length < 2; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      fake.holdResponses.delete('t3_thread_launch');
+      fake.releaseHeld();
+    })();
+    const result = await launched;
+    await releasing;
+    assert.equal(fake.calls.filter((name) => name === 't3_thread_launch').length, 2);
+    assert.equal(fake.threads.size, 1);
+    assert.equal(fake.threads.get(result.threadId)!.runs.length, 1);
+    assert.equal(fake.launches[0]!.clientRequestId, 't3fg-launch-synthetic');
+  });
+
+  test('the same key survives a replacement gateway client and MCP session', async (t) => {
+    const { fake, client } = await setup(t, { launchRetryKeys: true });
+    const input = { ...LAUNCH, clientRequestId: 't3fg-launch-restart' };
+    const first = await client.launchThread(input);
+    await client.close();
+    const replacement = new T3Client({ hostId: 'main', t3Url: fake.url, token: () => 'token-for-tests' });
+    t.after(() => replacement.close());
+    const replay = await replacement.launchThread(input);
+    assert.equal(replay.threadId, first.threadId);
+    assert.equal(replay.runId, first.runId);
+    assert.equal(fake.threads.size, 1);
+    assert.equal(fake.threads.get(first.threadId)!.runs.length, 1);
+    await replacement.launchThread({ ...input, clientRequestId: 't3fg-launch-other' });
+    assert.equal(fake.threads.size, 2);
+    assert.equal(fake.toolsListCalls, 2, 'each session discovers its own contract');
+  });
+
+  test('legacy launch strips the unsupported key and never retries an ambiguous timeout', async (t) => {
+    const { fake, client } = await setup(t);
+    await client.environmentRead();
+    fake.holdResponses.add('t3_thread_launch');
+    await assert.rejects(client.launchThread({ ...LAUNCH, clientRequestId: 't3fg-launch-legacy' }, { timeoutMs: 100 }),
+      transportFailure('t3_timeout', 'unknown'));
+    fake.holdResponses.delete('t3_thread_launch');
+    fake.releaseHeld();
+    assert.equal(fake.calls.filter((name) => name === 't3_thread_launch').length, 1);
+    assert.equal(fake.threads.size, 1);
+    assert.equal(fake.launches[0]!.clientRequestId, undefined);
+  });
+
+  for (const modelSearch of [false, true]) {
+    test(`model search uses the ${modelSearch ? 'advertised search argument' : 'legacy empty input'}`, async (t) => {
+      const { fake, client } = await setup(t, { modelSearch });
+      fake.providers[0]!.models = Array.from({ length: 12 }, (_, i) => ({ id: `catalog-${i}`, label: `Model ${i}` }));
+      const defaults = await client.readCapabilities();
+      assert.equal(defaults.providers[0]!.models.length, modelSearch ? 8 : 12);
+      const found = await client.readCapabilities({ search: 'catalog-11' });
+      assert.equal(found.providers[0]!.models.length, modelSearch ? 1 : 12);
+      assert.deepEqual(fake.capabilitySearches, [undefined, modelSearch ? 'catalog-11' : undefined]);
+      assert.equal(fake.toolsListCalls, 1, 'discovery is shared within the session');
+    });
+  }
+});
+
+for (const nextSession of ['legacy', 'unauthorized'] as const) {
+  test(`an ambiguous keyed launch stays unknown when its retry session is ${nextSession}`, async (t) => {
+    const { fake } = await setup(t, { launchRetryKeys: true });
+    let connections = 0;
+    const client = new T3Client({ hostId: 'main', t3Url: fake.url, token: () => {
+      connections++;
+      if (connections > 1 && nextSession === 'legacy') fake.launchRetryKeys = false;
+      return connections > 1 && nextSession === 'unauthorized' ? 'invalid-test-credential' : 'token-for-tests';
+    } });
+    t.after(() => client.close());
+    fake.dropResponseOnce.add('t3_thread_launch');
+    await assert.rejects(client.launchThread({ ...LAUNCH, clientRequestId: 't3fg-launch-uncertain' }),
+      transportFailure(nextSession === 'legacy' ? 't3_response_lost' : 't3_unauthorized', 'unknown'));
+    assert.equal(fake.threads.size, 1);
+    assert.equal(fake.calls.filter((name) => name === 't3_thread_launch').length, 1, 'never send a downgraded retry');
+  });
+}
+
+test('a forgotten session rediscovers newly available model search', async (t) => {
+  const { fake, client } = await setup(t);
+  await client.readCapabilities({ search: 'synthetic-large' });
+  fake.modelSearch = true;
+  await fake.forgetSessions();
+  const found = await client.readCapabilities({ search: 'synthetic-large' });
+  assert.equal(found.providers[0]!.models.length, 1);
+  assert.deepEqual(fake.capabilitySearches, [undefined, 'synthetic-large']);
+  assert.equal(fake.toolsListCalls, 2);
+});
+
+test('a valid replacement authorization never replays an ambiguous launch in a new namespace', async (t) => {
+  const { fake } = await setup(t, { launchRetryKeys: true });
+  fake.validTokens.add('renewed-test-credential');
+  let connections = 0;
+  const client = new T3Client({ hostId: 'main', t3Url: fake.url,
+    token: () => ++connections === 1 ? 'token-for-tests' : 'renewed-test-credential' });
+  t.after(() => client.close());
+  fake.dropResponseOnce.add('t3_thread_launch');
+  await assert.rejects(client.launchThread({ ...LAUNCH, clientRequestId: 't3fg-launch-renewed' }),
+    transportFailure('t3_response_lost', 'unknown'));
+  assert.equal(fake.threads.size, 1);
+  assert.equal(fake.calls.filter((name) => name === 't3_thread_launch').length, 1);
+});
+
+test('a refusal of a retry never erases an ambiguous first launch', async (t) => {
+  const { fake, client } = await setup(t, { launchRetryKeys: true });
+  await client.environmentRead();
+  fake.holdResponses.add('t3_thread_launch');
+  const launched = client.launchThread({ ...LAUNCH, clientRequestId: 't3fg-launch-refused-retry' }, { timeoutMs: 150 });
+  const injecting = (async () => {
+    for (let i = 0; i < 100 && fake.threads.size === 0; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    fake.failures.set('t3_thread_launch', { code: 'invalid_request', message: 'Synthetic changed launch policy' });
+  })();
+  await assert.rejects(launched, transportFailure('t3_response_lost', 'unknown'));
+  await injecting;
+  fake.holdResponses.delete('t3_thread_launch');
+  fake.releaseHeld();
+  assert.equal(fake.threads.size, 1);
+  assert.equal(fake.calls.filter((name) => name === 't3_thread_launch').length, 2);
 });

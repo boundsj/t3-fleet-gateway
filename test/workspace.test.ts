@@ -579,6 +579,29 @@ describe('resume ownership of a held folder', () => {
   };
   const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 
+  for (const rejection of ['authorization', 'refusal'] as const) {
+    test(`repeated ${rejection} rejections release only their own resume tokens`, async (t) => {
+      const h = await probed(t);
+      const a = await idleRoot(h);
+      const input = { jobId: a.jobId, message: 'Synthetic retry', requestId: 'uncertain-root-retry' };
+      h.fake.statusOnce.set('t3_thread_send', 502);
+      assert.equal((await h.agent.callError('work_continue', input)).code, 't3_response_lost');
+      const original = store(h).require(a.jobId).workspaceResumeTokens;
+      assert.equal(original.length, 1);
+      if (rejection === 'authorization') await h.gw.services.registry.enroll('main');
+      else h.fake.failures.set('t3_thread_send', { code: 'invalid_request', message: 'Synthetic refusal' });
+      for (let i = 0; i < 10; i++) {
+        assert.equal((await h.agent.callError('work_continue', input)).code, 't3_response_lost');
+        assert.deepEqual(store(h).require(a.jobId).workspaceResumeTokens, original,
+          'the rejected attempt removes its token and preserves the earlier uncertain attempt');
+      }
+      assert.equal(h.fake.sends.length, 0);
+      h.fake.failures.delete('t3_thread_send');
+      await h.agent.call('work_continue', { ...input, requestId: 'new-root-operation' });
+      assert.equal(h.fake.sends.length, 1, 'legitimate new work is not blocked by leaked tokens');
+    });
+  }
+
   test('a retry after an unknown send refreshes the grace period: the sweep cannot free the folder under it', async (t) => {
     const h = await probed(t, { maxConcurrentJobs: 4 });
     const a = await idleRoot(h);

@@ -56,6 +56,7 @@ export interface CatalogProvider {
   driverKind: string;
   displayName: string | null;
   models: CatalogModel[];
+  omittedModels: number;
   runtimeModes: string[] | null;
   /** T3's own flags about delegated child tasks: metadata, not proof that a top-level launch works. */
   canRunChildTask: boolean | null;
@@ -83,6 +84,7 @@ export type CatalogKind = 'projects' | 'models';
 interface Entry<T> {
   snapshot?: Snapshot<T>;
   inflight?: Promise<Snapshot<T>>;
+  search?: string;
 }
 
 function limit(hostId: string, what: string): GatewayError {
@@ -171,6 +173,7 @@ export function sanitizeCapabilities(hostId: string, capabilities: T3Capabilitie
         if (skipped) logger.warn('catalog.options_skipped', { hostId, count: skipped });
         return [{ id: model.id, label: model.label ?? null, options }];
       }),
+      omittedModels: provider.omittedModels ?? 0,
       runtimeModes: provider.runtimeModes ?? null,
       canRunChildTask: provider.canRunChildTask ?? null,
       canRunCrossProviderChildTask: provider.canRunCrossProviderChildTask ?? null,
@@ -216,22 +219,25 @@ export class CatalogService {
     );
   }
 
-  models(hostId: string, options: { refresh?: boolean } = {}): Promise<Snapshot<CatalogProvider[]>> {
+  models(hostId: string, options: { refresh?: boolean; search?: string } = {}): Promise<Snapshot<CatalogProvider[]>> {
     return this.#read(this.#models, hostId, 'models', options.refresh === true, async () =>
-      sanitizeCapabilities(hostId, await this.#registry.client(hostId).readCapabilities(), this.#logger),
+      sanitizeCapabilities(hostId, await this.#registry.client(hostId).readCapabilities({ search: options.search }), this.#logger),
+      options.search,
     );
   }
 
   /** The snapshot held for a host, however old: a page cursor continues from the snapshot it names. */
-  held(hostId: string, kind: CatalogKind): Snapshot<CatalogProject[]> | Snapshot<CatalogProvider[]> | undefined {
-    return kind === 'projects' ? this.#projects.get(hostId)?.snapshot : this.#models.get(hostId)?.snapshot;
+  held(hostId: string, kind: CatalogKind, search?: string): Snapshot<CatalogProject[]> | Snapshot<CatalogProvider[]> | undefined {
+    if (kind === 'projects') return this.#projects.get(hostId)?.snapshot;
+    const entry = this.#models.get(hostId);
+    return (entry?.search ?? '') === (search ?? '') ? entry?.snapshot : undefined;
   }
 
-  #read<T>(entries: Map<string, Entry<T>>, hostId: string, kind: CatalogKind, refresh: boolean, fetch: () => Promise<T>): Promise<Snapshot<T>> {
+  #read<T>(entries: Map<string, Entry<T>>, hostId: string, kind: CatalogKind, refresh: boolean, fetch: () => Promise<T>, search?: string): Promise<Snapshot<T>> {
     this.#registry.host(hostId);
     let entry = entries.get(hostId);
-    if (!entry) {
-      entry = {};
+    if (!entry || (entry.search ?? '') !== (search ?? '')) {
+      entry = { search };
       entries.set(hostId, entry);
     }
     const now = this.#clock();

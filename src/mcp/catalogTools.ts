@@ -30,6 +30,10 @@ const inputSchema = z.object({
   limit: z.int().min(1).max(MAX_PAGE).optional().describe(`Items per host per page, default ${DEFAULT_PAGE}, at most ${MAX_PAGE}`),
 });
 
+const modelsInputSchema = inputSchema.extend({
+  search: z.string().trim().min(1).max(200).optional().describe('Search model ids and labels beyond T3’s default short list. Repeat with cursor; narrow the query when omittedModels is nonzero'),
+});
+
 const errorSchema = z.object({ code: z.string(), message: z.string() });
 
 const hostBase = {
@@ -87,7 +91,8 @@ const providerSchema = z.object({
   providerInstanceId: z.string().describe('Pass as modelSelection.instanceId'),
   driverKind: z.string(),
   displayName: z.string().nullable(),
-  modelCount: z.int().describe('0: the provider is configured on the host but advertises no models'),
+  modelCount: z.int().describe('Number of models returned by T3 in this catalog or search'),
+  omittedModels: z.int().nonnegative().describe('Models or search matches left out by T3; narrow search to find others. 0 on legacy hosts that report no omissions'),
   runtimeModes: z.array(z.string()).nullable().describe('Runtime modes T3 lists for the provider, when it does'),
   canRunChildTask: z.boolean().nullable().describe("T3's flag for delegated child tasks inside T3; not proof that a top-level launch works"),
   canRunCrossProviderChildTask: z.boolean().nullable(),
@@ -148,7 +153,7 @@ async function readPage<S, T>(
   deps: CatalogToolDeps,
   host: HostConfig,
   kind: CatalogKind,
-  input: z.output<typeof inputSchema>,
+  input: z.output<typeof modelsInputSchema>,
   read: (refresh: boolean) => Promise<Snapshot<S>>,
   items: (value: S) => T[],
 ): Promise<Page<T>> {
@@ -160,7 +165,7 @@ async function readPage<S, T>(
     if (!cursor || cursor.kind !== kind || cursor.hostId !== host.id) {
       throw new GatewayError('invalid_argument', `That cursor is not from this tool for host ${host.id}. Start again without cursor.`);
     }
-    const held = deps.catalog.held(host.id, kind) as Snapshot<S> | undefined;
+    const held = deps.catalog.held(host.id, kind, input.search) as Snapshot<S> | undefined;
     if (!held || held.id !== cursor.snapshot) {
       throw new GatewayError('invalid_argument', `That cursor's catalog of host ${host.id} has been replaced or expired. Start again without cursor.`);
     }
@@ -295,6 +300,7 @@ function providerView(provider: CatalogProvider): ProviderView {
     driverKind: provider.driverKind,
     displayName: provider.displayName,
     modelCount: provider.models.length,
+    omittedModels: provider.omittedModels,
     runtimeModes: provider.runtimeModes,
     canRunChildTask: provider.canRunChildTask,
     canRunCrossProviderChildTask: provider.canRunCrossProviderChildTask,
@@ -372,7 +378,8 @@ export function catalogTools(deps: CatalogToolDeps) {
     title: 'Discover models and options',
     description:
       'List the provider instances, models and model options (such as a reasoning effort) each host advertises, on hosts where the ' +
-      'operator enabled discovery, read live from that host\'s T3. Use it to build a modelSelection for work_start: ' +
+      'operator enabled discovery, read live from that host\'s T3. Pass search to find models beyond its short default list; ' +
+      'omittedModels counts matches T3 left out (narrow search). Older hosts return their legacy catalog. Use it to build a modelSelection for work_start: ' +
       'instanceId = providerInstanceId, model = modelId, and options = { <option id>: <a choices[].id for select options, true or ' +
       'false for boolean options> }. Only what a host advertises is accepted there; a selection the host does not advertise is refused ' +
       'rather than substituted, and omitting modelSelection keeps the configured defaults (project, then host, then the T3 project ' +
@@ -384,14 +391,14 @@ export function catalogTools(deps: CatalogToolDeps) {
       `catalog_limit, never cut. Project catalogs stop at ${MAX_PROJECT_PAGES * PROJECT_PAGE_SIZE} projects the same way. Read-only.`,
     scope: READ_SCOPE,
     readOnly: true,
-    inputSchema,
+    inputSchema: modelsInputSchema,
     outputSchema: modelsOutput,
     async run(input, context) {
       const hosts = await Promise.all(
         targetHosts(deps, context, input).map(async (host) => {
           if (!host.discovery.enabled) return { ...disabled(host), providers: [] as ProviderView[], models: [] as ModelView[] };
           try {
-            const page = await readPage(deps, host, 'models', input, (refresh) => deps.catalog.models(host.id, { refresh }), flatten);
+            const page = await readPage(deps, host, 'models', input, (refresh) => deps.catalog.models(host.id, { refresh, search: input.search }), flatten);
             const providers = (page.snapshot as Snapshot<CatalogProvider[]>).value;
             return {
               host: host.id,
@@ -416,7 +423,7 @@ export function catalogTools(deps: CatalogToolDeps) {
           ...view.providers.map(
             (provider) =>
               `  provider ${JSON.stringify(provider.providerInstanceId)} (${provider.driverKind}${provider.displayName ? `, ${provider.displayName}` : ''}): ` +
-              `${provider.modelCount} model(s)${provider.runtimeModes ? `, runtime modes ${provider.runtimeModes.join(', ')}` : ''}` +
+              `${provider.modelCount} model(s)${provider.omittedModels ? `, ${provider.omittedModels} omitted by T3; narrow search` : ''}${provider.runtimeModes ? `, runtime modes ${provider.runtimeModes.join(', ')}` : ''}` +
               `${provider.constraints.length > 0 ? `, constraints: ${provider.constraints.join('; ')}` : ''}`,
           ),
           ...view.models.map(describeModel),

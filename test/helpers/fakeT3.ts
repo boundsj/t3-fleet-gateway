@@ -9,6 +9,8 @@ import { sendWebResponse, toWebRequest } from '../../src/http/web.ts';
 
 export interface FakeT3Options {
   serverVersion?: string;
+  launchRetryKeys?: boolean;
+  modelSearch?: boolean;
   pendingRequestTools?: 'legacy' | 'combined' | 'both';
   /** Lifetime of issued credentials, seconds. T3 uses 30 days. */
   tokenLifetimeSeconds?: number;
@@ -204,7 +206,7 @@ const interruptInput = z.strictObject({
 });
 const pendingListInput = z.strictObject({ threadId: nullable(z.string()) });
 const projectListInput = z.strictObject({ cursor: nullable(z.int().min(0)), limit: nullable(z.int().min(1).max(100)) });
-/** orchestrator_capabilities takes no arguments. */
+/** Legacy orchestrator_capabilities takes no arguments; current sessions optionally accept search. */
 const capabilitiesInput = z.strictObject({});
 const pendingReadInput = z.strictObject({ threadId: nullable(z.string()), requestId: z.string() });
 const pendingRespondInput = z.strictObject({ threadId: nullable(z.string()), requestId: z.string(), answers: z.record(z.string(), z.unknown()) });
@@ -231,6 +233,10 @@ interface Session {
 export class FakeT3 {
   readonly serverVersion: string;
   pendingRequestTools: 'legacy' | 'combined' | 'both';
+  launchRetryKeys: boolean;
+  modelSearch: boolean;
+  readonly capabilitySearches: (string | undefined)[] = [];
+  readonly #launchResults = new Map<string, Record<string, unknown>>();
   toolsListCalls = 0;
   /** Synthetic tools/list pages keyed by the incoming cursor (empty string for the first page). */
   readonly toolsListPages = new Map<string, Record<string, unknown>>();
@@ -310,6 +316,8 @@ export class FakeT3 {
   readonly #sessions = new Map<string, Session>();
 
   constructor(options: FakeT3Options = {}) {
+    this.launchRetryKeys = options.launchRetryKeys ?? false;
+    this.modelSearch = options.modelSearch ?? false;
     this.serverVersion = options.serverVersion ?? '0.0.0-test';
     this.pendingRequestTools = options.pendingRequestTools ?? 'legacy';
     this.tokenLifetimeSeconds = options.tokenLifetimeSeconds ?? 30 * 86400;
@@ -683,7 +691,7 @@ export class FakeT3 {
           this.#sessions.set(id, { transport, token });
         },
       });
-      await this.#buildServer().connect(transport);
+      await this.#buildServer(token).connect(transport);
     }
     const response = await transport.handleRequest(toWebRequest(req, body, this.url));
     const tool = toolName(body);
@@ -698,7 +706,7 @@ export class FakeT3 {
   readonly pullRequests = new Map<string, Record<string, unknown>[]>();
   inlinePullRequests = false;
 
-  #buildServer(): McpServer {
+  #buildServer(namespace: string): McpServer {
     const server = new McpServer({ name: 'T3 Code', version: this.serverVersion });
     const run = async (tool: string, produce: () => Record<string, unknown>) => {
       this.calls.push(tool);
@@ -742,24 +750,33 @@ export class FakeT3 {
       if (this.projectListStuckCursor !== null) return { projects: page, nextCursor: this.projectListStuckCursor };
       return { projects: page, nextCursor: start + size < this.projects.length ? start + size : null };
     });
-    tool('orchestrator_capabilities', capabilitiesInput, () => ({
-      parentThreadId: null,
-      inheritedProviderInstanceId: null,
-      inheritedModel: null,
-      runtimeMode: 'full-access',
-      interactionMode: 'default',
-      providers: this.providers,
-      features: {
-        appOwnedSubagents: true,
-        asyncPolling: true,
-        cancellation: true,
-        batchThreadCreation: true,
-        threadManagement: true,
-        incrementalThreadRead: true,
-        scheduledTasks: true,
-        maxBatchThreads: 10,
-      },
-    }));
+    tool('orchestrator_capabilities', this.modelSearch ? capabilitiesInput.extend({ search: z.string().trim().min(1).max(200).optional() }) : capabilitiesInput, (input) => {
+      const search = 'search' in input ? input.search as string | undefined : undefined;
+      this.capabilitySearches.push(search);
+      return {
+        parentThreadId: null,
+        inheritedProviderInstanceId: null,
+        inheritedModel: null,
+        runtimeMode: 'full-access',
+        interactionMode: 'default',
+        providers: !this.modelSearch ? this.providers : this.providers.map((provider) => {
+          const terms = search?.toLowerCase().split(/\s+/).filter((term) =>
+            !`${provider.providerInstanceId} ${provider.driverKind} ${provider.displayName ?? ''}`.toLowerCase().includes(term)) ?? [];
+          const matches = provider.models.filter((model) => terms.every((term) => `${model.id} ${model.label ?? ''}`.toLowerCase().includes(term)));
+          return { ...provider, models: matches.slice(0, 8), omittedModels: Math.max(0, matches.length - 8) };
+        }),
+        features: {
+          appOwnedSubagents: true,
+          asyncPolling: true,
+          cancellation: true,
+          batchThreadCreation: true,
+          threadManagement: true,
+          incrementalThreadRead: true,
+          scheduledTasks: true,
+          maxBatchThreads: 10,
+        },
+      };
+    });
     tool('t3_attachment_prepare_upload', attachmentUploadInput, ({ upload }) => {
       const id = `pending-${randomUUID()}`;
       const metadata = { ...upload, id };
@@ -773,9 +790,15 @@ export class FakeT3 {
       const { delivery, ...result } = sent;
       return result;
     });
-    tool('t3_thread_launch', launchInput, (input) => {
+    tool('t3_thread_launch', this.launchRetryKeys ? launchInput.extend({ clientRequestId: z.string().optional() }) : launchInput, (input) => {
+      const requestId = 'clientRequestId' in input ? input.clientRequestId as string | undefined : undefined;
+      const key = requestId ? `${namespace}:${requestId}` : undefined;
+      const previous = key ? this.#launchResults.get(key) : undefined;
+      if (previous) return previous;
       this.#checkAttachments(input.attachments ?? []);
-      return this.#launch(input);
+      const result = this.#launch(input);
+      if (key) this.#launchResults.set(key, result);
+      return result;
     });
     tool('t3_thread_read', readInput, (input) => {
       this.reads.push(input);
@@ -831,7 +854,7 @@ export class FakeT3 {
       thread.updatedAt = new Date().toISOString();
       return { sequence: 1 };
     });
-    tool('t3_thread_send', sendInput, (input) => this.#send(input));
+    tool('t3_thread_send', sendInput, (input) => this.#send(input, namespace));
     tool('t3_thread_interrupt', interruptInput, (input) => {
       const key = input.clientRequestId ? `${input.threadId}:${input.clientRequestId}` : undefined;
       const previous = key ? this.#interruptResults.get(key) : undefined;
@@ -1028,8 +1051,8 @@ export class FakeT3 {
     };
   }
 
-  #send(input: z.output<typeof sendInput>): Record<string, unknown> {
-    const key = input.clientRequestId ? `${input.threadId}:${input.clientRequestId}` : undefined;
+  #send(input: z.output<typeof sendInput>, namespace = ''): Record<string, unknown> {
+    const key = input.clientRequestId ? `${namespace}:${input.threadId}:${input.clientRequestId}` : undefined;
     const previous = key ? this.#sendResults.get(key) : undefined;
     if (previous) return previous;
     const thread = this.#thread(input.threadId);

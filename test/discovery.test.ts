@@ -19,7 +19,7 @@ interface HostPage<T> {
   total: number | null;
   projects?: T[];
   models?: T[];
-  providers?: { providerInstanceId: string; modelCount: number; constraints: string[]; canRunChildTask: boolean | null }[];
+  providers?: { providerInstanceId: string; modelCount: number; omittedModels: number; constraints: string[]; canRunChildTask: boolean | null }[];
 }
 
 interface ProjectEntry {
@@ -789,4 +789,47 @@ test('compact capabilities keep discovery and explicit launches working with a m
   }
   assert.ok(gw.logs.some((line) => JSON.parse(line).event === 'catalog.options_skipped'));
   assertNotLogged(gw, ['synthetic-broken', 'synthetic-effort', 'missing-choice']);
+});
+
+describe('search beyond the short model catalog', () => {
+  for (const modelSearch of [false, true]) {
+    test(`fleet_models and work_start validate a non-default model on a ${modelSearch ? 'search-capable' : 'legacy'} host`, async (t) => {
+      const mini = await startFakeT3({ modelSearch, launchRetryKeys: true });
+      t.after(() => mini.close());
+      mini.providers[0]!.models = Array.from({ length: 12 }, (_, i) => ({ id: `catalog-${i}`, label: `Model ${i}` }));
+      const { agent, tick, gw } = await startFleet(t, { mini });
+      const defaults = await agent.call<{ hosts: HostPage<ModelEntry>[] }>('fleet_models', { host: 'mini' });
+      assert.equal(defaults.hosts[0]!.total, modelSearch ? 8 : 12);
+      const providers = defaults.hosts[0]!.providers!;
+      assert.equal(providers[0]!.omittedModels, modelSearch ? 4 : 0);
+      const found = await agent.call<{ hosts: HostPage<ModelEntry>[] }>('fleet_models', { host: 'mini', search: 'catalog-11' });
+      assert.ok(found.hosts[0]!.models!.some((model) => model.modelId === 'catalog-11'));
+      const started = await agent.call<{ job: StartedJob }>('work_start', {
+        project: 'alpha', task: 'Synthetic searched model task', requestId: requestId(),
+        modelSelection: { instanceId: 'synthetic-provider', model: 'catalog-11' },
+      });
+      await tick();
+      const thread = mini.threadForJob(started.job.jobId);
+      assert.equal((thread.launch.modelSelection as { model: string }).model, 'catalog-11');
+      assert.equal(thread.launch.clientRequestId, `t3fg-launch-${started.job.jobId}`);
+      if (modelSearch) assert.equal(mini.capabilitySearches.filter((query) => query === 'catalog-11').length, 3,
+        'browse, acceptance and dispatch each read the requested model');
+      assertNotLogged(gw, ['catalog-11']);
+    });
+  }
+
+  test('search pages bind their query, report upstream omissions, and cannot page another query', async (t) => {
+    const mini = await startFakeT3({ modelSearch: true });
+    t.after(() => mini.close());
+    mini.providers[0]!.models = Array.from({ length: 12 }, (_, i) => ({ id: `catalog-${i}`, label: `Model ${i}` }));
+    const { agent } = await startFleet(t, { mini });
+    const first = await agent.call<{ hosts: HostPage<ModelEntry>[] }>('fleet_models', { host: 'mini', search: 'catalog', limit: 2 });
+    const cursor = first.hosts[0]!.nextCursor;
+    assert.ok(cursor);
+    const page = await agent.call<{ hosts: HostPage<ModelEntry>[] }>('fleet_models', { host: 'mini', search: 'catalog', cursor, limit: 2 });
+    assert.deepEqual(page.hosts[0]!.models!.map((model) => model.modelId), ['catalog-2', 'catalog-3']);
+    assert.equal((await toolText(agent, 'fleet_models', { host: 'mini', search: 'other', cursor })).isError, true);
+    await agent.call('fleet_models', { host: 'mini', search: 'catalog-11' });
+    assert.equal((await toolText(agent, 'fleet_models', { host: 'mini', search: 'catalog', cursor })).isError, true);
+  });
 });
