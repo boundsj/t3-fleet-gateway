@@ -359,7 +359,7 @@ export class JobEngine {
 
   /** The launch of an alias-only job: its project resolved on the host now. Undefined when the job failed instead. */
   async #planFromConfig(job: Job): Promise<LaunchPlan | undefined> {
-    const { store, config } = this.#options;
+    const { config } = this.#options;
     const project = config.projects.find((candidate) => candidate.alias === job.projectAlias);
     if (!project) {
       this.#failQueued(job, 'project_not_configured', `Project "${job.projectAlias}" is no longer configured.`);

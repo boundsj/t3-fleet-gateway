@@ -277,7 +277,6 @@ const configSchema = z
 export type GatewayConfig = z.infer<typeof configSchema>;
 export type HostConfig = GatewayConfig['hosts'][number];
 export type ProjectConfig = GatewayConfig['projects'][number];
-export type DiscoveryConfig = HostConfig['discovery'];
 export type DashboardConfig = GatewayConfig['dashboard'];
 
 /** Where a project's launches get their model in the gateway config, or null to leave it to the T3 project's default. */

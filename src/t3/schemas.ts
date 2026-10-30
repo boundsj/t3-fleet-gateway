@@ -26,21 +26,6 @@ export const projectListSchema = z.looseObject({
   nextCursor: z.number().int().nullable().optional(),
 });
 
-/** Legacy full ProviderOptionDescriptor, retained as the old wire-format reference.
- * Current compact MCP options are normalized independently in hosts/catalog.ts.
- */
-export const optionDescriptorSchema = z.looseObject({
-  id: z.string().min(1),
-  label: z.string(),
-  description: z.string().nullish(),
-  type: z.string(),
-  options: z
-    .array(z.looseObject({ id: z.string().min(1), label: z.string(), description: z.string().nullish(), isDefault: z.boolean().nullish() }))
-    .nullish(),
-  currentValue: z.union([z.string(), z.boolean()]).nullish(),
-});
-export type OptionDescriptor = z.infer<typeof optionDescriptorSchema>;
-
 /** The fields of `orchestrator_capabilities` the gateway relies on; T3's result has more (features, inherited model). */
 export const capabilitiesSchema = z.looseObject({
   providers: z.array(
@@ -60,7 +45,6 @@ export const capabilitiesSchema = z.looseObject({
   ),
 });
 export type T3Capabilities = z.infer<typeof capabilitiesSchema>;
-export type T3ProviderCapability = T3Capabilities['providers'][number];
 
 /**
  * Thread and run status values T3 documents. Outputs are parsed as plain strings so that a status
@@ -79,7 +63,6 @@ export const THREAD_STATUSES = [
   'cancelled',
   'rolled_back',
 ] as const;
-export type ThreadStatus = (typeof THREAD_STATUSES)[number];
 
 /** A run is still going (or about to) in these statuses. `waiting` means it is blocked on the user. */
 export const ACTIVE_RUN_STATUSES: readonly string[] = ['preparing', 'queued', 'starting', 'running', 'waiting'];
@@ -133,7 +116,6 @@ export const threadSummarySchema = z.looseObject({
   settledAt: z.string().nullable().optional(),
   archived: z.boolean().optional(),
 }).transform(withThreadLink);
-export type ThreadSummary = z.infer<typeof threadSummarySchema>;
 
 export const threadListSchema = z.looseObject({
   projectId: z.string(),
@@ -180,7 +162,6 @@ export const threadRunSchema = z.looseObject({
   status: z.string(),
   completedAt: z.string().nullable(),
 });
-export type ThreadRun = z.infer<typeof threadRunSchema>;
 
 export const threadReadSchema = z.looseObject({
   thread: z.looseObject({
@@ -206,8 +187,6 @@ export const threadReadSchema = z.looseObject({
   hasMore: z.boolean(),
 });
 export type ThreadRead = z.infer<typeof threadReadSchema>;
-
-export const SEND_MODES = ['auto', 'queue', 'steer', 'restart'] as const;
 
 export const sendResultSchema = z.looseObject({
   threadId: responseThreadIdSchema,

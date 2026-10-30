@@ -7,7 +7,7 @@ import { GatewayError } from '../src/errors.ts';
 import { startInputHash } from '../src/jobs/service.ts';
 import { runWorkspaceProbe } from '../src/jobs/workspace.ts';
 import { MINUTE, SECOND } from '../src/time.ts';
-import { assertNotLogged, jobState, startJob, startJobHarness, type JobHarness, type JobHarnessOptions } from './helpers/jobs.ts';
+import { assertNotLogged, jobState, startJobHarness, type JobHarness, type JobHarnessOptions } from './helpers/jobs.ts';
 import { tempDir } from './helpers/tmp.ts';
 
 const probe = fileURLToPath(new URL('./helpers/workspaceProbe.js', import.meta.url));

@@ -572,7 +572,7 @@ describe('host grants: work tools on two hosts', () => {
   });
 
   test('a read-only agent for selected machines reads full messages and questions there and cannot change anything', async (t) => {
-    const { mini, macbook, gw, trusted, tick } = await startFleet(t);
+    const { mini, gw, trusted, tick } = await startFleet(t);
     const alpha = await startIn(trusted, 'alpha', 'Synthetic alpha task');
     const beta = await startIn(trusted, 'beta', 'Synthetic beta task');
     await tick();
