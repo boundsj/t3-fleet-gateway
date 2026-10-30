@@ -282,7 +282,16 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
           kv([
             ['Host', hosts || 'All hosts'],
             ['Managed by', managed ? 'Dashboard' : 'Configuration file'],
+            ['Events', (row.events ?? []).join(', ') || 'Default events'],
+            ['Jobs', (row.jobs ?? []).join(', ') || 'All matching jobs'],
+            ['Started by clients', (row.clients ?? []).join(', ') || 'All clients'],
             ['Last test', testSummary(row.lastTest)],
+            ['Last delivery', row.health?.lastSuccessAt ? time(row.health.lastSuccessAt) : 'No success recorded'],
+            ['Last failure', row.health?.lastFailureAt ? time(row.health.lastFailureAt) : 'No failure recorded'],
+            ['Failure streak', String(row.health?.failureStreak ?? 0)],
+            ['Pending events', String(row.health?.pending ?? 0)],
+            ['Dead-lettered events', String(row.health?.deadLettered ?? 0)],
+            ['Omitted events', String(row.health?.overflowCount ?? 0)],
           ]),
           managed ? null : h('p', { class: 'sub webhook-note' }, 'File-managed connection. Change or remove it in the gateway configuration.'),
           h('div', { class: 'webhook-actions' },
@@ -339,6 +348,14 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     }, [...new Set(data.projects.map((item) => item.host))].map((host) =>
       h('optgroup', { label: host }, data.projects.filter((item) => item.host === host).map((item) =>
         h('option', { value: item.alias }, item.name ? `${item.name} (${item.projectId})` : item.alias)))));
+    const filters = replacing ? [] : [
+      ['events', 'Events (optional)', 'idle, needs_input, failed, cancelled, delegated_work_ended'],
+      ['jobs', 'Job IDs (optional)', 'All matching jobs'],
+      ['clients', 'Started by client IDs (optional)', 'All clients'],
+    ].map(([key, label, placeholder]) => ({ key, label, input: h('input', {
+      id: `webhook-${key}`, type: 'text', maxlength: key === 'clients' ? '12000' : '6400', placeholder, disabled: busy,
+      autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false',
+    }) }));
     const unavailable = (data.hosts ?? []).filter((host) => host.status === 'unavailable');
     const clear = () => { url.value = ''; auth.value = ''; };
     return h('form', {
@@ -349,6 +366,10 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
         const fields = replacing ? { id: form.id, revision: form.revision } : { project: project.value };
         if (url.value.trim() || !replacing) fields.url = url.value.trim();
         fields.authHeader = auth.value;
+        for (const filter of filters) {
+          const values = filter.input.value.split(',').map((value) => value.trim()).filter(Boolean);
+          if (values.length) fields[filter.key] = values;
+        }
         clear();
         return actions.webhookOperation(replacing ? 'replace' : 'connect', fields);
       } },
@@ -366,6 +387,9 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     h('div', { class: 'webhook-defaults' },
       h('p', null, h('strong', null, 'Five updates: '), 'ready for follow-up, needs input, failed, cancelled, and delegated work ended.'),
       h('p', null, h('strong', null, 'Reply excerpts are off. '), 'Updates identify the job and its state without copying the worker’s reply.')),
+    filters.length ? h('details', null, h('summary', null, 'Choose precise notifications'),
+      h('p', { class: 'field__hint' }, 'Comma-separated values. Every filter must match the selected project and host. Blank fields keep the defaults.'),
+      filters.map((filter) => h('div', { class: 'field' }, h('label', { for: `webhook-${filter.key}` }, filter.label), filter.input))) : null,
     h('div', { class: 'webhook-actions' },
       h('button', { type: 'submit', class: 'btn btn--accent', disabled: busy || (!replacing && data.projects.length === 0),
         'aria-busy': busy ? 'true' : null },

@@ -59,6 +59,8 @@ Commands:
   webhooks list             Show subscriptions, ownership and safe delivery counts (offline)
   webhooks attempts <id> [--limit 20]
                             Show recent delivery attempts, codes only (offline)
+  webhooks replay <id> (--after <cursor> | --since <ISO time>) [--limit 200]
+                            Requeue retained original events (offline; receiver deduplicates eventId)
   webhooks ping <id>         Test a file-managed or dashboard connection with synthetic content
   doctor                    Check config, permissions, database, hosts, public URL and dashboard
 
@@ -395,15 +397,20 @@ async function jobs(paths: Paths, io: CliIo, action: string | undefined, args: s
   throw new UsageError('Use: jobs adopt <project> <threadId> [--title <text>] | jobs list [--all] | jobs release <jobId>');
 }
 
-async function webhooks(paths: Paths, io: CliIo, action: string | undefined, id: string | undefined, limitText?: string): Promise<number> {
-  if (!['list', 'attempts', 'ping'].includes(action ?? '') || (action !== 'list' && !id) || (action === 'list' && id)) {
+async function webhooks(paths: Paths, io: CliIo, action: string | undefined, id: string | undefined, limitText?: string, afterCursor?: string, since?: string): Promise<number> {
+  if (!['list', 'attempts', 'ping', 'replay'].includes(action ?? '') || (action !== 'list' && !id) || (action === 'list' && id)) {
     throw new UsageError('Use: webhooks list | webhooks attempts <id> [--limit 20] | webhooks ping <id>');
   }
-  const limit = limitText === undefined ? 20 : Number(limitText);
-  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new UsageError('--limit must be 1 to 100');
+  const limit = limitText === undefined ? (action === 'replay' ? 200 : 20) : Number(limitText);
+  const max = action === 'replay' ? 200 : 100;
+  if (!Number.isInteger(limit) || limit < 1 || limit > max) throw new UsageError(`--limit must be 1 to ${max}`);
   const storage = openStorage(paths.dataDir);
   try {
     const store = new WebhookStore(storage.db, systemClock);
+    if (action === 'replay') {
+      io.out(JSON.stringify(store.replay(id!, { afterCursor, since, limit }), null, 2));
+      return 0;
+    }
     if (action === 'attempts') {
       io.out(JSON.stringify(store.diagnostics(id, limit), null, 2));
       return 0;
@@ -459,6 +466,8 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         title: { type: 'string' },
         all: { type: 'boolean' },
         limit: { type: 'string' },
+        after: { type: 'string' },
+        since: { type: 'string' },
         scope: { type: 'string', multiple: true },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
@@ -491,7 +500,9 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       ['title', values.title, 'jobs adopt', command === 'jobs' && action === 'adopt'],
       ['all', values.all, 'jobs list', command === 'jobs' && action === 'list'],
       ['scope', values.scope, 'clients grant/ungrant', command === 'clients' && (action === 'grant' || action === 'ungrant')],
-      ['limit', values.limit, 'webhooks attempts', command === 'webhooks' && action === 'attempts'],
+      ['limit', values.limit, 'webhooks attempts/replay', command === 'webhooks' && (action === 'attempts' || action === 'replay')],
+      ['after', values.after, 'webhooks replay', command === 'webhooks' && action === 'replay'],
+      ['since', values.since, 'webhooks replay', command === 'webhooks' && action === 'replay'],
     ] as const;
     for (const [option, value, owner, allowed] of optionCommands) {
       if (value !== undefined && !allowed) throw new UsageError(`--${option} is only for ${owner}`);
@@ -517,7 +528,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       case 'jobs':
         return await jobs(paths, io, action, args, { title: values.title, all: values.all });
       case 'webhooks':
-        return await webhooks(paths, io, action, id, values.limit);
+        return await webhooks(paths, io, action, id, values.limit, values.after, values.since);
       case 'doctor':
         return await doctor(paths, io);
       default:

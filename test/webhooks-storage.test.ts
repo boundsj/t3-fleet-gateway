@@ -167,6 +167,7 @@ describe('webhook migration and durable store boundaries', () => {
     const connection = f.webhooks.connectDashboard('dashboard-one', 'pilot', 'main', dashboardRoute, successfulTest(f.clock()));
     assert.deepEqual(connection, {
       id: 'dashboard-one', revision: connection.revision, source: 'dashboard', projects: ['pilot'], hosts: ['main'], targets: [],
+      jobs: [], clients: [], ownerClientId: null, events: ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended'],
       lastTest: { at: new Date(f.clock()).toISOString(), outcome: 'delivered', statusCode: 204 },
     });
     const settings = JSON.parse(f.db.prepare("SELECT settings FROM webhook_subscriptions WHERE id = 'dashboard-one'").get()!.settings as string);
@@ -416,14 +417,18 @@ test('migration 15 preserves populated v14 subscriptions, secrets, revisions, qu
   const job = createJob(jobs);
   // Seed the historical layout directly: the current transition also cleans the attachment table added later.
   db.prepare("UPDATE jobs SET state = 'cancelled' WHERE id = ?").run(job.id);
-  jobs.appendEvent(job.id, 'state_changed', 'cancelled');
+  const event = db.prepare("INSERT INTO job_events (job_id, type, to_state, created_at) VALUES (?, 'state_changed', 'cancelled', ?)")
+    .run(job.id, clock());
+  db.prepare(`INSERT INTO webhook_deliveries (subscription_id, revision, event_id, feed_sequence, payload, created_at, expires_at, next_attempt_at, state)
+    VALUES (?, ?, 'historical-event', ?, '{}', ?, ?, ?, 'pending')`)
+    .run(connection.id, connection.revision, Number(event.lastInsertRowid), clock(), clock() + 60_000, clock());
   const tables = ['webhook_subscriptions', 'webhook_deliveries', 'webhook_attempts', 'job_events', 'jobs'];
   const before = tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
   migrate(db);
   assert.equal(schemaVersion(db), SCHEMA_VERSION);
   assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
   assert.deepEqual(webhooks.route(connection.id, connection.revision), dashboardRoute);
-  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 14)), /schema version 17 is newer/);
+  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 14)), /schema version 18 is newer/);
   assert.equal(webhooks.claim(1, 30_000).length, 1, 'pending delivery still dispatches');
 });
 

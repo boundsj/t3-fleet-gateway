@@ -401,3 +401,57 @@ Treat backups as secrets: they contain T3 credentials. To restore, stop the gate
 2. Revoke the gateway's T3 sessions: in T3 under Settings → Connections, or `t3 auth session list --json` and `t3 auth session revoke <id>` for sessions labelled `t3-fleet-gateway (<host id>)`.
 3. Remove the agent connection in each agent.
 4. Delete the data directory, the config file and the logs.
+
+## Precise bot notifications and recovery
+
+Dashboard **Choose precise notifications** accepts optional comma-separated event, job and original-client
+IDs when connecting. Blank fields preserve the current defaults. These filters intersect the selected
+project/host; key replacement preserves them. Configuration supports the same filters and multiple
+host/project targets. For bot-managed per-job subscriptions, provision a dedicated config connection
+with `ownerClientId` and an explicit host ceiling (see [configuration](configuration.md#bot-owned-job-notifications)).
+
+A bot uses these MCP calls with its normal gateway bearer grant:
+
+```text
+work_notifications({})
+work_start({project: "pilot", task: "Inspect the change", requestId: "new-work-1"})
+work_subscribe({connectionId: "bot-notices", jobId: "<returned-job-id>", events: ["idle", "failed"]})
+work_replay({connectionId: "bot-notices", afterCursor: "0", limit: 200})
+```
+
+Subscribe immediately after starting; use `work_feed` to cover any event before the subscription was
+saved. A dedicated subscription tool keeps existing `work_start` request IDs and retries unchanged.
+Before resuming existing work, subscribe then call `work_continue`. `work_subscribe` with `remove: true`
+removes future capture. Unknown, other-client and unauthorized connections/jobs return the same
+`not_found`. Ownership alone does not grant host access: every connection host must be in the bot's
+grants, preventing a narrowed token from reading aggregate state for a hidden host. An owner connection
+only captures gateway-started jobs owned by that client, not standing or imported threads.
+
+Dashboard Webhooks, `doctor`, `webhooks list` and `work_notifications` show last delivery success/failure,
+failure streak, pending events, cumulative dead-lettered events and cumulative omitted events. A dead
+letter is an event whose one-hour delivery window expired, including one that expired before any POST.
+Successful delivery resets the streak; synthetic pings do not hide a failed delivery stream. Health
+survives attempt-history pruning; older attempts remain subject to the existing 100-per-connection /
+1,000-global metadata limits. Health starts unknown at upgrade, and route replacement resets it.
+
+Operators can queue a bounded replay locally, without contacting receivers or applying config:
+
+```sh
+t3-fleet-gateway webhooks replay bot-notices --after 123 --limit 200
+t3-fleet-gateway webhooks replay bot-notices --since 2026-01-15T12:00:00Z
+```
+
+Choose exactly one selector: `--after` is an exclusive decimal feed cursor, `--since` is an inclusive
+ISO timestamp. Bot `work_replay` uses `afterCursor` or `since` with the same semantics. Follow `nextCursor`
+while `hasMore`; if the pending queue is full, allow deliveries to drain before continuing. Each call
+scans at most 200 archived events, skips pending/sending duplicates, and requeues delivered or expired
+events with the original payload/eventId and a fresh retry window. Receivers must deduplicate eventId.
+A repeated replay may send an already delivered event again; it does not create a new source event.
+
+The private archive retains seven days or the newest 10,000 matching events per connection, whichever
+is smaller. A full pending queue still archives bounded payloads; oversized payloads cannot be archived
+and require feed catch-up. `retentionGap` reports a request before the known archive floor or retained
+time window. No pre-upgrade/pre-connection snapshots are invented. Replacing/disabling/removing a route
+invalidates its old archive and job bindings; bot subscriptions must be recreated for the new revision.
+Use authorized `work_feed` for older gaps and the subscribe/start interval. Preserve its last contiguous
+cursor independently: the maximum webhook/replay cursor is never proof that all fleet events were seen.

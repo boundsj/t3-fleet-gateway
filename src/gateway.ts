@@ -18,6 +18,7 @@ import { JobStore } from './jobs/store.ts';
 import type { Logger } from './log.ts';
 import { catalogTools } from './mcp/catalogTools.ts';
 import { createMcpEndpoint } from './mcp/endpoint.ts';
+import { notificationTools } from './mcp/notificationTools.ts';
 import { fleetStatusTool } from './mcp/fleetStatus.ts';
 import type { GatewayTool } from './mcp/tools.ts';
 import { workTools } from './mcp/workTools.ts';
@@ -105,7 +106,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
 }
 
 export function gatewayTools(services: GatewayServices): GatewayTool[] {
-  return [fleetStatusTool(services), ...catalogTools(services), ...threadTools(services), ...workTools(services.jobs)];
+  return [fleetStatusTool(services), ...catalogTools(services), ...threadTools(services), ...workTools(services.jobs), ...notificationTools(services)];
 }
 
 export interface RunningGateway {

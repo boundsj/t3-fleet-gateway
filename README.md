@@ -11,7 +11,7 @@ T3 Fleet Gateway connects Grok Bot, Notion and other MCP clients to your T3 serv
 - **One connection for the fleet.** Add machines behind the gateway without adding an MCP connection to every bot.
 - **Work you can follow.** Jobs have stable IDs, readable replies and a feed of changes that survives restarts.
 - **Access you choose.** Give an agent Read or Operate access to all machines or selected ones. Project rules decide what its workers may do.
-- **Updates when work changes.** Webhooks wake your bot when a turn finishes or a job needs attention.
+- **Updates when work changes.** Precise webhooks wake your bot for the jobs, clients, projects and events it follows. Delivery health and bounded replay recover missed notices; the durable feed covers older gaps. See [bot notifications and recovery](docs/operations.md#precise-bot-notifications-and-recovery).
 
 ## Get going with prompts
 
