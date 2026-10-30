@@ -107,6 +107,10 @@ How a launch into a discovered project is governed:
 
 An agent's `modelSelection` (`{ instanceId, model, options? }`) is checked against the host's freshly read catalog when the job is created and again right before it is launched: provider instance and model must be advertised, every option id must be one the model advertises, a `select` option takes one of its choice ids and a `boolean` option a boolean. Anything else is refused and nothing is substituted or launched; a selection that disappears from the catalog while the job is queued fails the job with `model_selection_invalid` before any launch. Omitting it keeps the configured whole-object default (project, then host, then the T3 project default), with no merging across levels. What such a job resolved to is recorded with the job (`launch_spec`), so a later config or catalog change does not move it.
 
+#### Credential alert thresholds
+
+`renewal.alertDaysLeft` defaults to `[7, 2]` and accepts one to eight integer days from 1 to 29. Each threshold raises once for the current credential; repeated checks do not repeat an active alert. `renewWhenDaysLeft` and `checkEveryMinutes` retain their existing meanings. Alerts use the existing webhook connections and event filters (`credential_alert`, `credential_resolved`); see [credential renewal](operations.md#credential-renewal) for upgrading existing connections and confirmed dashboard re-pair.
+
 #### Renewal command preflight
 
 `doctor` and `serve` check whether the first `mintPairingCode` argument resolves to an executable in the current process's `PATH` (or from its explicit path and working directory). They do not run that command. A missing or non-executable command is a failure; a selected path under `runtime/versions/<version>/` is a warning even if it still exists. A stable symlink is checked by the path selected through `PATH`, so its versioned target does not itself cause a pinned-path warning. Wrapper internals and the remote side of SSH remain unverified by resolution alone.
@@ -248,7 +252,7 @@ Then run `t3-fleet-gateway hosts enroll studio`. Adding a host is configuration 
 
 ## Webhooks
 
-v0.1.9: `webhooks: { "subscriptions": [] }` is the default. The easiest setup is **Connect Grok Bot** in the private dashboard: paste a URL and full authentication header, choose a project under its host group and test the connection. It works with generic HTTPS receivers too. Dashboard connections live in the database, require no secret file or restart, and use the five default events with excerpts off. They survive config edits and restarts.
+v0.1.9: `webhooks: { "subscriptions": [] }` is the default. The easiest setup is **Connect Grok Bot** in the private dashboard: paste a URL and full authentication header, choose a project under its host group and test the connection. It works with generic HTTPS receivers too. Dashboard connections live in the database, require no secret file or restart, and use the default job and credential events with excerpts off. They survive config edits and restarts.
 
 The file-managed alternative below remains supported. At most 32 saved active subscriptions across both sources are allowed; restart `serve` to apply file changes. The dashboard labels file-managed rows and cannot replace or disconnect them. ID collisions between ownership types are refused. The [manual setup example](setup.md#configure-a-webhook-by-hand) uses a Grok routine URL and sender-key header. No new incoming connection is required.
 

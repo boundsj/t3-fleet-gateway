@@ -167,12 +167,12 @@ describe('webhook migration and durable store boundaries', () => {
     const connection = f.webhooks.connectDashboard('dashboard-one', 'pilot', 'main', dashboardRoute, successfulTest(f.clock()));
     assert.deepEqual(connection, {
       id: 'dashboard-one', revision: connection.revision, source: 'dashboard', projects: ['pilot'], hosts: ['main'], targets: [],
-      jobs: [], clients: [], ownerClientId: null, events: ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended'],
+      jobs: [], clients: [], ownerClientId: null, events: ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended', 'credential_alert', 'credential_resolved'],
       lastTest: { at: new Date(f.clock()).toISOString(), outcome: 'delivered', statusCode: 204 },
     });
     const settings = JSON.parse(f.db.prepare("SELECT settings FROM webhook_subscriptions WHERE id = 'dashboard-one'").get()!.settings as string);
     assert.deepEqual(settings, { projects: ['pilot'], hosts: ['main'],
-      events: ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended'], excerptChars: 0 });
+      events: ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended', 'credential_alert', 'credential_resolved'], excerptChars: 0 });
     assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE subscription_id = 'dashboard-one'").get()!.n, 0,
       'connecting does not replay history');
     for (const [id, projectAlias, hostId] of [['matchjob01', 'pilot', 'main'], ['otherjob01', 'other', 'main'], ['otherjob02', 'pilot', 'other']]) {
@@ -409,7 +409,11 @@ test('migration 15 preserves populated v14 subscriptions, secrets, revisions, qu
   const clock = testClock();
   const webhooks = new WebhookStore(db, clock);
   const jobs = new JobStore(db, clock, silentLogger);
-  const connection = webhooks.connectDashboard('existing-route', 'pilot', 'main', dashboardRoute, successfulTest(clock()));
+  // Historical fixtures use the historical layout, not current code which requires newer tables.
+  const connection = { id: 'existing-route', revision: 'synthetic-revision' };
+  db.prepare(`INSERT INTO webhook_subscriptions (id, revision, identity, settings, route, source)
+    VALUES (?, ?, 'synthetic-identity', ?, ?, 'dashboard')`).run(connection.id, connection.revision,
+      JSON.stringify({ projects: ['pilot'], hosts: ['main'], events: ['cancelled'], excerptChars: 0 }), JSON.stringify(dashboardRoute));
   // Disabled config entries have no active persisted row. Preserve a legacy settings object too.
   db.prepare(`INSERT INTO webhook_subscriptions (id, revision, identity, settings, route, source)
     VALUES ('legacy-file', 'synthetic-revision', 'synthetic-identity', ?, ?, 'config')`)
@@ -428,7 +432,7 @@ test('migration 15 preserves populated v14 subscriptions, secrets, revisions, qu
   assert.equal(schemaVersion(db), SCHEMA_VERSION);
   assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
   assert.deepEqual(webhooks.route(connection.id, connection.revision), dashboardRoute);
-  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 14)), /schema version 18 is newer/);
+  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 14)), /schema version 19 is newer/);
   assert.equal(webhooks.claim(1, 30_000).length, 1, 'pending delivery still dispatches');
 });
 

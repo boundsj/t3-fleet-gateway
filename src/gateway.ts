@@ -6,6 +6,7 @@ import { openDatabase, type Database } from './db/database.ts';
 import { ThreadCatalog } from './hosts/threads.ts';
 import { threadTools } from './mcp/threadTools.ts';
 import { CatalogService } from './hosts/catalog.ts';
+import { CredentialAlerts } from './hosts/alerts.ts';
 import { CredentialStore } from './hosts/credentials.ts';
 import { warnProjectsWithoutModel } from './hosts/projects.ts';
 import { HostRegistry, type HostRegistryOptions } from './hosts/registry.ts';
@@ -74,12 +75,15 @@ export function openServices(options: ServiceOptions): GatewayServices {
   const { config, logger } = options;
   const clock = options.clock ?? systemClock;
   const { db, key } = openStorage(options.dataDir);
+  const webhooks = new WebhookStore(db, clock);
+  const alerts = new CredentialAlerts(db, clock, config, webhooks);
   const registry = new HostRegistry({
     hosts: config.hosts,
     store: new CredentialStore(db),
     clock,
     logger,
     renewWhenDaysLeft: config.renewal.renewWhenDaysLeft,
+    alerts,
     ...(options.runCommand ? { runCommand: options.runCommand } : {}),
     ...(options.commandEnv ? { commandEnv: options.commandEnv } : {}),
   });
@@ -96,7 +100,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
     registry,
     catalog,
     threads: new ThreadCatalog(registry, clock, logger),
-    webhooks: new WebhookStore(db, clock),
+    webhooks,
     jobs: new JobService({ config, store: new JobStore(db, clock, logger), registry, catalog, clock, logger }),
     async close() {
       await registry.close();

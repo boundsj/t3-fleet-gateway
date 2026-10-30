@@ -1,3 +1,5 @@
+import type { CredentialAlertPayload } from '../hosts/alerts.ts';
+import type { GatewayConfig } from '../config.ts';
 import { isThreadLink, threadLink } from '../threadId.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { transaction, type Database } from '../db/database.ts';
@@ -6,7 +8,7 @@ import { displayPullRequests } from '../jobs/pullRequests.ts';
 import type { Job, JobEvent } from '../jobs/store.ts';
 import { permits, type Scope } from '../oauth/scopes.ts';
 import type { Clock } from '../time.ts';
-import { DEFAULT_WEBHOOK_EVENTS, loadRoute, type PreciseFilters, type SubscriptionConfig, type WebhookEventType, type WebhookRoute, type WebhooksConfig } from './config.ts';
+import { DEFAULT_WEBHOOK_EVENTS, loadRoute, usesDefaultEvents, type PreciseFilters, type SubscriptionConfig, type WebhookEventType, type WebhookRoute, type WebhooksConfig } from './config.ts';
 
 export const RETRY_WINDOW_MS = 60 * 60_000;
 export const MAX_PENDING_PER_SUBSCRIPTION = 10_000;
@@ -92,6 +94,7 @@ interface DeliveryRow {
   created_at: number; expires_at: number; attempt_count: number; lease: string; lease_until: number;
 }
 export interface ClaimedDelivery {
+  source?: 'job' | 'credential';
   id: number; subscriptionId: string; eventId: string; revision: string; payload: string;
   lease: string; attempt: number; expiresAt: number; route: WebhookRoute;
 }
@@ -133,7 +136,10 @@ export class WebhookStore {
   /** Only the serving gateway applies config. Opening CLI services must never call this. */
   reconcile(config: WebhooksConfig, dataDir: string): void {
     // Read and validate every enabled secret before changing anything. A missing secret fails closed.
-    const enabled = config.subscriptions.filter((s) => s.enabled).map((settings) => {
+    const enabled = config.subscriptions.filter((s) => s.enabled).map((requested) => {
+      const previous = this.#row(requested.id);
+      const settings = usesDefaultEvents(requested) && previous?.source === 'config'
+        ? { ...requested, events: (JSON.parse(previous.settings) as SubscriptionSettings).events } : requested;
       const route = loadRoute(settings, dataDir);
       const identity = identityFor(settings, route);
       return { settings, route, identity };
@@ -196,16 +202,17 @@ export class WebhookStore {
     });
   }
 
-  replaceDashboard(id: string, expectedRevision: string, route: WebhookRoute, test: DashboardTest): WebhookConnection {
+  replaceDashboard(id: string, expectedRevision: string, route: WebhookRoute, test: DashboardTest, events?: WebhookEventType[]): WebhookConnection {
     return transaction(this.#db, () => {
       const row = this.#dashboard(id, expectedRevision);
       this.#requireSuccessfulTest(test);
       const settings = JSON.parse(row.settings) as SubscriptionSettings;
+      if (events) settings.events = events;
       this.#cancel(id);
-      this.#db.prepare(`UPDATE webhook_subscriptions SET revision = ?, identity = ?, route = ?,
+      this.#db.prepare(`UPDATE webhook_subscriptions SET revision = ?, identity = ?, route = ?, settings = ?,
         overflow_count = 0, overflow_sequence = NULL, overflow_at = NULL, overflow_reason = NULL,
         last_test_at = NULL, last_test_outcome = NULL, last_test_status_code = NULL WHERE id = ?`)
-        .run(randomUUID(), identityFor(settings, route), JSON.stringify(route), id);
+        .run(randomUUID(), identityFor(settings, route), JSON.stringify(route), JSON.stringify(settings), id);
       this.#recordTest(id, test);
       return connection(this.#row(id)!);
     });
@@ -270,7 +277,7 @@ export class WebhookStore {
           VALUES (?, ?, ?, ?, ?, ?)`).run(row.id, row.revision, event.id, body.eventId, json, event.createdAt);
         this.#pruneArchive(row.id);
       }
-      const pending = this.#db.prepare("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE subscription_id = ? AND state IN ('pending', 'sending')")
+      const pending = this.#db.prepare("SELECT COUNT(*) AS n FROM notification_deliveries WHERE subscription_id = ? AND state IN ('pending', 'sending')")
         .get(row.id) as { n: number };
       const overflow = Buffer.byteLength(json) > MAX_PAYLOAD_BYTES ? 'payload_limit'
         : pending.n >= MAX_PENDING_PER_SUBSCRIPTION ? 'backlog' : null;
@@ -287,35 +294,78 @@ export class WebhookStore {
     }
   }
 
+  /** Called inside CredentialAlerts' transaction. Host alerts have no job attribution or job-feed cursor. */
+  captureCredential(payload: CredentialAlertPayload, projects: GatewayConfig['projects']): void {
+    const now = this.#clock();
+    const rows = this.#db.prepare('SELECT * FROM webhook_subscriptions').all() as unknown as SubscriptionRow[];
+    for (const row of rows) {
+      const s = JSON.parse(row.settings) as SubscriptionSettings;
+      if (!s.events.includes(payload.type) || (s.hosts && !s.hosts.includes(payload.host))) continue;
+      // Intersect every route filter. Precise bot/job filters need a single affected ledger job
+      // satisfying the entire intersection, rather than borrowing identity from another job.
+      if (s.projects || s.targets || s.jobs || s.clients || s.ownerClientId) {
+        const configuredMatch = !s.jobs && !s.clients && !s.ownerClientId && projects.some((p) => p.host === payload.host &&
+          (!s.projects || s.projects.includes(p.alias)) && (!s.targets || s.targets.some((t) => t.host === p.host && t.projectId === p.t3ProjectId)));
+        const matches = this.#db.prepare(`SELECT 1 FROM jobs j WHERE j.host_id = ?
+          AND (? IS NULL OR j.client_id = ?)
+          AND (? IS NULL OR j.id IN (SELECT value FROM json_each(?)))
+          AND (? IS NULL OR j.client_id IN (SELECT value FROM json_each(?)))
+          AND (? IS NULL OR j.project_alias IN (SELECT value FROM json_each(?)))
+          AND (? IS NULL OR EXISTS (SELECT 1 FROM json_each(?) t
+            WHERE json_extract(t.value, '$.host') = j.host_id AND json_extract(t.value, '$.projectId') = j.t3_project_id))
+          AND (? IS NULL OR EXISTS (SELECT 1 FROM webhook_job_bindings b WHERE b.subscription_id = ? AND b.revision = ?
+            AND b.job_id = j.id AND ? IN (SELECT value FROM json_each(b.events)))) LIMIT 1`)
+          .get(payload.host, s.ownerClientId ?? null, s.ownerClientId ?? null,
+            s.jobs ? 1 : null, JSON.stringify(s.jobs ?? []), s.clients ? 1 : null, JSON.stringify(s.clients ?? []),
+            s.projects ? 1 : null, JSON.stringify(s.projects ?? []), s.targets ? 1 : null, JSON.stringify(s.targets ?? []),
+            s.ownerClientId ?? null, row.id, row.revision, payload.type);
+        if (!configuredMatch && !matches) continue;
+      }
+      this.#ensureHealth(row.id);
+      const pending = Number(this.#db.prepare(`SELECT COUNT(*) AS n FROM notification_deliveries
+        WHERE subscription_id = ? AND state IN ('pending', 'sending')`).get(row.id)!.n);
+      if (pending >= MAX_PENDING_PER_SUBSCRIPTION) {
+        this.#db.prepare(`UPDATE webhook_subscriptions SET overflow_count = overflow_count + 1,
+          overflow_at = ?, overflow_reason = 'backlog' WHERE id = ?`).run(now, row.id);
+        continue;
+      }
+      this.#db.prepare(`INSERT INTO credential_deliveries
+        (subscription_id, revision, event_id, payload, created_at, expires_at, next_attempt_at, state)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`)
+        .run(row.id, row.revision, payload.eventId, JSON.stringify(payload), now, now + RETRY_WINDOW_MS, now);
+    }
+  }
+
   claim(limit: number, leaseMs: number): ClaimedDelivery[] {
     return transaction(this.#db, () => {
       const now = this.#clock();
-      const abandoned = this.#db.prepare("SELECT subscription_id FROM webhook_deliveries WHERE state = 'sending' AND lease_until <= ?").all(now);
-      for (const row of abandoned) this.#failure(String(row.subscription_id), now);
-      this.#db.prepare("UPDATE webhook_attempts SET outcome = 'abandoned', lease = NULL WHERE outcome = 'in_progress' AND delivery_id IN " +
-        "(SELECT id FROM webhook_deliveries WHERE state = 'sending' AND lease_until <= ?)").run(now);
-      this.#db.prepare("UPDATE webhook_deliveries SET state = 'pending', lease = NULL, lease_until = NULL WHERE state = 'sending' AND lease_until <= ?").run(now);
-      // Recovered leases may already be past their retry window; count them before clearing payloads.
-      const expired = this.#db.prepare("SELECT subscription_id, COUNT(*) AS n FROM webhook_deliveries WHERE state = 'pending' AND expires_at <= ? GROUP BY subscription_id").all(now);
-      for (const row of expired) this.#deadLetters(String(row.subscription_id), Number(row.n));
-      this.#db.prepare("UPDATE webhook_deliveries SET state = 'expired', payload = NULL WHERE state = 'pending' AND expires_at <= ?").run(now);
+      for (const table of ['webhook_deliveries', 'credential_deliveries']) {
+        const abandoned = this.#db.prepare(`SELECT subscription_id FROM ${table} WHERE state = 'sending' AND lease_until <= ?`).all(now);
+        for (const row of abandoned) this.#failure(String(row.subscription_id), now);
+        this.#db.prepare(`UPDATE webhook_attempts SET outcome = 'abandoned', lease = NULL WHERE outcome = 'in_progress' AND lease IN
+          (SELECT lease FROM ${table} WHERE state = 'sending' AND lease_until <= ?)`).run(now);
+        this.#db.prepare(`UPDATE ${table} SET state = 'pending', lease = NULL, lease_until = NULL WHERE state = 'sending' AND lease_until <= ?`).run(now);
+        const expired = this.#db.prepare(`SELECT subscription_id, COUNT(*) AS n FROM ${table} WHERE state = 'pending' AND expires_at <= ? GROUP BY subscription_id`).all(now);
+        for (const row of expired) this.#deadLetters(String(row.subscription_id), Number(row.n));
+        this.#db.prepare(`UPDATE ${table} SET state = 'expired', payload = NULL WHERE state = 'pending' AND expires_at <= ?`).run(now);
+      }
       // One in-flight request per subscription, enforced across DB connections. A failed receiver
       // cannot occupy all sender slots while other subscriptions have work ready.
-      const next = this.#db.prepare(`SELECT d.*, s.route FROM webhook_deliveries d JOIN webhook_subscriptions s
+      const next = this.#db.prepare(`SELECT d.*, s.route FROM notification_deliveries d JOIN webhook_subscriptions s
         ON s.id = d.subscription_id AND s.revision = d.revision
         WHERE d.state = 'pending' AND d.next_attempt_at <= ? AND NOT EXISTS
-          (SELECT 1 FROM webhook_deliveries busy WHERE busy.subscription_id = d.subscription_id AND busy.state = 'sending')
+          (SELECT 1 FROM notification_deliveries busy WHERE busy.subscription_id = d.subscription_id AND busy.state = 'sending')
         ORDER BY d.next_attempt_at, d.id LIMIT 1`);
       const claims: ClaimedDelivery[] = [];
       for (let n = 0; n < limit; n++) {
-        const row = next.get(now) as (DeliveryRow & { route: string }) | undefined;
+        const row = next.get(now) as (DeliveryRow & { route: string; source: 'job' | 'credential' }) | undefined;
         if (!row) break;
         const lease = randomUUID();
-        this.#db.prepare("UPDATE webhook_deliveries SET state = 'sending', lease = ?, lease_until = ?, attempt_count = attempt_count + 1 WHERE id = ?")
+        this.#db.prepare(`UPDATE ${row.source === 'credential' ? 'credential_deliveries' : 'webhook_deliveries'} SET state = 'sending', lease = ?, lease_until = ?, attempt_count = attempt_count + 1 WHERE id = ?`)
           .run(lease, now + leaseMs, row.id);
         this.#db.prepare(`INSERT INTO webhook_attempts (subscription_id, delivery_id, event_id, attempted_at, outcome, lease)
-          VALUES (?, ?, ?, ?, 'in_progress', ?)`).run(row.subscription_id, row.id, row.event_id, now, lease);
-        claims.push({ id: row.id, subscriptionId: row.subscription_id, revision: row.revision, eventId: row.event_id, payload: row.payload,
+          VALUES (?, ?, ?, ?, 'in_progress', ?)`).run(row.subscription_id, row.source === 'credential' ? null : row.id, row.event_id, now, lease);
+        claims.push({ source: row.source, id: row.id, subscriptionId: row.subscription_id, revision: row.revision, eventId: row.event_id, payload: row.payload,
           lease, attempt: row.attempt_count + 1, expiresAt: row.expires_at, route: JSON.parse(row.route) as WebhookRoute });
       }
       for (const row of this.#db.prepare('SELECT id FROM webhook_subscriptions').all()) this.#pruneArchive(String(row.id));
@@ -325,8 +375,8 @@ export class WebhookStore {
   }
 
   active(claim: ClaimedDelivery): boolean {
-    return !!this.#db.prepare(`SELECT 1 FROM webhook_deliveries d JOIN webhook_subscriptions s ON s.id = d.subscription_id AND s.revision = d.revision
-      WHERE d.id = ? AND d.lease = ? AND d.state = 'sending'`).get(claim.id, claim.lease);
+    return !!this.#db.prepare(`SELECT 1 FROM notification_deliveries d JOIN webhook_subscriptions s ON s.id = d.subscription_id AND s.revision = d.revision
+      WHERE d.id = ? AND d.lease = ? AND d.state = 'sending' AND d.source = ?`).get(claim.id, claim.lease, claim.source ?? 'job');
   }
 
   finish(claim: ClaimedDelivery, result: AttemptResult): void {
@@ -342,7 +392,7 @@ export class WebhookStore {
       const delay = result.outcome === 'stopped' ? 0 : Math.min(300_000, 5000 * 2 ** Math.min(claim.attempt - 1, 10));
       this.#db.prepare('UPDATE webhook_attempts SET status_code = ?, outcome = ?, lease = NULL WHERE lease = ?')
         .run(result.statusCode, result.outcome, claim.lease);
-      this.#db.prepare(`UPDATE webhook_deliveries SET state = ?, next_attempt_at = ?, lease = NULL, lease_until = NULL,
+      this.#db.prepare(`UPDATE ${claim.source === 'credential' ? 'credential_deliveries' : 'webhook_deliveries'} SET state = ?, next_attempt_at = ?, lease = NULL, lease_until = NULL,
         payload = CASE WHEN ? = 'pending' THEN payload ELSE NULL END WHERE id = ? AND lease = ?`)
         .run(state, Math.min(now + delay, claim.expiresAt), state, claim.id, claim.lease);
       this.#prune();
@@ -361,7 +411,7 @@ export class WebhookStore {
     const bounded = Math.max(1, Math.min(MAX_ATTEMPTS_PER_SUBSCRIPTION, Math.trunc(limit) || 20));
     const subscriptions = this.#db.prepare(`SELECT id, source, overflow_count, overflow_sequence, overflow_at, overflow_reason FROM webhook_subscriptions
       ${id === undefined ? '' : 'WHERE id = ?'} ORDER BY id`).all(...(id === undefined ? [] : [id]));
-    const deliveries = this.#db.prepare(`SELECT subscription_id, state, COUNT(*) AS count FROM webhook_deliveries
+    const deliveries = this.#db.prepare(`SELECT subscription_id, state, COUNT(*) AS count FROM notification_deliveries
       ${id === undefined ? '' : 'WHERE subscription_id = ?'} GROUP BY subscription_id, state ORDER BY subscription_id, state`)
       .all(...(id === undefined ? [] : [id]));
     const attempts = this.#db.prepare(`SELECT subscription_id, event_id, attempted_at, status_code, outcome FROM webhook_attempts
@@ -373,7 +423,7 @@ export class WebhookStore {
   health(id?: string): { id: string; health: WebhookHealth }[] {
     return this.listConnections().filter((row) => id === undefined || row.id === id).map((row) => {
       const h = this.#db.prepare(`SELECT h.*, s.overflow_count,
-        (SELECT COUNT(*) FROM webhook_deliveries d WHERE d.subscription_id = s.id AND d.state IN ('pending', 'sending')) AS pending,
+        (SELECT COUNT(*) FROM notification_deliveries d WHERE d.subscription_id = s.id AND d.state IN ('pending', 'sending')) AS pending,
         (SELECT MIN(created_at) FROM webhook_archive a WHERE a.subscription_id = s.id AND a.created_at > ?) AS oldest
         FROM webhook_subscriptions s LEFT JOIN webhook_health h ON h.subscription_id = s.id WHERE s.id = ?`)
         .get(this.#clock() - ARCHIVE_RETENTION_MS, row.id)!;
@@ -455,7 +505,7 @@ export class WebhookStore {
     let skipped = 0;
     let nextCursor = input.afterCursor ?? String(events[0] ? Number(events[0].feed_sequence) - 1 : h.archive_floor);
     const now = this.#clock();
-    let pending = Number(this.#db.prepare("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE subscription_id = ? AND state IN ('pending', 'sending')").get(row.id)!.n);
+    let pending = Number(this.#db.prepare("SELECT COUNT(*) AS n FROM notification_deliveries WHERE subscription_id = ? AND state IN ('pending', 'sending')").get(row.id)!.n);
     let blocked = false;
     for (const event of page) {
       const existing = this.#db.prepare('SELECT state FROM webhook_deliveries WHERE subscription_id = ? AND revision = ? AND event_id = ?')
@@ -556,14 +606,18 @@ export class WebhookStore {
     this.#db.prepare('DELETE FROM webhook_archive WHERE subscription_id = ?').run(id);
     this.#db.prepare('DELETE FROM webhook_job_bindings WHERE subscription_id = ?').run(id);
     this.#db.prepare('DELETE FROM webhook_health WHERE subscription_id = ?').run(id);
-    this.#db.prepare("UPDATE webhook_attempts SET outcome = 'cancelled', lease = NULL WHERE delivery_id IN " +
-      "(SELECT id FROM webhook_deliveries WHERE subscription_id = ? AND state = 'sending') AND outcome = 'in_progress'").run(id);
-    this.#db.prepare("UPDATE webhook_deliveries SET state = 'cancelled', payload = NULL, lease = NULL, lease_until = NULL " +
-      "WHERE subscription_id = ? AND state IN ('pending', 'sending')").run(id);
+    for (const table of ['webhook_deliveries', 'credential_deliveries']) {
+      this.#db.prepare(`UPDATE webhook_attempts SET outcome = 'cancelled', lease = NULL WHERE lease IN
+        (SELECT lease FROM ${table} WHERE subscription_id = ? AND state = 'sending') AND outcome = 'in_progress'`).run(id);
+      this.#db.prepare(`UPDATE ${table} SET state = 'cancelled', payload = NULL, lease = NULL, lease_until = NULL
+        WHERE subscription_id = ? AND state IN ('pending', 'sending')`).run(id);
+    }
   }
 
   #prune(): void {
     // Payloads are cleared on completion; only the bounded pending queue retains content. No active row is pruned.
+    this.#db.exec(`DELETE FROM credential_deliveries WHERE state NOT IN ('pending', 'sending') AND id NOT IN
+      (SELECT id FROM credential_deliveries WHERE state NOT IN ('pending', 'sending') ORDER BY id DESC LIMIT ${MAX_HISTORY});`);
     this.#db.exec(`DELETE FROM webhook_deliveries WHERE state NOT IN ('pending', 'sending') AND id NOT IN
       (SELECT id FROM webhook_deliveries WHERE state NOT IN ('pending', 'sending') ORDER BY id DESC LIMIT ${MAX_HISTORY});
       DELETE FROM webhook_attempts WHERE outcome <> 'in_progress' AND id NOT IN

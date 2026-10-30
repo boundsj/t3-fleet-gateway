@@ -4,9 +4,14 @@
 
 ### Upgrading
 
+- **Migration 19, additive.** Adds persistent credential alerts and a separate outbox sharing webhook delivery health and retries; existing rows remain unchanged. Back up with all ledger users stopped. Older builds refuse schema 19; safe rollback restores the pre-upgrade backup and configuration, losing later writes. Existing connections keep their event selections; explicitly enable `credential_alert` and `credential_resolved` to receive them.
+
 - **Migration 18, forward only.** Adds notification archive, job bindings and persistent delivery health without rewriting existing connection routes, revisions, queues or attempts. Archive/health begin at upgrade; no historical snapshots are invented. Stop all ledger users and back up before opening the new build. Older builds refuse the new schema; rollback requires restoring the pre-upgrade backup and loses subsequent writes. No key rotation or receiver re-registration is needed.
 
 ### Added
+
+- Deduped downstream credential renewal-failure and configurable expiry alerts (default seven and two days), with resolution after verified renewal, intersecting webhook/bot filters and shared delivery health. Current state is shown in the private dashboard and doctor.
+- Confirmed private-dashboard re-pair through the existing configured pairing flow, verifying before atomically installing the replacement and resolving alerts. Failure keeps the old credential; confirmation retries reuse the result. Enrollment diagnostics and credential notifications exclude downstream error content and pairing material.
 
 - T3 launch retry keys, detected per session: supported launches carry a stable job-derived `clientRequestId` and allow one safe transport retry. Legacy marker reconciliation remains. Plain follow-up keys keep their format; uncertain retries are now durably bound to the original authorization identity across restarts. Older uncertain sends without identity metadata fail closed for inspection. Attachment follow-up handling is unchanged.
 - `fleet_models.search` and per-provider `omittedModels`, with query-bound paging and fresh searches for explicit `work_start` validation at acceptance and dispatch. Older T3 hosts keep their legacy catalog. Upstream search is capped and excludes hidden models; see [contracts and limits](docs/evidence/launch-retries-model-search.md).

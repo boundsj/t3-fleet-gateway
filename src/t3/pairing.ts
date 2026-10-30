@@ -103,15 +103,7 @@ async function postJson(step: string, url: string, body: unknown, init: RequestI
   }
   const text = await response.text();
   if (!response.ok) {
-    let reason = '';
-    try {
-      const parsed = JSON.parse(text) as { error?: unknown; message?: unknown };
-      const detail = typeof parsed.error === 'string' ? parsed.error : typeof parsed.message === 'string' ? parsed.message : '';
-      reason = detail ? `: ${detail.slice(0, 200)}` : '';
-    } catch {
-      // Body is not JSON; the status is enough.
-    }
-    throw new GatewayError('enrollment_failed', `T3 ${step} returned HTTP ${response.status}${reason}`);
+    throw new GatewayError('enrollment_failed', `T3 ${step} returned HTTP ${response.status}`);
   }
   try {
     return JSON.parse(text);
@@ -183,7 +175,7 @@ export async function obtainCredential(options: PairingFlowOptions): Promise<Obt
     throw new GatewayError('enrollment_failed', 'T3 approval returned an invalid redirect');
   }
   const deniedWith = redirect.searchParams.get('error');
-  if (deniedWith) throw new GatewayError('enrollment_failed', `T3 refused the approval: ${deniedWith.slice(0, 100)}`);
+  if (deniedWith) throw new GatewayError('enrollment_failed', 'T3 refused the approval');
   const code = redirect.searchParams.get('code');
   if (!code || redirect.searchParams.get('state') !== state) {
     throw new GatewayError('enrollment_failed', 'T3 approval redirect is missing the code or has the wrong state');
@@ -207,7 +199,7 @@ export async function obtainCredential(options: PairingFlowOptions): Promise<Obt
       { headers: { 'content-type': 'application/x-www-form-urlencoded' } },
     ),
   );
-  if (token.token_type.toLowerCase() !== 'bearer') throw new GatewayError('enrollment_failed', `Unsupported T3 token type ${token.token_type}`);
+  if (token.token_type.toLowerCase() !== 'bearer') throw new GatewayError('enrollment_failed', 'Unsupported T3 token type');
   return {
     accessToken: token.access_token,
     t3ClientId: registration.client_id,

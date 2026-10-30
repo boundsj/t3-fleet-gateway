@@ -85,7 +85,7 @@ test('unknown baselines are silent; an unlink or an unknown state is not a merge
   assert.deepEqual(pullRequestEvents(null, [pr(), pr('merged', 22)]), []);
   assert.deepEqual(pullRequestEvents([pr()], []), [], 'unlink is not a merge');
   assert.deepEqual(pullRequestEvents([pr()], [pr(null)]), []);
-  assert.deepEqual(DEFAULT_WEBHOOK_EVENTS, ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended']);
+  assert.deepEqual(DEFAULT_WEBHOOK_EVENTS, ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended', 'credential_alert', 'credential_resolved']);
 });
 
 test('a lower-case repository with a URL in GitHub casing is accepted, and the URL is kept as T3 gave it', () => {

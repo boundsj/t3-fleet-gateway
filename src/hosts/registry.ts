@@ -1,3 +1,4 @@
+import type { CredentialAlerts, CredentialAlert } from './alerts.ts';
 import type { HostConfig } from '../config.ts';
 import { describeError, GatewayError, type ErrorCode } from '../errors.ts';
 import type { Logger } from '../log.ts';
@@ -43,6 +44,7 @@ export interface HostRegistryOptions {
   clock: Clock;
   logger: Logger;
   renewWhenDaysLeft: number;
+  alerts?: CredentialAlerts;
   /** Override the pairing command runner (tests). */
   runCommand?: PairingFlowOptions['runCommand'];
   commandEnv?: NodeJS.ProcessEnv;
@@ -113,6 +115,11 @@ export class HostRegistry {
     const remaining = credential.expiresAt - clock();
     const state: CredentialState = remaining <= 0 ? 'expired' : remaining < renewWhenDaysLeft * DAY ? 'renewal_due' : 'active';
     return { state, expiresAt: credential.expiresAt, daysLeft: Math.max(0, Math.floor(remaining / DAY)), renewalError };
+  }
+
+  credentialAlerts(id: string): CredentialAlert[] {
+    this.host(id);
+    return this.#options.alerts?.list(id) ?? [];
   }
 
   /** Cached reachability and version, refreshed at most every 30 seconds unless `fresh` is set. */
@@ -231,22 +238,22 @@ export class HostRegistry {
       try {
         t3Version = (await probe.environmentRead()).serverVersion;
       } catch (error) {
-        throw new GatewayError('enrollment_failed', `New credential failed verification: ${describeError(error).message}`, { cause: error });
+        throw new GatewayError('enrollment_failed', 'New credential failed verification. Check host access and try again.', { cause: error });
       } finally {
         await probe.close();
       }
       const credential: StoredCredential = { ...obtained, hostId: id, verifiedAt: clock() };
-      store.save(credential);
-      store.recordRenewal(id, clock(), { ok: true });
+      store.install(credential, clock(), () => this.#options.alerts?.update(id, this.credentialStatus(id), true));
       this.#health.delete(id);
       this.#recordContact(id, undefined, t3Version);
       logger.info('host.enrollment_succeeded', { hostId: id, expiresAt: new Date(credential.expiresAt).toISOString() });
       return { hostId: id, t3Version, expiresAt: credential.expiresAt };
     } catch (error) {
       const described = describeError(error);
-      store.recordRenewal(id, clock(), { ok: false, ...described });
-      logger.error('host.enrollment_failed', { hostId: id, errorCode: described.code, detail: described.message });
-      throw error;
+      store.recordRenewal(id, clock(), { ok: false, code: described.code, message: 'Credential enrollment failed. Check the pairing command and host access.' });
+      this.#options.alerts?.update(id, this.credentialStatus(id));
+      logger.error('host.enrollment_failed', { hostId: id, errorCode: described.code });
+      throw new GatewayError(described.code, 'Credential enrollment failed. Check the pairing command and host access.', { cause: error });
     }
   }
 
@@ -254,12 +261,14 @@ export class HostRegistry {
   async renewDue(): Promise<void> {
     for (const host of this.#hosts.values()) {
       const status = this.credentialStatus(host.id);
+      this.#options.alerts?.update(host.id, status);
       if (status.state !== 'renewal_due' && status.state !== 'expired') continue;
       const failure = checkMintExecutable(host, this.#options.commandEnv ?? process.env).find((result) => result.level === 'fail');
       if (failure) {
         this.#options.store.recordRenewal(host.id, this.#options.clock(), {
           ok: false, code: 'pairing_command_failed', message: failure.detail,
         });
+        this.#options.alerts?.update(host.id, this.credentialStatus(host.id));
         this.#options.logger.error('host.pairing_preflight', { hostId: host.id, checkCode: failure.code });
         continue;
       }

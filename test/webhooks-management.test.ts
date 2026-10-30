@@ -102,7 +102,7 @@ describe('private webhook connection management', () => {
     assert.equal(f.target.receipts[0]!.auth, 'Bearer synthetic-private:key');
     assert.deepEqual(Object.keys(f.target.receipts[0]!.payload).sort(), ['eventId', 'feedCursor', 'feedSequence', 'timestamp', 'type']);
     const settings = JSON.parse(String(f.gw.services.db.prepare('SELECT settings FROM webhook_subscriptions').get()!.settings));
-    assert.deepEqual([...settings.events].sort(), ['cancelled', 'delegated_work_ended', 'failed', 'idle', 'needs_input']);
+    assert.deepEqual([...settings.events].sort(), ['cancelled', 'credential_alert', 'credential_resolved', 'delegated_work_ended', 'failed', 'idle', 'needs_input']);
     assert.equal(settings.excerptChars, 0);
     enqueue(f.gw, 'uiwake0001');
     const event = await f.target.next((r) => r.payload.type === 'cancelled');
@@ -432,4 +432,24 @@ test('dashboard connections accept precise filters and expose persistent deliver
   const invalid = await f.api.post('connect', { ...input, requestId: randomUUID(), events: ['unrecognized'] });
   assert.equal(invalid.status, 400);
   assert.equal(f.target.receipts.length, 1, 'invalid filters fail before sending a test');
+});
+
+test('event-filter replacement tests before commit and preserves precise filters when enabling credential alerts', async (t) => {
+  const f = await fixture(t);
+  const setup = await f.api.post('connect', { session: f.session, requestId: randomUUID(), project: 'pilot',
+    url: f.target.origin + '/accept', authHeader: HEADER, events: ['idle'], jobs: ['synthetic-job'], clients: ['synthetic-client'] });
+  assert.equal(setup.status, 200);
+  const before = (await f.api.list()).connections[0]!;
+  const events = ['idle', 'credential_alert', 'credential_resolved'];
+  const failed = await f.api.post('replace', { ...actionInput(f.session, before), url: f.target.origin + '/reject', authHeader: HEADER, events });
+  assert.equal(failed.status, 502);
+  assert.deepEqual((await f.api.list()).connections[0]!.events, ['idle']);
+  const result = await f.api.post('replace', { ...actionInput(f.session, before), authHeader: HEADER, events });
+  assert.equal(result.status, 200);
+  const after = (await f.api.list()).connections[0]!;
+  assert.deepEqual(after.events, events);
+  assert.deepEqual(after.jobs, before.jobs);
+  assert.deepEqual(after.clients, before.clients);
+  assert.deepEqual(after.targets, before.targets);
+  assert.notEqual(after.revision, before.revision);
 });

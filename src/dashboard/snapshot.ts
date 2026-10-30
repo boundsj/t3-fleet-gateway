@@ -97,6 +97,7 @@ export interface HostView {
     expiresAt: Time;
     daysLeft: number | null;
     renewalError: { code: string | null; at: Time; detail: string } | null;
+    alerts: { kind: string; raisedAt: Time; resolvedAt: Time }[];
   };
   access: string;
   capacity: { max: number; used: number; queued: number; open: number; standingOpen: number };
@@ -167,6 +168,7 @@ function hostView(sources: DashboardSources, host: HostConfig, counts: Map<strin
     jobsUnreachableSince: iso(unreachable.since),
     credential: {
       state: credential.state,
+      alerts: registry.credentialAlerts(host.id).map((a) => ({ kind: a.kind, raisedAt: iso(a.raisedAt), resolvedAt: iso(a.resolvedAt) })),
       expiresAt: iso(credential.expiresAt),
       daysLeft: credential.daysLeft,
       renewalError: credential.renewalError
@@ -466,6 +468,11 @@ function attentionItems(hosts: HostView[], clients: ClientView[], jobs: JobView[
     } else if (host.credential.renewalError) {
       items.push({ tone: 'warn', kind: 'host', ref: host.id, title: `Credential renewal failed for ${name}`, detail: host.credential.renewalError.detail,
         at: host.credential.renewalError.at, action: { kind: 'command', label: 'Diagnose', command: 't3-fleet-gateway doctor' } });
+    }
+    for (const alert of host.credential.alerts.filter((a) => a.resolvedAt === null && a.kind.startsWith('expiry_'))) {
+      items.push({ tone: Number(alert.kind.slice(7)) <= 2 ? 'bad' : 'warn', kind: 'host', ref: host.id,
+        title: `Credential expiry warning for ${name}`, detail: `Credential is within ${alert.kind.slice(7)} days of expiry.`,
+        at: alert.raisedAt, action: { kind: 'view', label: 'Re-pair host', view: `hosts/${host.id}` } });
     }
     const coveredCodes = new Set<string>();
     if (host.reachability.state === 'unreachable' || host.engine) {

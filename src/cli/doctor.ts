@@ -82,6 +82,10 @@ export async function runDoctor(services: GatewayServices, dataDir: string): Pro
     const name = `host ${host.id}`;
     // Even a host with no credential needs a usable command for its first enrollment.
     const credential = registry.credentialStatus(host.id);
+    for (const alert of registry.credentialAlerts(host.id)) {
+      results.push({ level: alert.resolvedAt === null ? 'warn' : 'ok', name: `${name} credential alert`,
+        detail: `${alert.kind}: ${alert.resolvedAt === null ? 'active; re-pair from the private dashboard or hosts enroll' : 'resolved'}` });
+    }
     if (credential.state === 'missing') {
       for (const check of await registry.preflight(host.id)) {
         results.push({ level: check.level, name: `${name} pairing command`, detail: check.detail });

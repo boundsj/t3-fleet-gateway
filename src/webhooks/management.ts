@@ -17,7 +17,7 @@ const target = { id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), revision: z.
 const destination = { url: z.string().min(1).max(4096), authHeader: z.string().min(1).max(8322) };
 const inputs = {
   connect: z.strictObject({ ...common, ...destination, project: z.string().min(1).max(1000), ...preciseFilters }),
-  replace: z.strictObject({ ...common, ...target, ...destination, url: destination.url.optional() }),
+  replace: z.strictObject({ ...common, ...target, ...destination, url: destination.url.optional(), events: preciseFilters.events }),
   test: z.strictObject({ ...common, ...target }),
   disconnect: z.strictObject({ ...common, ...target }),
 };
@@ -185,7 +185,7 @@ export class WebhookManagement {
       this.#store.connectDashboard(id, project.alias, project.host, route, record, project.projectId, 'project' in data ? { jobs: data.jobs, clients: data.clients, events: data.events } : {});
       this.#wake();
     } else if (action === 'replace' && 'revision' in data) {
-      this.#store.replaceDashboard(id, data.revision, route, record);
+      this.#store.replaceDashboard(id, data.revision, route, record, 'events' in data ? data.events : undefined);
       this.#wake();
     }
     if (test.outcome !== 'delivered') return failure(502, 'ping_failed', test);

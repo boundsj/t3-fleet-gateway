@@ -274,6 +274,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
       const managed = row.source === 'dashboard';
       const confirming = model.disconnectId === row.id;
       const projects = [...row.projects, ...(row.targets ?? []).map((t) => t.projectId)].join(', ');
+      const credentialAlerts = (row.events ?? []).includes('credential_alert') && (row.events ?? []).includes('credential_resolved');
       const hosts = [...row.hosts, ...(row.targets ?? []).map((t) => t.host)].join(', ');
       return h('article', { class: 'panel webhook-connection', 'aria-label': `Connection for ${projects || 'all projects'} on ${hosts || 'all hosts'}` },
         h('div', { class: 'panel__head' }, h('h3', { class: 'panel__title' }, projects || 'All projects'),
@@ -282,6 +283,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
           kv([
             ['Host', hosts || 'All hosts'],
             ['Managed by', managed ? 'Dashboard' : 'Configuration file'],
+            ['Credential alerts', credentialAlerts ? 'Enabled' : 'Off. Use Replace key → Events to add credential_alert and credential_resolved.'],
             ['Events', (row.events ?? []).join(', ') || 'Default events'],
             ['Jobs', (row.jobs ?? []).join(', ') || 'All matching jobs'],
             ['Started by clients', (row.clients ?? []).join(', ') || 'All clients'],
@@ -348,14 +350,15 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     }, [...new Set(data.projects.map((item) => item.host))].map((host) =>
       h('optgroup', { label: host }, data.projects.filter((item) => item.host === host).map((item) =>
         h('option', { value: item.alias }, item.name ? `${item.name} (${item.projectId})` : item.alias)))));
-    const filters = replacing ? [] : [
-      ['events', 'Events (optional)', 'idle, needs_input, failed, cancelled, delegated_work_ended'],
+    const filters = [
+      ['events', 'Events (optional)', 'Includes credential_alert and credential_resolved by default'],
       ['jobs', 'Job IDs (optional)', 'All matching jobs'],
       ['clients', 'Started by client IDs (optional)', 'All clients'],
-    ].map(([key, label, placeholder]) => ({ key, label, input: h('input', {
+    ].filter(([key]) => !replacing || key === 'events').map(([key, label, placeholder]) => ({ key, label, input: h('input', {
       id: `webhook-${key}`, type: 'text', maxlength: key === 'clients' ? '12000' : '6400', placeholder, disabled: busy,
       autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false',
     }) }));
+    if (replacing) filters[0].input.value = (form.events ?? []).join(', ');
     const unavailable = (data.hosts ?? []).filter((host) => host.status === 'unavailable');
     const clear = () => { url.value = ''; auth.value = ''; };
     return h('form', {
@@ -385,7 +388,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
         ? 'The host is selected automatically from the project.' : 'Configure a project on the gateway before connecting a webhook.'))
       : h('p', { class: 'sub' }, `Project: ${form.projects.join(', ')} · Host: ${form.hosts.join(', ')}`),
     h('div', { class: 'webhook-defaults' },
-      h('p', null, h('strong', null, 'Five updates: '), 'ready for follow-up, needs input, failed, cancelled, and delegated work ended.'),
+      h('p', null, h('strong', null, 'Default updates: '), 'ready for follow-up, needs input, failed, cancelled, delegated work ended, credential alerts and resolutions.'),
       h('p', null, h('strong', null, 'Reply excerpts are off. '), 'Updates identify the job and its state without copying the worker’s reply.')),
     filters.length ? h('details', null, h('summary', null, 'Choose precise notifications'),
       h('p', { class: 'field__hint' }, 'Comma-separated values. Every filter must match the selected project and host. Blank fields keep the defaults.'),
@@ -644,6 +647,14 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
             ['Last renewal', c.renewalError ? ['failed ', time(c.renewalError.at)] : h('span', { class: 'muted' }, 'no failure recorded')],
             c.renewalError?.code ? ['Code', tag(c.renewalError.code, true)] : null,
           ]),
+          h('div', null, (c.alerts ?? []).map((alert) => h('p', { class: 'entity__note' },
+            alert.resolvedAt ? `Resolved: ${alert.kind}` : `Active alert: ${alert.kind}`))),
+          model.repairHost === host.id && model.repairConfirmation
+            ? h('div', { role: 'group', 'aria-label': 'Confirm re-pair' },
+                h('p', null, 'Re-pair this host using its configured pairing command? The old credential stays until the replacement is verified.'),
+                button('Confirm re-pair', 'check', () => actions.repair(host.id), { busy: model.repairBusy }),
+                button('Cancel', 'x', () => actions.cancelRepair(), { busy: model.repairBusy }))
+            : button('Re-pair', 'key', () => actions.prepareRepair(host.id), { busy: model.repairBusy }),
           c.renewalError ? h('p', { class: 'entity__note' }, c.renewalError.detail) : h('p', { class: 'entity__note' }, 'T3 credentials last 30 days; serve renews them before they expire.')),
         h('div', { class: 'entity__col' }, h('h3', null, icon('gauge'), 'Capacity'),
           h('div', { class: 'meter', role: 'img', 'aria-label': `${cap.used} of ${cap.max} job slots in use` },
@@ -807,6 +818,7 @@ export function boot(win, doc) {
   const route = parseRoute(win.location.hash);
   const model = {
     snapshot: null, route, error: null, notice: null, loading: false, checking: false, fetchedAt: 0, jobFilter: 'attention',
+    repairHost: null, repairConfirmation: null, repairBusy: false,
     settleId: null, settleRequestId: null, settleBusy: false,
     webhooks: null, webhooksLoading: false, webhookBusy: null, webhookError: null, webhookNotice: null,
     webhookForm: route.view === 'webhooks' ? { mode: 'connect' } : null, disconnectId: null,
@@ -838,6 +850,44 @@ export function boot(win, doc) {
     cache: 'no-store', credentials: 'same-origin', ...init, headers: { [API_HEADER]: '1', ...(init.headers ?? {}) },
   });
   const actions = {
+    cancelRepair() {
+      model.repairHost = null;
+      model.repairConfirmation = null;
+      draw();
+    },
+    async prepareRepair(host) {
+      if (model.repairBusy) return;
+      model.repairBusy = true;
+      draw();
+      try {
+        const response = await request('api/hosts/repair/prepare', { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ host }) });
+        if (!response.ok) throw new Error();
+        model.repairConfirmation = (await response.json()).confirmationId;
+        model.repairHost = host;
+      } catch {
+        model.error = 'Could not prepare re-pair. Refresh and try again.';
+      } finally { model.repairBusy = false; draw(); }
+    },
+    async repair(host) {
+      if (model.repairBusy || !model.repairConfirmation || model.repairHost !== host) return;
+      model.repairBusy = true;
+      draw();
+      try {
+        const response = await request('api/hosts/repair/confirm', { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ host, confirmationId: model.repairConfirmation }) });
+        const result = await response.json();
+        if (result.snapshot) model.snapshot = result.snapshot;
+        if (!response.ok) throw new Error();
+        model.notice = 'Credential verified and installed.';
+        model.error = null;
+      } catch {
+        model.error = 'Re-pair was not confirmed. Check Hosts and the pairing command before trying again.';
+      } finally {
+        model.repairBusy = false;
+        actions.cancelRepair();
+      }
+    },
     confirmSettle(id) {
       model.settleId = id;
       model.settleRequestId = id ? win.crypto.randomUUID() : null;
@@ -941,7 +991,7 @@ export function boot(win, doc) {
     },
     openWebhookForm(row) {
       if (model.webhookBusy) return;
-      model.webhookForm = row ? { mode: 'replace', id: row.id, revision: row.revision, projects: row.projects, hosts: row.hosts }
+      model.webhookForm = row ? { mode: 'replace', id: row.id, revision: row.revision, projects: row.projects, hosts: row.hosts, events: row.events }
         : { mode: 'connect' };
       model.disconnectId = null;
       model.webhookError = null;

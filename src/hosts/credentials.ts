@@ -1,5 +1,5 @@
 import type { T3Access } from '../config.ts';
-import type { Database } from '../db/database.ts';
+import { transaction, type Database } from '../db/database.ts';
 import type { ObtainedCredential } from '../t3/pairing.ts';
 
 export interface StoredCredential extends ObtainedCredential {
@@ -72,6 +72,15 @@ export class CredentialStore {
         credential.expiresAt,
         credential.verifiedAt,
       );
+  }
+
+  /** Install verified material and its success/alert bookkeeping atomically. No network operation in this transaction. */
+  install(credential: StoredCredential, now: number, afterInstall: () => void): void {
+    transaction(this.#db, () => {
+      this.save(credential);
+      this.recordRenewal(credential.hostId, now, { ok: true });
+      afterInstall();
+    });
   }
 
   renewal(hostId: string): RenewalRecord | undefined {

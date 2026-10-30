@@ -4,9 +4,11 @@ import { join } from 'node:path';
 import * as z from 'zod';
 import { GatewayError } from '../errors.ts';
 
-export const WEBHOOK_EVENTS = ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended', 'running', 'pull_request_opened', 'pull_request_merged'] as const;
+export const WEBHOOK_EVENTS = ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended', 'running', 'pull_request_opened', 'pull_request_merged', 'credential_alert', 'credential_resolved'] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENTS)[number];
-export const DEFAULT_WEBHOOK_EVENTS: WebhookEventType[] = ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended'];
+export const DEFAULT_WEBHOOK_EVENTS: WebhookEventType[] = ['needs_input', 'idle', 'failed', 'cancelled', 'delegated_work_ended', 'credential_alert', 'credential_resolved'];
+// Track schema-defaulted arrays without adding private parser metadata to persisted settings.
+const defaultEventSelections = new WeakSet<object>();
 const BLOCKED_HEADERS = new Set([
   'host', 'connection', 'content-length', 'content-type', 'transfer-encoding', 'te', 'trailer', 'upgrade', 'expect',
   'content-encoding', 'content-range', 'http2-settings', 'accept', 'accept-encoding', 'origin', 'referer', 'user-agent', 'via', 'forwarded', 'keep-alive',
@@ -48,7 +50,11 @@ const subscriptionSchema = z.strictObject({
     projectId: z.string().min(1).max(300) })).min(1).max(100).optional(),
   ...preciseFilters,
   ownerClientId: z.string().min(1).max(300).optional(),
-  events: z.array(z.enum(WEBHOOK_EVENTS)).min(1).max(WEBHOOK_EVENTS.length).default(DEFAULT_WEBHOOK_EVENTS),
+  events: z.array(z.enum(WEBHOOK_EVENTS)).min(1).max(WEBHOOK_EVENTS.length).default(() => {
+    const events = [...DEFAULT_WEBHOOK_EVENTS];
+    defaultEventSelections.add(events);
+    return events;
+  }),
   excerptChars: z.int().min(0).max(500).default(0),
   allowLoopbackHttp: z.boolean().default(false),
 }).refine((value) => destinationAllowed(value.url, value.allowLoopbackHttp))
@@ -59,6 +65,10 @@ export const webhooksSchema = z.strictObject({
 }).refine(({ subscriptions }) => new Set(subscriptions.map((s) => s.id)).size === subscriptions.length);
 export type WebhooksConfig = z.output<typeof webhooksSchema>;
 export type SubscriptionConfig = WebhooksConfig['subscriptions'][number];
+/** Omission preserves an existing route's event selection; explicit arrays are deliberate changes. */
+export function usesDefaultEvents(subscription: SubscriptionConfig): boolean {
+  return defaultEventSelections.has(subscription.events);
+}
 /** Private route material. Never returned by diagnostics or logged. */
 export interface WebhookRoute { url: string; header: string; value: string }
 
