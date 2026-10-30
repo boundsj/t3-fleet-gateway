@@ -6,7 +6,7 @@ import { describe, test } from 'node:test';
 import { promisify } from 'node:util';
 import { parseConfig } from '../src/config.ts';
 import { openDataDir } from '../src/dataDir.ts';
-import { loadRoute } from '../src/webhooks/config.ts';
+import { loadRoute, webhooksSchema } from '../src/webhooks/config.ts';
 import { tempDir } from './helpers/tmp.ts';
 
 function config(extra: Record<string, unknown> = {}) {
@@ -143,4 +143,14 @@ describe('webhook configuration and private header files', () => {
       }
     }
   });
+});
+
+test('precise filters are bounded and bot-owned routes require an explicit host ceiling with excerpts off', () => {
+  const base = { id: 'bot', enabled: true, url: 'https://receiver.example.com/events',
+    auth: { header: 'Authorization', secretFile: 'synthetic.key' } };
+  for (const extra of [{ jobs: [] }, { clients: [] }, { jobs: Array(101).fill('job') }, { clients: Array(101).fill('client') },
+    { ownerClientId: 'client' }, { ownerClientId: 'client', hosts: ['main'], excerptChars: 1 }]) {
+    assert.equal(webhooksSchema.safeParse({ subscriptions: [{ ...base, ...extra }] }).success, false);
+  }
+  assert.equal(webhooksSchema.safeParse({ subscriptions: [{ ...base, ownerClientId: 'client', hosts: ['main'], jobs: ['job-1'], clients: ['client'] }] }).success, true);
 });

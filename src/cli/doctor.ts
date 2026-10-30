@@ -71,6 +71,12 @@ export async function runDoctor(services: GatewayServices, dataDir: string): Pro
       : { level: 'fail', name: 'database', detail: `integrity ${integrity}, schema version ${version} (expected ${SCHEMA_VERSION})` },
   );
 
+  for (const connection of services.webhooks.health()) {
+    const h = connection.health;
+    results.push({ level: h.failureStreak || h.deadLettered || h.overflowCount ? 'warn' : 'ok', name: `webhook ${connection.id}`,
+      detail: `last success ${h.lastSuccessAt ?? 'unknown'}; last failure ${h.lastFailureAt ?? 'unknown'}; ` +
+        `failure streak ${h.failureStreak}; pending ${h.pending}; dead-lettered ${h.deadLettered}; omitted ${h.overflowCount}` });
+  }
   const reachable = new Set<string>();
   for (const host of config.hosts) {
     const name = `host ${host.id}`;

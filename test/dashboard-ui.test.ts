@@ -246,7 +246,8 @@ async function webhookPage(options: {
 describe('dashboard webhook connections: running browser handlers', () => {
   test('overview entry and setup use two accessible paste fields, configured projects and a safe private-panel prompt', async () => {
     const page = await webhookPage();
-    assert.equal(page.root.elements('input').length, 2, 'no separate key field');
+    assert.equal(page.root.elements('input').filter((node) => ['webhook-url', 'webhook-auth'].includes(node.getAttribute('id') ?? '')).length, 2, 'two receiver fields');
+    assert.equal(page.root.elements('input').filter((node) => node.getAttribute('type') === 'password').length, 1, 'one complete auth field');
     assert.equal(page.field('webhook-auth').getAttribute('type'), 'password');
     for (const id of ['webhook-url', 'webhook-auth', 'webhook-project']) {
       assert.ok(page.root.elements('label').some((label) => label.getAttribute('for') === id));
@@ -526,4 +527,20 @@ test('settlement browser action confirms, retains request id on error, then upda
   assert.doesNotMatch(root.textContent, /Synthetic failed job/);
   assert.match(root.textContent, /Thread settled/);
   assertSafeTree(root);
+});
+
+test('precise dashboard filters submit bounded JSON lists and render health as text', async () => {
+  const page = await webhookPage();
+  page.fill();
+  page.field('webhook-project').value = 'alpha';
+  page.field('webhook-jobs').value = 'job-a, job-b';
+  page.field('webhook-clients').value = 'client-a';
+  page.field('webhook-events').value = 'idle, needs_input';
+  await page.form().dispatch('submit');
+  assert.deepEqual(page.posts[0]!.body.jobs, ['job-a', 'job-b']);
+  assert.deepEqual(page.posts[0]!.body.clients, ['client-a']);
+  assert.deepEqual(page.posts[0]!.body.events, ['idle', 'needs_input']);
+  assert.match(page.root.textContent, /Failure streak/);
+  assert.match(page.root.textContent, /Dead-lettered events/);
+  page.assertNoSecrets();
 });

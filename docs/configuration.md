@@ -261,6 +261,8 @@ The file-managed alternative below remains supported. At most 32 saved active su
 | `auth.secretFile` | A regular file in the gateway data directory, named by a single filename, owned by the current user and readable only by that user (`0600`), never a symlink or FIFO. Contents are the header value, up to 8 KiB; one final newline is removed. Empty/missing/invalid secrets fail closed. |
 | `projects`, `hosts` | Optional nonempty lists; OR within each, AND between them. Omitted means all. Project matching uses the stored alias (or discovery's `@host/projectId` ref). |
 | `targets` | Optional nonempty list of exact `{host, projectId}` pairs; OR within the list, AND with the other filters. |
+| `jobs`, `clients` | Optional nonempty lists (at most 100 each). Match exact job IDs and the client that originally started each job; all filters intersect. Client matching does not change when another client sends a follow-up. |
+| `ownerClientId` | Optional bot owner. Requires explicit `hosts` and `excerptChars: 0`. Only jobs this client explicitly subscribes with `work_subscribe` are captured. The receiver stays operator-provisioned. The bot needs Read on every host to list health and Operate on every host to subscribe/replay. |
 | `events` | Nonempty selection of `needs_input`, `idle`, `failed`, `cancelled`, `delegated_work_ended`, `running`, `pull_request_opened`, `pull_request_merged`. Defaults to the first five. |
 | `excerptChars` | Default `0` omits both excerpt fields. Opt in with 1–500 for a bounded worker excerpt and truncation flag. Worker secrets cannot be reliably redacted. |
 | `allowLoopbackHttp` | Default `false`. Isolated development only: permits HTTP at literal `127.0.0.1` or `[::1]`; no other HTTP host. HTTPS always validates certificates. |
@@ -273,3 +275,32 @@ New subscriptions do not replay history. Disabling/removing a subscription, or c
 
 
 PR notifications are optional webhook event types: `pull_request_opened` and `pull_request_merged`. Include them explicitly in a config-owned subscription's `events` alongside whichever normal job events you want. They carry `pullRequests: [{number, state, url}]`, a cached T3-linked snapshot of at most 20 PRs (open first, then the newest) out of the up to 200 the job follows, so the PR an event is about may not be among them; receivers deduplicate `eventId`, save the feed cursor and call `work_status` for current details. Existing defaults and dashboard-created connections retain the five normal job events. There is no notification for old PRs on the first baseline of an existing/adopted job.
+
+### Bot-owned job notifications
+
+Provision a dedicated connection for a client ID from `clients list` (the ID is not its token):
+
+```json
+{
+  "id": "bot-notices",
+  "enabled": true,
+  "url": "https://receiver.example.com/events",
+  "auth": { "header": "Authorization", "secretFile": "bot.key" },
+  "ownerClientId": "<client-id>",
+  "hosts": ["main"],
+  "projects": ["pilot"],
+  "events": ["idle", "needs_input", "failed", "pull_request_opened"]
+}
+```
+
+The private file holds the receiver's full header value. No URL, key or file path is accepted by the
+notification MCP tools. The operator's host/project/event filters are a ceiling; a bot can narrow events
+per job, never broaden them. Existing connections without `ownerClientId` retain automatic matching.
+At most 100 jobs can be subscribed to each owned connection; remove old bindings to free capacity.
+Removing a binding stops future capture but does not recall already captured events.
+
+Migration 18 adds private archive, health and job-binding tables. Existing route bytes, revisions,
+queues and attempts are unchanged. Health/archive begin at upgrade. Stop all ledger users and back up
+before upgrading; any CLI open can migrate the database. Older builds refuse version 18. Rollback
+requires restoring the pre-upgrade backup, losing writes since it was taken. No receiver re-registration
+or key rotation is required.

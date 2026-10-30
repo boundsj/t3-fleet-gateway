@@ -408,6 +408,41 @@ CREATE TRIGGER thread_action_events_no_delete BEFORE DELETE ON thread_action_eve
   payload TEXT NOT NULL
 ) STRICT;`,
   },
+  {
+    version: 18,
+    name: 'precise notifications health and replay',
+    // Additive: preserve routes, revisions, pending bytes and attempts. Older senders must refuse
+    // the new job/client/owner filters. Rollback requires a stopped pre-upgrade ledger backup.
+    sql: `CREATE TABLE webhook_health (
+  subscription_id TEXT PRIMARY KEY REFERENCES webhook_subscriptions(id) ON DELETE CASCADE,
+  last_success_at INTEGER,
+  last_failure_at INTEGER,
+  failure_streak INTEGER NOT NULL DEFAULT 0,
+  dead_lettered INTEGER NOT NULL DEFAULT 0,
+  archive_floor INTEGER NOT NULL DEFAULT 0,
+  archive_floor_at INTEGER
+) STRICT;
+INSERT INTO webhook_health (subscription_id, archive_floor, archive_floor_at)
+  SELECT id, COALESCE((SELECT MAX(id) FROM job_events), 0), (SELECT MAX(created_at) FROM job_events) FROM webhook_subscriptions;
+CREATE TABLE webhook_archive (
+  subscription_id TEXT NOT NULL REFERENCES webhook_subscriptions(id) ON DELETE CASCADE,
+  revision TEXT NOT NULL,
+  feed_sequence INTEGER NOT NULL REFERENCES job_events(id),
+  event_id TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (subscription_id, revision, feed_sequence)
+) STRICT;
+CREATE INDEX webhook_archive_sequence ON webhook_archive(subscription_id, feed_sequence, created_at);
+CREATE INDEX webhook_archive_time ON webhook_archive(subscription_id, created_at, feed_sequence);
+CREATE TABLE webhook_job_bindings (
+  subscription_id TEXT NOT NULL REFERENCES webhook_subscriptions(id) ON DELETE CASCADE,
+  revision TEXT NOT NULL,
+  job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  events TEXT NOT NULL,
+  PRIMARY KEY (subscription_id, revision, job_id)
+) STRICT;`,
+  },
 ];
 
 /**

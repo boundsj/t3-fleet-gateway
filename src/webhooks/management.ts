@@ -6,7 +6,7 @@ import type { CatalogService } from '../hosts/catalog.ts';
 import type { HostRegistry } from '../hosts/registry.ts';
 import type { Logger } from '../log.ts';
 import type { Clock } from '../time.ts';
-import { authHeaderAllowed, destinationAllowed, type WebhookRoute } from './config.ts';
+import { authHeaderAllowed, destinationAllowed, preciseFilters, type WebhookRoute } from './config.ts';
 import { ATTEMPT_TIMEOUT_MS, postWebhook } from './sender.ts';
 import { WebhookConnectionError, type AttemptResult, type WebhookStore } from './store.ts';
 
@@ -16,7 +16,7 @@ const common = { session: z.uuid(), requestId: z.uuid() };
 const target = { id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), revision: z.uuid() };
 const destination = { url: z.string().min(1).max(4096), authHeader: z.string().min(1).max(8322) };
 const inputs = {
-  connect: z.strictObject({ ...common, ...destination, project: z.string().min(1).max(1000) }),
+  connect: z.strictObject({ ...common, ...destination, project: z.string().min(1).max(1000), ...preciseFilters }),
   replace: z.strictObject({ ...common, ...target, ...destination, url: destination.url.optional() }),
   test: z.strictObject({ ...common, ...target }),
   disconnect: z.strictObject({ ...common, ...target }),
@@ -85,7 +85,7 @@ export class WebhookManagement {
     return {
       session: this.#session,
       projects: this.#config.projects.map(({ alias, host }) => ({ alias, host })),
-      connections: this.#store.listConnections(),
+      connections: this.#store.listConnections().map((row) => ({ ...row, health: this.#store.health(row.id)[0]!.health })),
     };
   }
 
@@ -182,7 +182,7 @@ export class WebhookManagement {
       // Preserve the existing route and its revision; a failed replacement is never activated.
       return failure(502, 'ping_failed', test);
     } else if (action === 'connect' && project) {
-      this.#store.connectDashboard(id, project.alias, project.host, route, record, project.projectId);
+      this.#store.connectDashboard(id, project.alias, project.host, route, record, project.projectId, 'project' in data ? { jobs: data.jobs, clients: data.clients, events: data.events } : {});
       this.#wake();
     } else if (action === 'replace' && 'revision' in data) {
       this.#store.replaceDashboard(id, data.revision, route, record);
