@@ -4,6 +4,9 @@
 
 ### Added
 
+- Session-detected T3 launch retry keys: every supported launch carries a stable job-derived `clientRequestId`, with one safe transport retry and legacy marker reconciliation retained. Plain follow-up keys retain their format and now durably bind uncertain retries to the original authorization identity, including after gateway restart; older uncertain sends without identity metadata fail closed for inspection. Conservative attachment follow-up handling remains intact.
+- `fleet_models.search` and per-provider `omittedModels`, with query-bound paging and fresh searches for explicit `work_start` validation at acceptance and dispatch. Older T3 hosts keep their legacy catalog. Upstream search is capped and excludes hidden models; see [contracts and limits](docs/evidence/launch-retries-model-search.md).
+
 - Optional `standingInstructions` configuration text is prepended to every new job's first message ([#43](https://github.com/boundsj/t3-fleet-gateway/pull/43)). See [README](README.md#standing-instructions-for-workers) and [configuration](docs/configuration.md#standinginstructions).
 
 ### Fixed

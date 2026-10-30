@@ -441,7 +441,7 @@ export class JobEngine {
     }
     if (spec.model.source === 'explicit' && spec.model.selection) {
       try {
-        const providers = (await catalog.models(job.hostId, { refresh: true })).value;
+        const providers = (await catalog.models(job.hostId, { refresh: true, search: spec.model.selection.model as string })).value;
         validateSelection(job.hostId, providers, spec.model.selection as unknown as ModelSelection);
       } catch (error) {
         if (isHostFailure(error)) throw error;
@@ -562,6 +562,7 @@ export class JobEngine {
       try {
         launched = await registry.client(job.hostId).launchThread(
           {
+            clientRequestId: `t3fg-launch-${job.id}`,
             title: job.title,
             runtimeMode: job.runtimeMode as RuntimeMode,
             ...(plan.modelSelection ? { modelSelection: plan.modelSelection } : {}),

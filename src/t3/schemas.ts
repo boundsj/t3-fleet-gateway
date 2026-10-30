@@ -50,6 +50,7 @@ export const capabilitiesSchema = z.looseObject({
       displayName: z.string().nullish(),
       // Parse entries independently after transport validation: one bad model must not hide its siblings.
       models: z.array(z.unknown()),
+      omittedModels: z.number().int().nonnegative().optional(),
       runtimeModes: z.array(z.string()).nullish(),
       /** Whether this provider may run a delegated child task inside T3: metadata, not proof that a top-level launch works. */
       canRunChildTask: z.boolean().nullish(),
@@ -92,6 +93,7 @@ export type LaunchWorkspaceStrategy =
 
 /** Input of `t3_thread_launch` as the gateway sends it (a subset of what T3 accepts). */
 export type LaunchThreadInput = {
+  clientRequestId?: string;
   title: string;
   runtimeMode: (typeof RUNTIME_MODE_VALUES)[number];
   modelSelection?: Record<string, unknown>;

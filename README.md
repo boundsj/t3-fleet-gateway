@@ -160,6 +160,8 @@ and the models and reasoning efforts it offers. For my next job in
 <configured alias>, use <model and effort> and tell me what you selected.
 ```
 
+`fleet_models { host: "<id>", search: "<model id or words>" }` finds models beyond T3’s short default list on newer hosts. Check each provider’s `omittedModels` and narrow the query when needed; repeat the search with a page cursor. Older hosts keep their legacy catalog. Explicit model choices are searched and validated again before launch.
+
 Browsing and launching are separate choices. To launch into projects without aliases, explicitly enable that host's discovery launch policy. Existing aliases keep their restrictions; model choices must match what T3 advertises. [Discovery settings](docs/configuration.md#discovery).
 
 ## Start work with no named project

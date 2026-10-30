@@ -5,8 +5,10 @@ import { warnProjectsWithoutModel } from '../src/hosts/projects.ts';
 import { createLogger } from '../src/log.ts';
 import { DEFAULT_T3_TIMEOUT_MS } from '../src/t3/client.ts';
 import { MINUTE } from '../src/time.ts';
-import { assertNotLogged, jobState, startJob, startJobHarness, type JobHarness } from './helpers/jobs.ts';
+import { agentWithToken, assertNotLogged, jobState, startJob, startJobHarness, type JobHarness } from './helpers/jobs.ts';
 import { tempDir } from './helpers/tmp.ts';
+import { startFakeT3 } from './helpers/fakeT3.ts';
+import { signIn } from './helpers/oauthFlow.ts';
 
 interface Status {
   state: string;
@@ -479,3 +481,58 @@ describe('startup model check', () => {
     assert.match(failed[0] ?? '', /"project":"pilot"/);
   });
 });
+
+for (const launchRetryKeys of [false, true]) {
+  test(`a timed-out ${launchRetryKeys ? 'keyed' : 'legacy'} launch is reconciled after a gateway restart without another turn`, async (t) => {
+    const fake = await startFakeT3({ launchRetryKeys });
+    t.after(() => fake.close());
+    const dataDir = join(tempDir(t), 'data');
+    const first = await startJobHarness(t, { fake, dataDir, launchTimeoutMs: 100 });
+    fake.holdResponses.add('t3_thread_launch');
+    const job = await startJob(first.agent);
+    await first.tick();
+    assert.equal(await jobState(first.agent, job.jobId), 'unknown');
+    assert.equal(fake.calls.filter((name) => name === 't3_thread_launch').length, launchRetryKeys ? 2 : 1);
+    fake.holdResponses.delete('t3_thread_launch');
+    fake.releaseHeld();
+    await stopGateway(first);
+    const second = await startJobHarness(t, { fake, dataDir, door: first.gw.door });
+    await second.tick();
+    assert.equal(await jobState(second.agent, job.jobId), 'running');
+    assert.equal(fake.threads.size, 1);
+    assert.equal(fake.threadForJob(job.jobId).runs.length, 1);
+    assert.equal(fake.calls.filter((name) => name === 't3_thread_launch').length, launchRetryKeys ? 2 : 1);
+  });
+}
+
+
+for (const renew of [false, true]) {
+  test(`an uncertain send after gateway restart ${renew ? 'refuses a new authorization' : 'replays under the original authorization'}`, async (t) => {
+    const first = await startJobHarness(t);
+    const job = await startJob(first.agent);
+    await first.tick();
+    const thread = first.fake.threadForJob(job.jobId);
+    first.fake.finishTurn(thread.threadId, 'Synthetic finished');
+    await first.tick();
+    const signedIn = await signIn(first.gw.baseUrl, first.gw.mintApprovalCode, { access: 'operate' });
+    const original = await agentWithToken(t, first.gw.baseUrl, signedIn.clientId, signedIn.tokens.access_token);
+    const input = { jobId: job.jobId, message: 'Synthetic follow-up', requestId: 'follow-restart' };
+    first.fake.dropResponseOnce.add('t3_thread_send');
+    assert.equal((await original.callError('work_continue', input)).code, 't3_response_lost');
+    const marker = JSON.parse(first.gw.services.jobs.store.idempotencyKey(signedIn.clientId, 'work_continue', input.requestId)!.response!) as { sendIdentity: string };
+    assert.match(marker.sendIdentity, /^[a-f0-9]{64}$/);
+    await original.client.close();
+    await stopGateway(first);
+    const second = await startJobHarness(t, { dataDir: first.gw.dataDir, fake: first.fake, door: first.gw.door });
+    if (renew) await second.gw.services.registry.enroll('main');
+    const replaying = await agentWithToken(t, second.gw.baseUrl, signedIn.clientId, signedIn.tokens.access_token);
+    if (renew) assert.equal((await replaying.callError('work_continue', input)).code, 't3_response_lost');
+    else {
+      const result = await replaying.call('work_continue', input);
+      assert.equal(JSON.stringify(result).includes(marker.sendIdentity), false, 'private retry metadata stays in the ledger');
+    }
+    assert.equal(first.fake.sends.length, 1);
+    assert.equal(thread.runs.length, 2);
+    assertNotLogged(second.gw, [marker.sendIdentity]);
+  });
+}

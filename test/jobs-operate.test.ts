@@ -461,3 +461,34 @@ describe('job links', () => {
     assert.equal(gw.logs.some((line) => line.includes('t3-thread://')), false, 'links are never logged');
   });
 });
+
+test('an uncertain plain send cannot replay after T3 authorization renewal', async (t) => {
+  const { fake, agent, gw, tick } = await startJobHarness(t);
+  const job = await startJob(agent);
+  await tick();
+  const thread = fake.threadForJob(job.jobId);
+  fake.finishTurn(thread.threadId, 'Synthetic finished');
+  await tick();
+  const input = { jobId: job.jobId, message: 'Synthetic next task', requestId: 'follow-renewal' };
+  fake.dropResponseOnce.add('t3_thread_send');
+  assert.equal((await agent.callError('work_continue', input)).code, 't3_response_lost');
+  await gw.services.registry.enroll('main');
+  assert.equal((await agent.callError('work_continue', input)).code, 't3_response_lost');
+  assert.equal(fake.sends.length, 1);
+  assert.equal(thread.runs.length, 2, 'the original turn plus exactly one follow-up');
+});
+
+test('an older uncertain plain send with no saved authorization identity fails closed', async (t) => {
+  const { fake, agent, gw, tick } = await startJobHarness(t);
+  const job = await startJob(agent);
+  await tick();
+  const input = { jobId: job.jobId, message: 'Synthetic follow-up', requestId: 'follow-legacy-uncertain' };
+  fake.dropResponseOnce.add('t3_thread_send');
+  await agent.callError('work_continue', input);
+  gw.services.db.prepare("UPDATE idempotency_keys SET response = NULL WHERE client_id = ? AND tool = 'work_continue' AND request_id = ?")
+    .run(agent.clientId, input.requestId);
+  const result = await agent.callError('work_continue', input);
+  assert.equal(result.code, 't3_response_lost');
+  assert.match(result.text, /Inspect the thread/);
+  assert.equal(fake.sends.length, 1);
+});

@@ -550,7 +550,7 @@ export class JobService {
     if (!project.allowWorkStart) throw this.#startDisabled(caller, project);
     let model: LaunchSpec['model'];
     if (input.modelSelection) {
-      const providers = (await this.#catalog.models(host.id, { refresh: true })).value;
+      const providers = (await this.#catalog.models(host.id, { refresh: true, search: input.modelSelection.model })).value;
       model = { source: 'explicit', selection: { ...validateSelection(host.id, providers, input.modelSelection) } };
     } else {
       const configured = configuredModel(this.#config, project);
@@ -640,7 +640,7 @@ export class JobService {
     }
     let model: LaunchSpec['model'];
     if (input.modelSelection) {
-      const providers = (await this.#catalog.models(host.id, { refresh: true })).value;
+      const providers = (await this.#catalog.models(host.id, { refresh: true, search: input.modelSelection.model })).value;
       model = { source: 'explicit', selection: { ...validateSelection(host.id, providers, input.modelSelection) } };
     } else if (alias !== null) {
       const configured = configuredModel(this.#config, policy as ProjectConfig);
@@ -1021,7 +1021,7 @@ export class JobService {
   /**
    * Send a follow-up instruction to the job's thread. Idempotent on requestId: a delivered request is
    * not sent again, and a request whose first attempt had an unknown outcome is re-sent with the same
-   * T3 clientRequestId, which T3 deduplicates. Attachment sends instead keep a durable uncertainty marker and never resend.
+   * T3 clientRequestId under the same durably bound authorization identity. Attachment sends instead keep a durable uncertainty marker and never resend.
    */
   readonly #attachmentContinues = new Set<string>();
 
@@ -1051,9 +1051,9 @@ export class JobService {
         throw new GatewayError('request_id_conflict', `requestId "${input.requestId}" was already used for a different request. Use a new requestId.`);
       }
       if (key.response !== null) {
-        const stored = JSON.parse(key.response) as { delivery?: string; attachmentOutcome?: string };
+        const stored = JSON.parse(key.response) as { delivery?: string; attachmentOutcome?: string; sendIdentity?: string };
         if (stored.attachmentOutcome === 'unknown') throw attachmentOutcomeUnknown();
-        return { job, delivery: stored.delivery ?? 'unknown', replayed: true };
+        if (!stored.sendIdentity) return { job, delivery: stored.delivery ?? 'unknown', replayed: true };
       }
     } else {
       if (!['idle', 'running', 'needs_input'].includes(job.state) || job.threadId === null) {
@@ -1077,6 +1077,8 @@ export class JobService {
       throw rootBusy(job);
     }
     let sent;
+    let sendIdentity: string | undefined;
+    let sendGuardRejected = false;
     try {
       const client = this.#registry.client(job.hostId);
       if (attachments.length) {
@@ -1100,15 +1102,32 @@ export class JobService {
         message: input.message,
         mode: 'auto',
         clientRequestId: `t3fg-${job.id}-${sha256Hex(`${caller.clientId}\n${input.requestId}`).slice(0, 24)}`,
-      });
+      }, { beforeSend: (identity) => {
+        try { this.store.beginTextSend(caller.clientId, input.requestId, identity, key === undefined); }
+        catch (error) { sendGuardRejected = true; throw error; }
+        sendIdentity = identity;
+      } });
     } catch (error) {
       if (attachments.length && this.store.idempotencyKey(caller.clientId, 'work_continue', input.requestId)?.response !== null) {
         throw attachmentOutcomeUnknown();
       }
-      if (attachments.length || error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered')) {
-        this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
-        // Only this attempt's own claim ends here: an earlier attempt of the job that may have been delivered keeps the folder.
+      if (sendGuardRejected) {
         if (attempt.kind === 'held') this.store.abandonResume(job.id, attempt.token);
+        throw error;
+      }
+      if (attachments.length || error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered')) {
+        let released = false;
+        if (!key) {
+          if (sendIdentity === undefined) {
+            this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
+            released = true;
+          } else released = this.store.releaseFirstTextSend(caller.clientId, input.requestId, sendIdentity);
+        }
+        // This attempt was refused or definitely undelivered; only its own reservation token ends here.
+        if (attempt.kind === 'held') this.store.abandonResume(job.id, attempt.token);
+        if (!released) {
+          throw new GatewayError('t3_response_lost', 'A previous send attempt still has an uncertain outcome. Retry with the same requestId and T3 authorization, or inspect the thread.');
+        }
         throw error;
       }
       const described = describeError(error);

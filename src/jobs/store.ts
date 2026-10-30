@@ -431,7 +431,7 @@ export type IdempotentTool = 'work_start' | 'work_continue' | 'work_settle' | 'w
 export interface IdempotencyKey {
   inputHash: string;
   jobId: string;
-  /** The stored result, or null while the outcome of the first attempt is unknown. */
+  /** A completed result, private send-retry metadata/uncertainty marker, or null before delivery. */
   response: string | null;
 }
 
@@ -1071,6 +1071,28 @@ export class JobStore {
   beginAttachmentSend(clientId: string, requestId: string): boolean {
     return this.#db.prepare(`UPDATE idempotency_keys SET response = '{"attachmentOutcome":"unknown"}'
       WHERE client_id = ? AND tool = 'work_continue' AND request_id = ? AND response IS NULL`).run(clientId, requestId).changes === 1;
+  }
+
+  /** Bind an uncertain plain send to its original authorization identity before touching T3. No credential is stored here. */
+  beginTextSend(clientId: string, requestId: string, identity: string, allowNew: boolean): void {
+    transaction(this.#db, () => {
+      const key = this.idempotencyKey(clientId, 'work_continue', requestId);
+      const stored = key?.response == null ? null : JSON.parse(key.response) as { sendIdentity?: string; sendAttempts?: number };
+      if (!key || (stored === null && !allowNew) || (stored !== null &&
+          (stored.sendIdentity !== identity || typeof stored.sendAttempts !== 'number' ||
+            !Number.isSafeInteger(stored.sendAttempts) || stored.sendAttempts < 1))) {
+        throw new GatewayError('t3_response_lost', 'The earlier send cannot be safely retried under this T3 authorization. Inspect the thread before starting new work.');
+      }
+      this.completeIdempotencyKey(clientId, 'work_continue', requestId,
+        JSON.stringify({ sendIdentity: identity, sendAttempts: (stored?.sendAttempts ?? 0) + 1 }));
+    });
+  }
+
+  /** A definite failure can release only a first attempt with no overlapping/repeated attempts. */
+  releaseFirstTextSend(clientId: string, requestId: string, identity: string): boolean {
+    return this.#db.prepare(`DELETE FROM idempotency_keys
+      WHERE client_id = ? AND tool = 'work_continue' AND request_id = ? AND response = ?`)
+      .run(clientId, requestId, JSON.stringify({ sendIdentity: identity, sendAttempts: 1 })).changes === 1;
   }
 
   idempotencyKey(clientId: string, tool: IdempotentTool, requestId: string): IdempotencyKey | undefined {
