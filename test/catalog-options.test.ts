@@ -3,17 +3,14 @@ import { test } from 'node:test';
 import { sanitizeCapabilities, MAX_CHOICES_PER_OPTION, MAX_OPTIONS_PER_MODEL } from '../src/hosts/catalog.ts';
 import { validateSelection } from '../src/jobs/launchSpec.ts';
 import { createLogger } from '../src/log.ts';
-import { capabilitiesSchema, optionDescriptorSchema } from '../src/t3/schemas.ts';
+import { capabilitiesSchema } from '../src/t3/schemas.ts';
 
 const catalog = (models: unknown[]) => capabilitiesSchema.parse({
   providers: [{ providerInstanceId: 'provider-a', driverKind: 'synthetic', models }],
 });
 
-test('the former descriptor rejects the compact shape that normalization accepts', () => {
+test('compact option descriptors are normalized without a label or explicit type', () => {
   const compact = { id: 'effort', values: ['low', 'high'], default: 'low' };
-  const result = optionDescriptorSchema.safeParse(compact);
-  assert.equal(result.success, false);
-  if (!result.success) assert.deepEqual(result.error.issues.map((issue) => issue.path), [['label'], ['type']]);
   const [model] = sanitizeCapabilities('host-a', catalog([{ id: 'model-a', options: [compact] }]))[0]!.models;
   assert.deepEqual(model!.options[0], {
     id: 'effort', label: 'effort', type: 'select', description: null, currentValue: 'low',

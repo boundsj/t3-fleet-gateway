@@ -563,12 +563,12 @@ CREATE TABLE jobs (
     assert.equal(migrated.require('legacy0002').launchSpec?.v, 1);
     assert.equal(migrated.require('legacy0001').workspaceKind, null);
     // The ledger itself refuses a second holder of one folder on a host, and nothing else about holding.
-    const hold = (id: string, host: string, key: string | null) =>
+    const hold = (id: string, key: string | null) =>
       db.prepare('UPDATE jobs SET workspace_kind = ?, workspace_root_key = ?, workspace_root_held_at = ? WHERE id = ?').run(key ? 'root' : null, key, key ? 1 : null, id);
-    hold('legacy0001', 'main', 'folder-a');
-    assert.throws(() => hold('legacy0002', 'main', 'folder-a'), /UNIQUE/);
+    hold('legacy0001', 'folder-a');
+    assert.throws(() => hold('legacy0002', 'folder-a'), /UNIQUE/);
     db.prepare("UPDATE jobs SET host_id = 'other' WHERE id = 'legacy0002'").run();
-    hold('legacy0002', 'other', 'folder-a');
+    hold('legacy0002', 'folder-a');
     assert.throws(() => db.prepare("UPDATE jobs SET workspace_kind = 'checkout' WHERE id = 'legacy0001'").run(), /CHECK/);
     assert.throws(() => migrate(db, MIGRATIONS.slice(0, 11)), /schema version 18 is newer than this build supports \(11\)/);
     assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
