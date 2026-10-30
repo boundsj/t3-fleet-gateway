@@ -2,20 +2,16 @@ import type { T3Client } from '../t3/client.ts';
 import type { JobStore } from './store.ts';
 
 /**
- * T3's retry key for interrupting one run of a job's thread. Re-delivering the interrupt for the same
- * run (after a send whose outcome is unknown) reuses the key, so T3 treats the repeat as one request.
- * A later run on the thread (a queued follow-up, or a person typing in T3) gets its own key: reusing
- * one key per job would make T3 answer from its record of the first interrupt and leave the new run
- * going.
+ * Retries reuse the key for one run. Later runs need a new key or T3 would replay the earlier
+ * interrupt's result and leave the new run active.
  */
 export function cancelRequestId(jobId: string, runId: string | null): string {
   return `t3fg-cancel-${jobId}-${runId ?? 'none'}`;
 }
 
 /**
- * Ask T3 to interrupt the run of a cancel_requested job's thread that is active (or, when none is,
- * the latest one). If T3 reports that nothing is running, the job is cancelled at once; if the
- * interrupt was accepted, the watcher confirms it later. T3 errors propagate to the caller.
+ * Interrupt a cancel_requested job's active or latest run. Cancel immediately if it is stopped;
+ * otherwise the watcher confirms the interrupt. T3 errors propagate.
  */
 export async function deliverInterrupt(
   store: JobStore,
