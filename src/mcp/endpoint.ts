@@ -52,6 +52,12 @@ export function createMcpEndpoint(deps: McpEndpointDependencies): { route: Route
   };
   const contextFrom = (authInfo: AuthInfo | undefined): ToolContext => ({
     clientId: authInfo?.clientId ?? '',
+    onToolCall: () => {
+      const id = authInfo?.extra?.operatorTokenId;
+      if (typeof id === 'string') {
+        try { deps.tokens.recordOperatorCall(id); } catch { logger.warn('mcp.token_usage_record_failed'); }
+      }
+    },
     scopes: (authInfo?.scopes ?? []) as ToolContext['scopes'],
   });
   const modern = createMcpHandler(({ authInfo }) => buildServer(contextFrom(authInfo)), {
@@ -116,6 +122,7 @@ export function createMcpEndpoint(deps: McpEndpointDependencies): { route: Route
     });
     const authInfo: AuthInfo = {
       token: '',
+      extra: { operatorTokenId: verified.operatorTokenId },
       clientId: verified.clientId,
       scopes: verified.scopes,
       expiresAt: Math.floor(verified.expiresAt / 1000),
