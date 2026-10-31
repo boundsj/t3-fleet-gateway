@@ -1,10 +1,11 @@
 # Manual setup
 
-Follow these steps yourself or give them to a coding agent on the gateway machine. They expand the [README's setup prompts](../README.md#get-going-with-prompts). See [configuration](configuration.md) for fields and [operations](operations.md) for maintenance and recovery.
+Follow these steps yourself or give them to a coding agent on the gateway machine. They expand the [README's quick start](../README.md#quick-start). See [configuration](configuration.md) for fields and [operations](operations.md) for maintenance and recovery.
 
 ## Before you start
 
-- Node.js 24 or newer, a running T3 Code server, and a `t3` CLI that can mint pairing codes for it.
+- Node.js 24.22.1 or a later 24.x, or 26.12.1 or newer.
+- A running T3 Code server and a `t3` CLI that can mint pairing codes for it.
 - A machine that stays on while agents work. macOS and Linux service templates are included.
 - An HTTPS tunnel to the gateway for cloud clients. The gateway listens on loopback; Tailscale Funnel, Cloudflare Tunnel or another tunnel can carry its public MCP endpoint.
 - A separate private route if you enable the operator dashboard. Use a tailnet-only proxy such as Tailscale Serve for that listener, never a public tunnel.
@@ -98,7 +99,24 @@ A network outage and expired credentials are different problems. Keep the client
 
 Enable `dashboard` on a separate loopback port, set its mount path and allowed browser host, and publish that path through a private tailnet proxy. [The dashboard instructions](operations.md#operator-dashboard) include the Tailscale commands and exposure checks. Do not point the public MCP tunnel at this listener.
 
-Ask Grok Bot for clickable links to the routine's **Webhook URL**, **Webhook key** and **Authorization header** fields, without printing their values in chat. Those links open the routine panel. Copy **POST to** into the dashboard's **Webhook URL** and **header** into **Full authorization header**. The full header already includes the key. Open **Connect Grok Bot**, choose a project, then click **Connect & Test**. See [the README walkthrough](../README.md#give-your-bot-a-doorbell-).
+First, create a routine in the bot conversation that should receive updates. For Grok Bot, try:
+
+```text
+Create a webhook-triggered routine for T3 gateway updates. For type
+"ping", acknowledge the connection test; it has no job ID. For job
+events, deduplicate by eventId, call work_status for jobId, and read
+work_messages when needed. Report a short status update here.
+
+For this first test, only report: don't start, change or cancel work.
+If waitingOnDelegatedWork is true, say the coordinator is still waiting
+on its helpers. Keep scheduled work_feed catch-up as a fallback.
+
+Give me the clickable Webhook URL, Webhook key and Authorization header
+links that open this routine's private fields. Do not print the actual
+URL, key or header value in chat.
+```
+
+The private links open the routine panel. If the bot does not supply them, ask explicitly for links to those fields, without printing their values. Copy **POST to** into the dashboard's **Webhook URL** and **header** into **Full authorization header**. The full header already includes the key. Open **Connect Grok Bot**, choose a project, then click **Connect & Test**. See [notification filters and recovery](operations.md#precise-bot-notifications-and-recovery).
 
 Recreating a routine or rotating credentials can change its URL too. Copy both fields again when replacing the connection.
 

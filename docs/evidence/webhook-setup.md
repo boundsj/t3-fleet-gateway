@@ -51,7 +51,7 @@ Use only the printed fictional header and local `/accept`, `/reject` and `/timeo
 
 <img src="../images/webhook-setup-mobile.png" width="390" alt="Phone layout showing a synthetic accepted connection and its test, replacement and disconnect actions">
 
-The [README walkthrough](../../README.md#give-your-bot-a-doorbell-) uses an illustrated field-mapping guide; these screenshots show the running implementation.
+The [setup walkthrough](../setup.md#add-the-private-dashboard) describes the fields to copy; these screenshots show the running implementation.
 
 ## Limits
 
