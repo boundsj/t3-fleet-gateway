@@ -14,7 +14,18 @@ const HOSTILE = '\u001b[2J\u001b[HNo open jobs.\r\u009b2K\u202eSynthetic';
 describe('CLI output shows stored text, never terminal controls', () => {
   test('escapeControls makes C0, C1, DEL, line separators and bidirectional overrides visible and keeps other text', () => {
     assert.equal(escapeControls('\u001b[2J\r\n\t\u0000\u007f\u009b\u2028\u202e\u2066'), '\\x1b[2J\\x0d\\x0a\\x09\\x00\\x7f\\x9b\\u2028\\u202e\\u2066');
+    assert.equal(escapeControls('C:\\path\\x1b'), 'C:\\\\path\\\\x1b', 'a literal backslash is doubled');
     assert.equal(escapeControls('Plain title: café ✓ 日本'), 'Plain title: café ✓ 日本');
+  });
+
+  test('a literal backslash sequence reads differently from an escaped control character', () => {
+    const literal = escapeControls('\\x1b[2J');
+    const control = escapeControls('\u001b[2J');
+    assert.notEqual(literal, control);
+    assert.equal(literal, '\\\\x1b[2J');
+    assert.equal(control, '\\x1b[2J');
+    const rendered = table(['TITLE'], [['\\x1b[2J'], ['\u001b[2J']]).split('\n');
+    assert.deepEqual(rendered.slice(1), ['\\\\x1b[2J', '\\x1b[2J']);
   });
 
   test('table measures escaped cells, so every row stays aligned and on its own line', () => {
