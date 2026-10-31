@@ -1,3 +1,4 @@
+import { projectAccess, projectGrant, setProjectAccess } from '../oauth/projectAccess.ts';
 import { parseArgs } from 'node:util';
 import { loadConfig, mcpResource, resolvePaths, type GatewayConfig, type Paths } from '../config.ts';
 import { describeError, GatewayError, isGatewayError } from '../errors.ts';
@@ -41,6 +42,8 @@ Commands:
                             Mint a bearer token for an agent that cannot sign in with OAuth;
                             --hosts limits it to those host ids (default all: every host,
                             including hosts added later)
+  clients projects <id> [--project <alias|@host/projectId> ... | --all-projects | --no-projects]
+                            Show or replace project access (omitted policy: all projects)
   clients tokens <id>        List bearer token IDs, expiry, last use and recent tool call counts
   clients rotate <id> --token-id <id> --overlap 7d [--ttl 1y|never]
                             Print a replacement token once, preserving client and scopes
@@ -220,6 +223,25 @@ async function manageTokens(paths: Paths, io: CliIo, action: string, clientId: s
     }
     return 0;
   });
+}
+
+function clientProjects(paths: Paths, io: CliIo, clientId: string | undefined,
+  refs: string[] | undefined, all: boolean | undefined, none: boolean | undefined): number {
+  if (!clientId) throw new UsageError('clients projects needs a client id');
+  if (Number(refs !== undefined) + Number(all === true) + Number(none === true) > 1) {
+    throw new UsageError('Choose --project, --all-projects or --no-projects.');
+  }
+  if (refs && refs.length > 100) throw new UsageError('At most 100 projects per client.');
+  const storage = openStorage(paths.dataDir);
+  try {
+    if (!new ClientStore(storage.db, systemClock).get(clientId)) throw new GatewayError('not_found', 'No client with that id.');
+    if (refs || all || none) {
+      const config = loadConfig(paths.configPath);
+      setProjectAccess(storage.db, clientId, all ? undefined : refs?.map((ref) => projectGrant(config, ref)) ?? []);
+    }
+    io.out(JSON.stringify({ projects: projectAccess(storage.db, clientId) ?? null }));
+    return 0;
+  } finally { storage.db.close(); }
 }
 
 function clients(paths: Paths, io: CliIo, action: string | undefined, id: string | undefined, scopes: string[] = []): number {
@@ -496,6 +518,9 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         config: { type: 'string' },
         'data-dir': { type: 'string' },
         ttl: { type: 'string' },
+        project: { type: 'string', multiple: true },
+        'all-projects': { type: 'boolean' },
+        'no-projects': { type: 'boolean' },
         'token-id': { type: 'string' },
         overlap: { type: 'string' },
         name: { type: 'string' },
@@ -531,6 +556,9 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
     }
     // Each of these options belongs to one command; anywhere else it would be ignored silently.
     const optionCommands = [
+      ['project', values.project, 'clients projects', command === 'clients' && action === 'projects'],
+      ['all-projects', values['all-projects'], 'clients projects', command === 'clients' && action === 'projects'],
+      ['no-projects', values['no-projects'], 'clients projects', command === 'clients' && action === 'projects'],
       ['token-id', values['token-id'], 'clients rotate/revoke-token', command === 'clients' && (action === 'rotate' || action === 'revoke-token')],
       ['overlap', values.overlap, 'clients rotate', command === 'clients' && action === 'rotate'],
       ['ttl', values.ttl, 'pair and clients token/rotate', command === 'pair' || (command === 'clients' && (action === 'token' || action === 'rotate'))],
@@ -557,6 +585,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       case 'pair':
         return pair(paths, io, values.ttl);
       case 'clients':
+        if (action === 'projects') return clientProjects(paths, io, id, values.project, values['all-projects'], values['no-projects']);
         if (['tokens', 'rotate', 'revoke-token'].includes(action ?? '')) {
           return await manageTokens(paths, io, action!, id, values['token-id'], values.overlap, values.ttl);
         }

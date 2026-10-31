@@ -1,3 +1,4 @@
+import { allowsProject, expandProjectAccess } from '../oauth/projectAccess.ts';
 import { configuredModel, RUNTIME_MODES, runtimeModeAllowed, type GatewayConfig, type HostConfig, type ProjectConfig, type RuntimeMode } from '../config.ts';
 import { describeError, GatewayError } from '../errors.ts';
 import type { CatalogService } from '../hosts/catalog.ts';
@@ -334,6 +335,11 @@ export class JobEngine {
         tried.add(job.id);
         const plan = job.launchSpec ? await this.#planFromSpec(host, job, job.launchSpec, budget) : await this.#planFromConfig(host, job);
         if (!plan) continue;
+        const access = expandProjectAccess(store.projectAccess(job.clientId), this.#options.config);
+        if (!allowsProject(access, job.hostId, job.projectAlias, plan.projectId)) {
+          this.#failQueued(job, 'insufficient_scope', 'The client is no longer approved for this project.');
+          continue;
+        }
         const changes = { t3ProjectId: plan.projectId, dispatchStartedAt: clock() };
         // A resolved workspace is claimed with the ledger (which also takes a root job's folder, or refuses it); the rest transition as before.
         const claim = plan.resolved

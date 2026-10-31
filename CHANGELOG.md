@@ -4,6 +4,8 @@
 
 ### Upgrading
 
+- **Migration 21, additive.** Adds optional client project policies; every existing client remains unrestricted. Existing grants, tokens, jobs and notification queues are unchanged. Back up with ledger users stopped. Older builds refuse schema 21; rollback restores the pre-upgrade backup and loses subsequent writes.
+
 - **Migration 20, additive.** Adds safe bearer-token IDs and usage buckets, backfilling existing tokens without changing their values or grants. Stop all ledger users and back up before upgrading. Older builds refuse schema 20; rollback restores the pre-upgrade backup and loses later writes.
 
 - **Migration 19, additive.** Adds persistent credential alerts and a separate outbox sharing webhook delivery health and retries; existing rows remain unchanged. Back up with all ledger users stopped. Older builds refuse schema 19; safe rollback restores the pre-upgrade backup and configuration, losing later writes. Existing connections keep their event selections; explicitly enable `credential_alert` and `credential_resolved` to receive them.
@@ -11,6 +13,8 @@
 - **Migration 18, forward only.** Adds notification archive, job bindings and persistent delivery health without rewriting existing connection routes, revisions, queues or attempts. Archive/health begin at upgrade; no historical snapshots are invented. Stop all ledger users and back up before opening the new build. Older builds refuse the new schema; rollback requires restoring the pre-upgrade backup and loses subsequent writes. No key rotation or receiver re-registration is needed.
 
 ### Added
+
+- Optional per-client project allowlists via `clients projects`: configured aliases or host/project IDs, intersected with machine access for discovery, jobs, feeds, attention, external threads and bot notifications. Lists apply across OAuth and bearer tokens, including rotation, without a restart. Notification capture, archive replay and pending delivery recheck policy; restricted clients do not receive aggregate cross-project connection history. Omitted policies keep existing behavior; an explicit empty list denies every project.
 
 - Bearer tokens can rotate in place with an explicit overlap window (0 to 30 days), preserving bot identity and access. `clients tokens`, `clients rotate` and `clients revoke-token` expose safe token IDs, creation/expiry, last tool use and recent call counts, with immediate per-token or whole-client revocation. Migration 20 adds hash-linked token metadata and bounded hourly usage buckets, backfilling existing bearer tokens without changing their values or grants.
 

@@ -1,3 +1,4 @@
+import type { JobService } from '../jobs/service.ts';
 import * as z from 'zod';
 import type { GatewayConfig, HostConfig } from '../config.ts';
 import { describeError, GatewayError } from '../errors.ts';
@@ -129,6 +130,7 @@ interface Page<T> {
 export interface CatalogToolDeps {
   config: GatewayConfig;
   catalog: CatalogService;
+  jobs: JobService;
 }
 
 /**
@@ -350,7 +352,11 @@ export function catalogTools(deps: CatalogToolDeps) {
         targetHosts(deps, context, input).map(async (host) => {
           if (!host.discovery.enabled) return { ...disabled(host), projects: [] as ProjectView[] };
           try {
-            const page = await readPage(deps, host, 'projects', input, (refresh) => deps.catalog.projects(host.id, { refresh }), (value) => value);
+            const page = await readPage(deps, host, 'projects', input, (refresh) => deps.catalog.projects(host.id, { refresh }), (value) => {
+              const mappings = mapProjects(deps.config, host.id, value);
+              return value.filter((p) => deps.jobs.allowsProject(context, host.id, null, p.id) ||
+                mappings.get(p.id)!.aliases.some((a) => deps.jobs.allowsProject(context, host.id, a.alias, p.id)));
+            });
             const all = (page.snapshot as Snapshot<CatalogProject[]>).value;
             return {
               host: host.id,
