@@ -18,12 +18,12 @@ It is for people who already run T3 Code on one or more always-on machines and w
 
 ## T3 Code alone or with the gateway?
 
-T3 Code already covers a lot of this on its own. As of [T3 v0.1.5](https://github.com/pingdotgg/t3code/releases/tag/v0.1.5):
+T3 Code already covers a lot of this on its own. As of [T3 v0.1.6](https://github.com/pingdotgg/t3code/releases/tag/v0.1.6):
 
-- **Remote access is built in.** T3 Connect, LAN pairing, Tailscale HTTPS and SSH let you reach your machines from other devices. [Remote access](https://github.com/pingdotgg/t3code/blob/v0.1.5/docs/user/remote-access.md)
-- **Outside agents get their own MCP endpoint.** Each machine serves HTTP MCP with OAuth sign-in. Claude Code, Codex, ChatGPT and other OAuth clients can launch, message, read, wait on and stop threads, and answer worker questions. Launches and sends take a retry key (`clientRequestId`). [Outside agents](https://github.com/pingdotgg/t3code/blob/v0.1.5/docs/user/outside-agents.md)
-- **Machines can work together.** *Linked environments*, a Labs beta you turn on for both machines, lets agents on one machine launch and steer work on another; most tools take an `environmentId`. [Link another environment](https://github.com/pingdotgg/t3code/blob/v0.1.5/docs/user/remote-access.md#link-another-environment)
-- **It tracks PRs and sends push alerts.** Workers link PRs to threads and can watch them. T3's mobile app gets an alert when an agent finishes, fails or needs you (this needs T3 Connect). [Linked pull requests](https://github.com/pingdotgg/t3code/blob/v0.1.5/docs/user/source-control.md#linked-pull-requests) · [Mobile notifications](https://github.com/pingdotgg/t3code/blob/v0.1.5/docs/user/mobile-notifications.md)
+- **Remote access is built in.** T3 Connect, LAN pairing, Tailscale HTTPS and SSH let you reach your machines from other devices. [Remote access](https://github.com/pingdotgg/t3code/blob/v0.1.6/docs/user/remote-access.md)
+- **Outside agents get their own MCP endpoint.** Each machine serves HTTP MCP with OAuth sign-in. Claude Code, Codex, ChatGPT and other OAuth clients can launch, message, read, wait on and stop threads, and answer worker questions. Launches and sends take a retry key (`clientRequestId`). [Outside agents](https://github.com/pingdotgg/t3code/blob/v0.1.6/docs/user/outside-agents.md)
+- **Machines can work together.** *Linked environments*, a Labs beta you turn on for both machines, lets agents on one machine launch and steer work on another; most tools take an `environmentId`. [Link another environment](https://github.com/pingdotgg/t3code/blob/v0.1.6/docs/user/remote-access.md#link-another-environment)
+- **It tracks PRs and sends push alerts.** Workers link PRs to threads and can watch them. T3's mobile app gets an alert when an agent finishes, fails or needs you (this needs T3 Connect). [Linked pull requests](https://github.com/pingdotgg/t3code/blob/v0.1.6/docs/user/source-control.md#linked-pull-requests) · [Mobile notifications](https://github.com/pingdotgg/t3code/blob/v0.1.6/docs/user/mobile-notifications.md)
 
 **You probably don't need the gateway if:**
 
@@ -36,7 +36,7 @@ The gateway does not replace T3's remote access either: it is for bots, not for 
 
 **Where the gateway helps** is a bot that works unattended for weeks, across several machines, and needs waking up when something happens:
 
-| | T3 Code alone (v0.1.5) | With the gateway |
+| | T3 Code alone (v0.1.6) | With the gateway |
 | --- | --- | --- |
 | Bot connection | An OAuth MCP endpoint on each machine | One OAuth MCP endpoint for every configured machine; bearer tokens for bots without OAuth, overlap rotation and per-token usage |
 | More machines | Linked environments (Labs beta): turn on for both, link with a pairing code | Add the host to the config and enroll it once |
@@ -51,7 +51,7 @@ The gateway does not replace T3's remote access either: it is for bots, not for 
 
 **Use both.** Work in T3 as usual while bots start, adopt and follow gateway jobs. Every job is an ordinary T3 thread you can open.
 
-*T3 facts checked on 2026-10-30 against the v0.1.5 docs and source, and against T3's main branch at `be5a887b939d`, which had no changes in these areas. Sign-in lifetime: [outside agents, "Remove an agent"](https://github.com/pingdotgg/t3code/blob/v0.1.5/docs/user/outside-agents.md#remove-an-agent); no refresh grant: [`McpOAuth.ts`](https://github.com/pingdotgg/t3code/blob/v0.1.5/apps/server/src/auth/McpOAuth.ts#L484-L485); link lifetime: [link another environment](https://github.com/pingdotgg/t3code/blob/v0.1.5/docs/user/remote-access.md#link-another-environment); access levels: [outside agents, "Approve a sign-in"](https://github.com/pingdotgg/t3code/blob/v0.1.5/docs/user/outside-agents.md#approve-a-sign-in); inbound webhooks: [webhook automations](https://github.com/pingdotgg/t3code/blob/v0.1.5/docs/user/project-settings.md#webhook-automations).*
+*T3 facts checked on 2026-10-31 against the v0.1.6 docs and tagged source (`2359643cffa6`). See the [gateway compatibility review](docs/evidence/t3-v0.1.6.md) for contract changes and verification limits. Sign-in lifetime: [outside agents, "Remove an agent"](https://github.com/pingdotgg/t3code/blob/v0.1.6/docs/user/outside-agents.md#remove-an-agent); no refresh grant: [`McpOAuth.ts`](https://github.com/pingdotgg/t3code/blob/v0.1.6/apps/server/src/auth/McpOAuth.ts#L490-L491); link lifetime: [link another environment](https://github.com/pingdotgg/t3code/blob/v0.1.6/docs/user/remote-access.md#link-another-environment); access levels: [outside agents, "Approve a sign-in"](https://github.com/pingdotgg/t3code/blob/v0.1.6/docs/user/outside-agents.md#approve-a-sign-in); inbound webhooks: [webhook automations](https://github.com/pingdotgg/t3code/blob/v0.1.6/docs/user/project-settings.md#webhook-automations).*
 
 ## What the gateway adds
 

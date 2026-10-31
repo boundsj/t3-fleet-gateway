@@ -69,6 +69,8 @@ const projectSchema = z.object({
   projectId: z.string().describe('The T3 project id: pass it as target.projectId with the host to work_start when launch.alias is null'),
   name: z.string().describe('The T3 project title; projects on different hosts may share a name, the host and id tell them apart'),
   hasDefaultModel: z.boolean().describe('Whether T3 launches here with a model of its own when none is passed'),
+  pinned: z.boolean().nullable().describe('Pinned in T3; null when an older host does not report project organization'),
+  archived: z.boolean().nullable().describe('Archived in T3; null when unknown. Organization metadata does not override operator launch policy'),
   launch: launchSchema,
   guidance: z.string().describe('How to start work here, or why you cannot'),
 });
@@ -252,6 +254,8 @@ function projectViews(deps: CatalogToolDeps, host: HostConfig, projects: readonl
       host: host.id,
       projectId: project.id,
       name: project.name,
+      pinned: project.pinned ?? null,
+      archived: project.archived ?? null,
       hasDefaultModel: project.hasDefaultModel,
       launch: {
         allowed: policy.allowWorkStart,
@@ -264,13 +268,13 @@ function projectViews(deps: CatalogToolDeps, host: HostConfig, projects: readonl
         branchPrefix: policy.branchPrefix,
         defaultModelSource: policy.defaultModelSource,
       },
-      guidance: guidance(project, host.id, policy, host.workspaceProbeCommand !== undefined),
+      guidance: (project.archived ? 'Archived in T3. Check with the operator before starting new work. ' : '') + guidance(project, host.id, policy, host.workspaceProbeCommand !== undefined),
     };
   });
 }
 
 function describeProject(project: ProjectView): string {
-  return `  ${project.projectId} ${JSON.stringify(project.name)}${project.hasDefaultModel ? '' : ' (no T3 default model)'}: ${project.guidance}`;
+  return `  ${project.projectId} ${JSON.stringify(project.name)}${project.pinned ? ' (pinned)' : ''}${project.archived ? ' (archived)' : ''}${project.hasDefaultModel ? '' : ' (no T3 default model)'}: ${project.guidance}`;
 }
 
 interface FlatModel {
