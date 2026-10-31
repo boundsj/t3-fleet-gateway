@@ -495,6 +495,14 @@ CREATE TABLE operator_token_calls (
   PRIMARY KEY (token_id, hour)
 ) STRICT;`,
   },
+  {
+    version: 21,
+    name: 'per-client project access',
+    sql: `CREATE TABLE client_project_access (
+  client_id TEXT PRIMARY KEY REFERENCES oauth_clients(id) ON DELETE CASCADE,
+  projects TEXT NOT NULL
+) STRICT;`,
+  },
 ];
 
 /**

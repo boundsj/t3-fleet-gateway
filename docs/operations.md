@@ -42,6 +42,21 @@ To change an agent's machines, approve it again from the agent (its earlier gran
 
 Codes work once. Five wrong codes lock that approval page (start again from the agent); twenty failures in an hour pause all approvals until the hour clears. Minting a new code with `pair` lifts that pause at once, and `pair` says so when it does.
 
+### Restricting a bot to projects
+
+After connecting the bot, use its id from `clients list`:
+
+```sh
+t3-fleet-gateway clients projects <client-id> --project pilot --project @main/project-1
+t3-fleet-gateway clients projects <client-id>                # inspect
+t3-fleet-gateway clients projects <client-id> --no-projects  # deny every project
+t3-fleet-gateway clients projects <client-id> --all-projects # remove project restrictions
+```
+
+Each change replaces the whole list and takes effect on the next request or notification attempt, without restarting or reissuing tokens. It covers all of that client's OAuth and bearer tokens, including overlapping rotations. Aliases refer to configured projects on their configured host; explicit `@host/projectId` entries come from `fleet_projects` and stay tied to that host/id. For a title-only alias, grant the alias to accept queued work before its id is resolved at dispatch. This ceiling only narrows machine grants; it cannot add machine or Operate access. With no policy the bot retains its existing access. The CLI and private operator dashboard remain unrestricted operator interfaces.
+
+Restricted bots see filtered discovery, jobs, threads, feeds and attention lists, and receive only allowed-project notifications. Notification history aggregates are withheld with `healthAvailable: false`; inspect full delivery health through the operator CLI/dashboard. A policy change prevents later denied deliveries, including retries and replay; it cannot recall a request already sent to a receiver.
+
 ### Agents that only take a bearer token
 
 Inspect token IDs and usage with `clients tokens <client id>`. Rotate using `clients rotate <client id> --token-id <id> --overlap 7d --ttl 1y`, and paste the replacement privately into the bot before the old token's deadline. Overlap must be explicit (0 to 30d); it never extends the old expiry. `clients revoke-token <client id> --token-id <id>` cuts off one token immediately. `clients revoke <client id>` cuts off all its tokens. Counts are authenticated tool calls in the current UTC hour and the last 24 UTC hour buckets, including refused tools; last use is unknown until the first recorded call.

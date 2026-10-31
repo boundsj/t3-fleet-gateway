@@ -262,6 +262,21 @@ describe('cli', () => {
     assert.match((await run(env, ['clients', 'list'])).out, /bearer token, none unrevoked/);
   });
 
+  test('clients projects inspects, replaces and removes a policy without changing bearer secrets', async (t) => {
+    const env = await environment(t, undefined, { projects: [{ alias: 'pilot', host: 'main', t3ProjectId: 'project-1' }] });
+    const minted = await run(env, ['clients', 'token', '--name', 'Project bot']);
+    const clientId = /^Created client (\S+)/.exec(minted.out)![1]!;
+    assert.deepEqual(JSON.parse((await run(env, ['clients', 'projects', clientId])).out), { projects: null });
+    const selected = await run(env, ['clients', 'projects', clientId, '--project', 'pilot', '--project', '@main/project-2']);
+    assert.equal(selected.code, 0, selected.err);
+    assert.deepEqual(JSON.parse(selected.out).projects, [{ host: 'main', alias: 'pilot', projectId: 'project-1' }, { host: 'main', projectId: 'project-2' }]);
+    assert.equal((await run(env, ['clients', 'projects', clientId, '--project', 'unknown'])).code, 1);
+    assert.equal((await run(env, ['clients', 'projects', clientId, '--project', 'pilot', '--all-projects'])).code, 2);
+    assert.deepEqual(JSON.parse((await run(env, ['clients', 'projects', clientId, '--no-projects'])).out), { projects: [] });
+    assert.deepEqual(JSON.parse((await run(env, ['clients', 'projects', clientId, '--all-projects'])).out), { projects: null });
+    assert.equal(JSON.parse((await run(env, ['clients', 'tokens', clientId])).out).length, 1, 'same token remains');
+  });
+
   test('clients token mints a bearer token that works at /mcp until it is revoked', async (t) => {
     const env = await environment(t);
     for (const [args, message] of [
