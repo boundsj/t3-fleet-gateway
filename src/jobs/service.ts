@@ -11,7 +11,7 @@ import { THREAD_READ_SCOPE, THREAD_CONTROL_SCOPE, permits, permittedHosts, type 
 import { T3TransportError, type T3Client } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
 import type { ThreadItem, ThreadRead } from '../t3/schemas.ts';
-import { cleanThreadTitle } from '../hosts/threads.ts';
+import { cleanThreadTitle, ThreadCatalog } from '../hosts/threads.ts';
 import { HOUR, SECOND, type Clock } from '../time.ts';
 import { attachmentHashes, validateAttachments, type AttachmentInput } from './attachments.ts';
 import { scanActivity } from './activity.ts';
@@ -263,6 +263,7 @@ export class JobService {
   readonly #config: GatewayConfig;
   readonly #registry: HostRegistry;
   readonly #catalog: CatalogService;
+  readonly #threadCatalog: ThreadCatalog;
   readonly #clock: Clock;
   readonly #logger: Logger;
   /** Set by the running gateway so new work is dispatched without waiting for the next poll. */
@@ -273,6 +274,7 @@ export class JobService {
     this.#config = options.config;
     this.#registry = options.registry;
     this.#catalog = options.catalog;
+    this.#threadCatalog = new ThreadCatalog(options.registry, options.clock, options.logger);
     this.#clock = options.clock;
     this.#logger = options.logger;
   }
@@ -375,6 +377,16 @@ export class JobService {
     this.store.auditThread(job, caller.clientId, action);
   }
 
+  /** v0.1.6 omits lineage.sideChat from MCP reads; its project list excludes side chats. */
+  async #requireExternalEligibility(host: string, thread: ThreadRead['thread']): Promise<void> {
+    requireExternalEligibility(thread);
+    if (thread.relationshipToParent !== 'fork') return;
+    const listed = await this.#threadCatalog.read(host, thread.projectId, true);
+    if (!listed.value.some((candidate) => candidate.threadId === thread.threadId)) {
+      throw new GatewayError('job_state_conflict', 'This fork is not a listed T3 conversation. Side chats cannot be adopted or resumed; use the parent thread in T3.');
+    }
+  }
+
   /** Imported threads can be reconfigured in T3. Resuming must not bypass the current project or host ceiling. */
   async #validateAdoptedResume(job: Job): Promise<void> {
     if (job.origin !== 'adopted' || job.threadId === null) return;
@@ -384,7 +396,7 @@ export class JobService {
     const { thread } = await this.#registry.client(job.hostId).readThread({
       threadId: job.threadId, view: 'messages', limit: 1, runLimit: 1, maxCharsPerItem: 1,
     });
-    requireExternalEligibility(thread);
+    await this.#requireExternalEligibility(job.hostId, thread);
     if (thread.threadId !== job.threadId || thread.projectId !== job.t3ProjectId) {
       throw new GatewayError('job_state_conflict', 'The imported thread changed project or is no longer a resumable thread. Check it in T3.');
     }
@@ -862,7 +874,7 @@ export class JobService {
     if (adoption && (thread.threadId !== input.threadId || thread.projectId !== projectId)) {
       throw new GatewayError('not_found', 'No thread in that project.');
     }
-    if (adoption) requireExternalEligibility(thread);
+    if (adoption) await this.#requireExternalEligibility(project.host, thread);
     if (thread.projectId !== projectId) {
       throw new GatewayError(
         'invalid_argument',

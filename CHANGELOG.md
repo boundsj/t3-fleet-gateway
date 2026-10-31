@@ -18,6 +18,8 @@
 
 - Bearer tokens can rotate in place with an explicit overlap window (0 to 30 days), preserving bot identity and access. `clients tokens`, `clients rotate` and `clients revoke-token` expose safe token IDs, creation/expiry, last tool use and recent call counts, with immediate per-token or whole-client revocation. Migration 20 adds hash-linked token metadata and bounded hourly usage buckets, backfilling existing bearer tokens without changing their values or grants.
 
+- T3 v0.1.6 project organization in `fleet_projects`: pinned and archived flags (null on older hosts), with archived-project guidance. Fork adoption/resume now requires a fresh listed conversation, excluding hidden side chats even when their ids are supplied directly. Existing jobs remain watched by their recorded thread id. See the [source compatibility review](docs/evidence/t3-v0.1.6.md); no live v0.1.6 qualification is claimed.
+
 - Deduped downstream credential renewal-failure and configurable expiry alerts (default seven and two days), evaluated only after renewal fails so healthy cycles stay silent, with resolution after verified renewal, intersecting webhook/bot filters and shared delivery health. Current state is shown in the private dashboard and doctor.
 - Confirmed private-dashboard re-pair through the existing configured pairing flow, verifying before atomically installing the replacement and resolving alerts. Failure keeps the old credential; confirmation retries reuse the result. Local enrollment/preflight diagnostics retain bounded stage, HTTP status, recognized error/denial code and command failure reason; raw upstream text, unknown codes and pairing material remain excluded, and notifications contain no diagnostic text.
 
