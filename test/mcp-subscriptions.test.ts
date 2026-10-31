@@ -6,8 +6,11 @@ import { INITIALIZE, mcpPost, startTestGateway } from './helpers/gateway.ts';
 import { signIn } from './helpers/oauthFlow.ts';
 
 const MODERN = '2026-07-28';
+// The longest a released subscription may take to drop its listener. A release resolves the wait at once; the bound only
+// turns a listener that is never released into an assertion failure instead of the test timeout.
+const RELEASE_BOUND_MS = 5_000;
 
-/** Counts the SDK's live event-bus listeners (each open subscription holds one) and lets a test wait for a count. */
+/** Counts the SDK's live event-bus listeners (each open subscription holds one) and lets a test wait, bounded, for a count. */
 function trackListeners(t: import('node:test').TestContext) {
   const subscribe = InMemoryServerEventBus.prototype.subscribe;
   let active = 0;
@@ -43,7 +46,24 @@ function trackListeners(t: import('node:test').TestContext) {
     get bus() {
       return bus;
     },
-    until: (count: number) => (active === count ? Promise.resolve() : new Promise<void>((resolve) => waiters.push({ count, resolve }))),
+    /** Resolves as soon as the count is `count`, or after `boundMs` with whatever it is then; callers assert the result. */
+    until: (count: number, boundMs: number) =>
+      active === count
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            const waiter = {
+              count,
+              resolve: () => {
+                clearTimeout(timer);
+                resolve();
+              },
+            };
+            const timer = setTimeout(() => {
+              waiters.splice(waiters.indexOf(waiter), 1);
+              resolve();
+            }, boundMs);
+            waiters.push(waiter);
+          }),
   };
 }
 
@@ -101,10 +121,11 @@ describe('MCP subscriptions and client disconnects', () => {
       assert.match(first, /"toolsListChanged":true/);
       assert.equal(listeners.active, 1, 'an open subscription holds one listener');
       request.destroy();
-      await listeners.until(0);
+      await listeners.until(0, RELEASE_BOUND_MS);
+      assert.equal(listeners.active, 0, `round ${round}: the disconnected subscription released its listener`);
       // A change published after the disconnect reaches no one.
       listeners.bus?.publish({ kind: 'tools_list_changed' });
-      assert.equal(listeners.active, 0, `round ${round}: back to the baseline`);
+      assert.equal(listeners.active, 0, `round ${round}: still at the baseline after a later change`);
     }
 
     // The endpoint still serves ordinary requests.
