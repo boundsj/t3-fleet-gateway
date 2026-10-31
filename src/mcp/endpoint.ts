@@ -8,7 +8,7 @@ import {
 } from '@modelcontextprotocol/server';
 import { readBody, sendJson } from '../http/io.ts';
 import type { Route } from '../http/server.ts';
-import { sendWebResponse, toWebRequest } from '../http/web.ts';
+import { exchangeSignal, sendWebResponse, toWebRequest } from '../http/web.ts';
 import type { Logger } from '../log.ts';
 import type { ClientStore } from '../oauth/clients.ts';
 import { resourceMetadataUrl } from '../oauth/metadata.ts';
@@ -121,8 +121,10 @@ export function createMcpEndpoint(deps: McpEndpointDependencies): { route: Route
       expiresAt: Math.floor(verified.expiresAt / 1000),
       resource: new URL(verified.resource),
     };
+    // Tied to this exchange only: a client that goes away ends its own subscription, never work it already started.
+    const signal = exchangeSignal(req, res);
     const body = req.method === 'POST' ? await readBody(req, MCP_BODY_LIMIT) : undefined;
-    const request = toWebRequest(req, body, publicUrl);
+    const request = toWebRequest(req, body, publicUrl, signal);
     if (req.method === 'POST') request.headers.set('accept', POST_ACCEPT);
     if (await isLegacyRequest(request, undefined, { maxRequestBodySize: MCP_BODY_LIMIT })) {
       if (req.method !== 'POST') {
