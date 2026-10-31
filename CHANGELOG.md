@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 (2026-10-31)
+
 ### Upgrading
 
 - **Migration 21, additive.** Adds optional client project policies; every existing client remains unrestricted. Existing grants, tokens, jobs and notification queues are unchanged. Back up with ledger users stopped. Older builds refuse schema 21; rollback restores the pre-upgrade backup and loses subsequent writes.
