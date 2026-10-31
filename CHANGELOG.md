@@ -23,6 +23,7 @@
 ### Fixed
 
 - A queued job is no longer launched with a runtime mode broader than its project's current policy. Before every launch, alias jobs with or without a launch spec and discovered jobs now check the recorded runtime mode against the host access ceiling and the alias's or host's discovery `runtimeMode` as configured at dispatch; a job that exceeds either fails with `launch_policy_changed` and nothing is launched.
+- CLI output escapes terminal control characters in stored values. `jobs list`, `clients list` tables, the job line `jobs adopt` prints and `clients scopes` show C0/C1 controls, DEL, Unicode line separators and bidirectional overrides as visible escapes (`\x1b`, `\u202e`), measured before columns are aligned, so a job title or client name can no longer clear or rewrite the operator's terminal. Stored values are unchanged.
 - Preserve environment-scoped T3 v2 thread links from autolink and bare responses through launch, reconciliation, adoption, job views, webhooks and the dashboard. Legacy v1 links still work; unusable supplied links now fall back to a canonical v1 link instead of losing the Open link. Both v2 segments are bounded and validated before use.
 - Malformed HTTP request targets now return `400` with `invalid_request` instead of causing an uncaught URL parsing error and an unauthenticated restart loop. The request log records only `(invalid)` and status 400, without the raw target. Valid request routing is unchanged.
 

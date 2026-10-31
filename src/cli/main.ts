@@ -18,7 +18,7 @@ import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
 import { pingStoredWebhook, pingWebhook } from '../webhooks/sender.ts';
 import { WebhookStore } from '../webhooks/store.ts';
 import { runDoctor } from './doctor.ts';
-import { relative, shortTime, table } from './format.ts';
+import { escapeControls, relative, shortTime, table } from './format.ts';
 
 export interface CliIo {
   env: NodeJS.ProcessEnv;
@@ -202,7 +202,7 @@ function clients(paths: Paths, io: CliIo, action: string | undefined, id: string
       if (!id) throw new UsageError('clients scopes needs a client id (see clients list).');
       const client = store.list().find((candidate) => candidate.id === id);
       if (!client) throw new GatewayError('not_found', 'No client with that id.');
-      io.out(`Client: ${client.id}\nName: ${client.name}\nScopes: ${client.scopes.join(' ') || '(none)'}\nThread scopes: ${clientThreadScopes(storage.db, id).join(' ') || '(none)'}`);
+      io.out(`Client: ${client.id}\nName: ${escapeControls(client.name)}\nScopes: ${client.scopes.join(' ') || '(none)'}\nThread scopes: ${clientThreadScopes(storage.db, id).join(' ') || '(none)'}`);
       return 0;
     }
     if (action === 'list') {
@@ -340,7 +340,7 @@ async function hosts(paths: Paths, io: CliIo, action: string | undefined, id: st
 }
 
 function describeJobLine(job: Job): string {
-  return `${job.id}  ${job.projectAlias}  ${job.state}${job.standing ? '  standing' : ''}  ${job.title}${job.threadLink ? `  ${job.threadLink}` : ''}`;
+  return `${job.id}  ${job.projectAlias}  ${job.state}${job.standing ? '  standing' : ''}  ${escapeControls(job.title)}${job.threadLink ? `  ${escapeControls(job.threadLink)}` : ''}`;
 }
 
 const MAX_LISTED_JOBS = 1000;
