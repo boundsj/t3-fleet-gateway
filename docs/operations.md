@@ -44,6 +44,8 @@ Codes work once. Five wrong codes lock that approval page (start again from the 
 
 ### Agents that only take a bearer token
 
+Inspect token IDs and usage with `clients tokens <client id>`. Rotate using `clients rotate <client id> --token-id <id> --overlap 7d --ttl 1y`, and paste the replacement privately into the bot before the old token's deadline. Overlap must be explicit (0 to 30d); it never extends the old expiry. `clients revoke-token <client id> --token-id <id>` cuts off one token immediately. `clients revoke <client id>` cuts off all its tokens. Counts are authenticated tool calls in the current UTC hour and the last 24 UTC hour buckets, including refused tools; last use is unknown until the first recorded call.
+
 Some agents cannot sign in with OAuth and only offer a bearer token or API key field (Notion's custom MCP connections, for example). Mint a token for one such agent:
 
 ```sh

@@ -38,7 +38,7 @@ The gateway does not replace T3's remote access either: it is for bots, not for 
 
 | | T3 Code alone (v0.1.5) | With the gateway |
 | --- | --- | --- |
-| Bot connection | An OAuth MCP endpoint on each machine | One OAuth MCP endpoint for every configured machine; bearer tokens for bots without OAuth |
+| Bot connection | An OAuth MCP endpoint on each machine | One OAuth MCP endpoint for every configured machine; bearer tokens for bots without OAuth, overlap rotation and per-token usage |
 | More machines | Linked environments (Labs beta): turn on for both, link with a pairing code | Add the host to the config and enroll it once |
 | Access per bot | Read only, or a runtime-mode ceiling that applies in every project | Read or Operate per machine; model, runtime mode and "may start work" per project |
 | Staying connected | Agent sign-ins and environment links last 30 days, then you approve or link again; no refresh | Bot sign-ins refresh (an unused refresh token expires after 90 days by default); the gateway renews its own T3 credentials and alerts you if renewal fails |
@@ -69,7 +69,7 @@ For a long-running thread you want every bot to use, such as a coordinator, regi
 
 Bots connect to one HTTPS endpoint, `https://<your gateway>/mcp`. The gateway connects to each T3 host for them, so adding a machine is a config entry and one `hosts enroll` command, not a new connection in every bot.
 
-You approve each bot once with a one-time code on the gateway's approval page. Choose **Read** (follow work) or **Operate** (also start and steer it), on **All machines** or only **Selected machines**. Bots that take only a bearer token get one from `clients token`. Bots never see T3's credentials. [Per-host grants](docs/design.md#per-host-grants).
+You approve each bot once with a one-time code on the gateway's approval page. Choose **Read** (follow work) or **Operate** (also start and steer it), on **All machines** or only **Selected machines**. Bots that take only a bearer token get one from `clients token`. Use `clients tokens <client id>` to inspect safe token IDs, creation, expiry, last use and recent tool call counts. Rotate with `clients rotate <client id> --token-id <id> --overlap 7d`, then update the bot privately before the old token expires. `clients revoke-token <client id> --token-id <id>` revokes one token immediately; `clients revoke <client id>` revokes them all. Bots never see T3's credentials. [Per-host grants](docs/design.md#per-host-grants).
 
 ### Jobs that survive lost connections
 

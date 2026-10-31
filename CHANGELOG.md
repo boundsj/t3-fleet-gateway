@@ -4,11 +4,15 @@
 
 ### Upgrading
 
+- **Migration 20, additive.** Adds safe bearer-token IDs and usage buckets, backfilling existing tokens without changing their values or grants. Stop all ledger users and back up before upgrading. Older builds refuse schema 20; rollback restores the pre-upgrade backup and loses later writes.
+
 - **Migration 19, additive.** Adds persistent credential alerts and a separate outbox sharing webhook delivery health and retries; existing rows remain unchanged. Back up with all ledger users stopped. Older builds refuse schema 19; safe rollback restores the pre-upgrade backup and configuration, losing later writes. Existing connections keep their event selections; explicitly enable `credential_alert` and `credential_resolved` to receive them.
 
 - **Migration 18, forward only.** Adds notification archive, job bindings and persistent delivery health without rewriting existing connection routes, revisions, queues or attempts. Archive/health begin at upgrade; no historical snapshots are invented. Stop all ledger users and back up before opening the new build. Older builds refuse the new schema; rollback requires restoring the pre-upgrade backup and loses subsequent writes. No key rotation or receiver re-registration is needed.
 
 ### Added
+
+- Bearer tokens can rotate in place with an explicit overlap window (0 to 30 days), preserving bot identity and access. `clients tokens`, `clients rotate` and `clients revoke-token` expose safe token IDs, creation/expiry, last tool use and recent call counts, with immediate per-token or whole-client revocation. Migration 20 adds hash-linked token metadata and bounded hourly usage buckets, backfilling existing bearer tokens without changing their values or grants.
 
 - Deduped downstream credential renewal-failure and configurable expiry alerts (default seven and two days), evaluated only after renewal fails so healthy cycles stay silent, with resolution after verified renewal, intersecting webhook/bot filters and shared delivery health. Current state is shown in the private dashboard and doctor.
 - Confirmed private-dashboard re-pair through the existing configured pairing flow, verifying before atomically installing the replacement and resolving alerts. Failure keeps the old credential; confirmation retries reuse the result. Local enrollment/preflight diagnostics retain bounded stage, HTTP status, recognized error/denial code and command failure reason; raw upstream text, unknown codes and pairing material remain excluded, and notifications contain no diagnostic text.
