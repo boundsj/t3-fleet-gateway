@@ -73,6 +73,22 @@ You approve each bot once with a one-time code on the gateway's approval page. C
 
 Limit a bot to approved projects with `clients projects <client id> --project <alias> --project @<host>/<projectId>`. Repeat `--project` for each approved project; this replaces the whole list. It applies to every token of that client, including rotated tokens, and takes effect on the next request without a restart. Discovery, job feeds, attention lists, thread access and bot notifications stay inside the list and the bot's machine grants. No list keeps today's access; `--no-projects` denies all projects and `--all-projects` removes the restriction. [Project access](docs/design.md#per-client-project-access).
 
+### How bots reach the gateway
+
+Your bot lives in the cloud; your gateway lives on your machine and listens only on loopback. The bridge between them is a **public HTTPS tunnel**, such as Tailscale Funnel or Cloudflare Tunnel. That's the hosted bot's only way in: it cannot use your machine's loopback address or private network directly.
+
+```mermaid
+flowchart LR
+  Bot[Hosted bot] --> Tunnel[Public HTTPS tunnel]
+  Tunnel --> Gateway[Gateway on loopback]
+  Gateway -->|Private network| Hosts[T3 hosts]
+  Operator[You] -->|Private route only| Dashboard[Dashboard on separate loopback listener]
+```
+
+The gateway talks to your T3 hosts over your private network. The dashboard gets its own private route and **never goes on the public tunnel**. Bots get the front door; you keep the control room.
+
+If the tunnel goes down, bots lose access even while the gateway itself is healthy. `doctor` and the dashboard's **Run checks** test the public URL from the gateway machine; a pass there still needs a connection check from your bot. See [troubleshooting](docs/troubleshooting.md#bot-cant-connect-fetch-failed-or-timeouts) if the bridge is out.
+
 ### Jobs that survive lost connections
 
 Bots work over flaky networks and retry. The gateway makes that safe:
@@ -126,7 +142,7 @@ One page for the operator: which hosts answer, which bots connected and when, jo
 
 - An always-on machine with **Node.js 24.22.1 or a later 24.x, or 26.12.1 or newer**. Older releases lack the required [TLS protection](docs/security.md#compromised-emudhra-intermediates).
 - T3 Code running on each machine you want to use, and a `t3` CLI that can create pairing codes for it.
-- A public HTTPS address for the gateway, forwarded to its loopback port, such as Tailscale Funnel or Cloudflare Tunnel. A hosted bot needs to reach it.
+- A public HTTPS tunnel, such as Tailscale Funnel or Cloudflare Tunnel: [how bots reach the gateway](#how-bots-reach-the-gateway).
 - For the dashboard, a separate private route such as Tailscale Serve. Never put the dashboard on the public tunnel.
 
 The gateway runs from a Git checkout; it is not published to npm. There is no build step.
@@ -326,6 +342,7 @@ The text is added to the first message of each new job, including scratch and di
 | I want to… | Read this |
 | --- | --- |
 | Install by hand, run as a service or connect a client | [Setup](docs/setup.md) |
+| Fix a connection, sign-in, host, job or notification problem | [Troubleshooting](docs/troubleshooting.md) |
 | Look up every configuration field | [Configuration](docs/configuration.md) |
 | Diagnose connections, recover access, update or back up | [Operations](docs/operations.md) |
 | Understand credentials, access and trust boundaries | [Security](docs/security.md) |

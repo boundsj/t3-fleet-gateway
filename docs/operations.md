@@ -2,6 +2,8 @@
 
 Run `t3-fleet-gateway` commands below as `node bin/t3-fleet-gateway.js` from a checkout. Every command accepts `--config`, `--data-dir`, `$T3FG_CONFIG` and `$T3FG_DATA_DIR` (see [configuration.md](configuration.md)). Exit codes are `0` for success, `1` for failure and `2` for usage errors. The CLI shares the running server's database, so CLI changes take effect without a restart.
 
+For a problem you are seeing now, start with [troubleshooting by symptom](troubleshooting.md).
+
 ## Enroll a host
 
 ```sh

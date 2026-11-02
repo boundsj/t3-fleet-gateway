@@ -2,6 +2,8 @@
 
 Follow these steps yourself or give them to a coding agent on the gateway machine. They expand the [README's prompt-based setup](../README.md#set-up-with-prompts). See [configuration](configuration.md) for fields and [operations](operations.md) for maintenance and recovery.
 
+Having trouble along the way? Use the [symptom-based troubleshooting guide](troubleshooting.md).
+
 ## Before you start
 
 - Node.js 24.22.1 or a later 24.x, or 26.12.1 or newer.
