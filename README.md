@@ -79,10 +79,14 @@ Your bot lives in the cloud; your gateway lives on your machine and listens only
 
 ```mermaid
 flowchart LR
-  Bot[Hosted bot] --> Tunnel[Public HTTPS tunnel]
-  Tunnel --> Gateway[Gateway on loopback]
-  Gateway -->|Private network| Hosts[T3 hosts]
-  Operator[You] -->|Private route only| Dashboard[Dashboard on separate loopback listener]
+  Bot["🤖 Hosted bot"] --> Tunnel["🌐 Public HTTPS tunnel"]
+  subgraph Machine["🖥️ Your machine"]
+    Gateway["🚪 Gateway (loopback)"]
+    Dashboard["🎛️ Dashboard (separate loopback listener)"]
+  end
+  Tunnel --> Gateway
+  Gateway -->|Private network| Hosts["🛠️ T3 hosts"]
+  Operator["🧑‍💻 You"] -->|Private route only| Dashboard
 ```
 
 The gateway talks to your T3 hosts over your private network. The dashboard gets its own private route and **never goes on the public tunnel**. Bots get the front door; you keep the control room.
