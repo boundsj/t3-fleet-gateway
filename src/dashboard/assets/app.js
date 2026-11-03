@@ -225,7 +225,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     h('div', { class: 'topbar__inner' },
       h('a', { class: 'brand', href: '#/overview' },
         h('img', { class: 'brand__mark', src: 'assets/mark.svg', alt: '', width: '32', height: '32' }),
-        h('span', { class: 'brand__name' }, 'Fleet gateway', h('span', null, ' · operator'))),
+        h('span', { class: 'brand__name' }, 'Fleet gateway')),
       snap ? h('span', { class: 'chip chip--version' }, `v${snap.gateway.version}`) : null,
       snap?.demoLabel ? h('span', { class: 'chip chip--demo', title: 'Synthetic data from the demo harness' }, snap.demoLabel) : null,
       h('span', { class: 'topbar__spacer' }),

@@ -111,7 +111,6 @@ code, .mono { font-family: var(--mono); font-size: .86em; }
 .brand { display: flex; align-items: center; gap: 11px; text-decoration: none; min-width: 0; }
 .brand__mark { width: 32px; height: 32px; border-radius: 9px; box-shadow: 0 1px 2px rgb(120 50 10 / 25%); flex: none; }
 .brand__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 650; letter-spacing: -.015em; font-size: 16px; white-space: nowrap; }
-.brand__name span { color: var(--sub); font-weight: 500; }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--sub); font-size: 12px; white-space: nowrap; }
 .chip--demo { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); color: var(--accent); background: var(--accent-soft); font-weight: 600; letter-spacing: .02em; }
 .topbar__spacer { flex: 1; }
@@ -439,7 +438,7 @@ details.disclosure > summary .sub { font-weight: 400; margin-left: auto; }
   :root { --tabbar-h: 64px; }
   body { font-size: 15px; }
   .topbar__inner { padding: 10px 16px; gap: 10px; }
-  .brand__name span, .topbar .chip--version { display: none; }
+  .topbar .chip--version { display: none; }
   .brand { flex: 1 1 auto; }
   .topbar__spacer { display: none; }
   .nav { display: none; }
