@@ -263,9 +263,6 @@ describe('dashboard webhook connections: running browser handlers', () => {
     assert.match(page.win.copied[0]!, /clickable links to its Webhook URL, Webhook key and Authorization header panels/);
     assert.match(page.win.copied[0]!, /do not print the key or header value/);
     page.assertNoSecrets();
-    page.win.location.hash = '#/overview';
-    await page.win.dispatch('hashchange');
-    assert.ok(page.root.elements('a').some((node) => node.textContent === 'Connect Grok Bot' && node.getAttribute('href') === '#/webhooks/connect'));
   });
 
   test('connect submits JSON once, clears detached inputs before awaiting, then reports accepted rather than bot completion', async () => {

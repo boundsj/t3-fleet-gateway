@@ -405,25 +405,10 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
 
   function overviewView() {
     const issues = snap.attention.filter((item) => item.tone === 'bad' || item.tone === 'warn');
-    const unchecked = snap.hosts.filter((host) => host.reachability.state === 'unchecked').length;
-    let headline;
-    let lede;
-    if (issues.length === 1) {
-      headline = issues[0].title;
-      lede = issues[0].detail;
-    } else if (issues.length > 1) {
-      headline = `${issues.length} things need your attention`;
-      lede = 'They are listed below, most serious first. Approvals and job control happen in T3; host and client fixes on the gateway machine.';
-    } else if (unchecked > 0) {
-      headline = 'Nothing is waiting on you';
-      lede = `${plural(unchecked, 'host')} ${unchecked === 1 ? 'has' : 'have'} not been checked since the gateway started. Run checks to ask ${unchecked === 1 ? 'it' : 'them'} now.`;
-    } else {
-      headline = 'All clear';
-      lede = 'Every host answered its last observed call, and no job is waiting on you.';
-    }
+    // The tab bar already names the page and the tiles and attention list carry the status, so the heading is for
+    // screen readers and route-change focus only. Run checks lives on Checks, connecting a bot on Webhooks.
     return [
-      pageHead('Overview', headline, lede, checksButton(),
-        h('a', { class: 'btn btn--accent', href: '#/webhooks/connect' }, icon('link', 'btn__icon'), 'Connect Grok Bot')),
+      h('h1', { class: 'sr-only', tabindex: '-1', id: 'page-title' }, 'Overview'),
       vitals(),
       topology(),
       h('div', { class: 'grid-2' },
