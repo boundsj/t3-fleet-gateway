@@ -273,11 +273,11 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     const connection = (row) => {
       const managed = row.source === 'dashboard';
       const confirming = model.disconnectId === row.id;
-      const projects = [...row.projects, ...(row.targets ?? []).map((t) => t.projectId)].join(', ');
+      const projects = row.displayName;
       const credentialAlerts = (row.events ?? []).includes('credential_alert') && (row.events ?? []).includes('credential_resolved');
       const hosts = [...row.hosts, ...(row.targets ?? []).map((t) => t.host)].join(', ');
-      return h('article', { class: 'panel webhook-connection', 'aria-label': `Connection for ${projects || 'all projects'} on ${hosts || 'all hosts'}` },
-        h('div', { class: 'panel__head' }, h('h3', { class: 'panel__title' }, projects || 'All projects'),
+      return h('article', { class: 'panel webhook-connection', 'aria-label': `Connection for ${projects} on ${hosts || 'all hosts'}` },
+        h('div', { class: 'panel__head' }, h('h3', { class: 'panel__title' }, projects),
           pill(row.enabled === false ? 'unknown' : 'good', row.enabled === false ? 'Disabled' : 'Connected')),
         h('div', { class: 'panel__body' },
           kv([

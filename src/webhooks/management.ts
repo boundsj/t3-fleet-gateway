@@ -8,7 +8,7 @@ import type { Logger } from '../log.ts';
 import type { Clock } from '../time.ts';
 import { authHeaderAllowed, destinationAllowed, preciseFilters, type WebhookRoute } from './config.ts';
 import { ATTEMPT_TIMEOUT_MS, postWebhook } from './sender.ts';
-import { WebhookConnectionError, type AttemptResult, type WebhookStore } from './store.ts';
+import { WebhookConnectionError, type AttemptResult, type WebhookConnection, type WebhookStore } from './store.ts';
 
 const MAX_OPERATIONS = 128;
 const MAX_IN_FLIGHT = 4;
@@ -85,7 +85,7 @@ export class WebhookManagement {
     return {
       session: this.#session,
       projects: this.#config.projects.map(({ alias, host }) => ({ alias, host })),
-      connections: this.#store.listConnections().map((row) => ({ ...row, health: this.#store.health(row.id)[0]!.health })),
+      connections: this.#store.listConnections().map((row) => ({ ...row, displayName: this.#displayName(row), health: this.#store.health(row.id)[0]!.health })),
     };
   }
 
@@ -106,7 +106,20 @@ export class WebhookManagement {
         projects.push({ alias: JSON.stringify([host.host, project.id]), host: host.host, projectId: project.id, name: project.name });
       }
     }
-    return { ...base, projects, hosts: hosts.map(({ host, status }) => ({ host, status })) };
+    const names = hosts.flatMap((host) => (host.projects ?? []).map((project) => ({
+      host: host.host, projectId: project.id, name: project.name,
+    })));
+    return { ...base, projects, hosts: hosts.map(({ host, status }) => ({ host, status })),
+      connections: base.connections.map((row) => ({ ...row, displayName: this.#displayName(row, names) })) };
+  }
+
+  /** Read-time labels only: never persist names or change the connection's delivery filters. */
+  #displayName(row: WebhookConnection, names: { host: string; projectId: string; name: string }[] = []): string {
+    const targets = row.targets.map((target) =>
+      this.#config.projects.find((project) => project.host === target.host && project.t3ProjectId === target.projectId)?.alias
+      ?? names.find((project) => project.host === target.host && project.projectId === target.projectId)?.name
+      ?? target.projectId);
+    return [...row.projects, ...targets].join(', ') || 'All projects';
   }
 
   execute(action: WebhookAction, input: unknown): Promise<ManagementResult> {

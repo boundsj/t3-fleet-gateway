@@ -69,7 +69,7 @@ function access(gw: TestGateway) {
     async list() {
       const result = await raw(port, '/fleet/api/webhooks', 'GET', API);
       assert.equal(result.status, 200, result.text);
-      return JSON.parse(result.text) as { session: string; projects: { alias: string; host: string }[]; connections: WebhookConnection[] };
+      return JSON.parse(result.text) as { session: string; projects: { alias: string; host: string }[]; connections: (WebhookConnection & { displayName: string })[] };
     },
     async post(action: string, body: Record<string, unknown>) {
       const result = await raw(port, `/fleet/api/webhooks/${action}`, 'POST', headers, JSON.stringify(body));
@@ -452,4 +452,47 @@ test('event-filter replacement tests before commit and preserves precise filters
   assert.deepEqual(after.clients, before.clients);
   assert.deepEqual(after.targets, before.targets);
   assert.notEqual(after.revision, before.revision);
+});
+
+
+test('connection display names resolve on the gateway at read time by host and project ID', async (t) => {
+  const { startFakeT3 } = await import('./helpers/fakeT3.ts');
+  const host = await startFakeT3(); t.after(() => host.close());
+  const gw = await startTestGateway(t, {
+    config: { ...CONFIG, hosts: [{ id: 'main', t3Url: host.url, mintPairingCode: host.mintCommand(), discovery: { enabled: true } }] },
+    jobEngine: { autoStart: false }, webhookSender: { autoStart: false },
+  });
+  await gw.services.registry.enroll('main');
+  const route = { url: 'https://receiver.example.test/hook', header: 'authorization', value: 'synthetic-key' };
+  const ping = { eventId: randomUUID(), at: gw.clock(), result: { outcome: 'delivered' as const, statusCode: 202 } };
+  const store = gw.services.webhooks;
+  store.connectDashboard('paired', '', 'main', route, ping, 'project-1');
+  store.connectDashboard('named', '', 'main', route, ping, 'project-2');
+  store.connectDashboard('unknown', '', 'main', route, ping, 'missing-project');
+  store.connectDashboard('other-host', '', 'other', route, ping, 'project-1');
+  store.connectDashboard('legacy', 'pilot', 'main', route, ping);
+  const api = access(gw);
+  const names = async () => Object.fromEntries((await api.list()).connections.map((row) => [row.id, row.displayName]));
+  const first = await names();
+  assert.equal(first.paired, 'pilot');
+  assert.equal(first.named, 'Synthetic project 2');
+  assert.equal(first.unknown, 'missing-project');
+  assert.equal(first['other-host'], 'project-1', 'same ID on another host must not borrow an alias or name');
+  assert.equal(first.legacy, 'pilot');
+  const before = store.listConnections();
+  gw.services.config.projects[0]!.alias = 'renamed';
+  assert.equal((await names()).paired, 'renamed', 'read current config, not a name saved at connection creation');
+  gw.services.config.projects = [];
+  assert.equal((await names()).paired, 'Synthetic project 1');
+  assert.deepEqual(store.listConnections(), before, 'display names never rewrite connection settings or revisions');
+  await gw.gateway.close();
+  const restarted = await startTestGateway(t, {
+    dataDir: gw.dataDir, door: gw.door,
+    config: { ...CONFIG, projects: [{ ...CONFIG.projects[0], alias: 'after-restart' }] },
+    jobEngine: { autoStart: false }, webhookSender: { autoStart: false },
+  });
+  const refreshed = (await access(restarted).list()).connections;
+  assert.equal(refreshed.find((row) => row.id === 'paired')!.displayName, 'after-restart');
+  assert.equal(refreshed.find((row) => row.id === 'named')!.displayName, 'project-2', 'unavailable discovery falls back to ID');
+  assert.deepEqual(restarted.services.webhooks.listConnections(), before);
 });

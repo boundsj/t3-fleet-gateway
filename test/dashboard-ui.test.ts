@@ -173,7 +173,7 @@ const WEBHOOK_URL = 'https://hooks.example.test/private-synthetic-route';
 const AUTH_HEADER = 'Authorization: Bearer synthetic-private-key';
 const webhookRow = (source: 'config' | 'dashboard' = 'dashboard') => ({
   id: source === 'dashboard' ? 'ui-connection' : 'file-connection', revision: 3, source, enabled: true,
-  projects: ['alpha'], hosts: ['h1'], lastTest: { at: NOW, outcome: 'delivered', statusCode: 202 },
+  displayName: 'alpha', projects: ['alpha'], hosts: ['h1'], lastTest: { at: NOW, outcome: 'delivered', statusCode: 202 },
 });
 type WebhookRow = ReturnType<typeof webhookRow>;
 
@@ -244,6 +244,13 @@ async function webhookPage(options: {
 }
 
 describe('dashboard webhook connections: running browser handlers', () => {
+  test('connection cards render the gateway display name without resolving project names', async () => {
+    const page = await webhookPage({ connections: [{ ...webhookRow(), displayName: 'Gateway supplied name' }] });
+    const card = page.root.elements('article')[0]!;
+    assert.equal(card.elements('h3')[0]!.textContent, 'Gateway supplied name');
+    assert.equal(card.getAttribute('aria-label'), 'Connection for Gateway supplied name on h1');
+  });
+
   test('overview entry and setup use two accessible paste fields, configured projects and a safe private-panel prompt', async () => {
     const page = await webhookPage();
     assert.equal(page.root.elements('input').filter((node) => ['webhook-url', 'webhook-auth'].includes(node.getAttribute('id') ?? '')).length, 2, 'two receiver fields');
