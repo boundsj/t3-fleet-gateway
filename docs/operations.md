@@ -219,7 +219,7 @@ The page reloads its data when you open it, press Refresh, or come back to it af
 
 ### Connect a webhook receiver
 
-From **Overview**, choose **Connect Grok Bot**, or open **Webhooks**. For Grok, ask the bot to show clickable links named **Webhook URL**, **Webhook key** and **Authorization header**; these open private panels. Ask it not to print the key in the conversation. Copy **POST to** from the URL panel and the complete **header** from the authorization panel. The full header already contains the key, so there is no separate key field in the dashboard.
+Open **Webhooks** and choose **Connect Grok Bot**. For Grok, ask the bot to show clickable links named **Webhook URL**, **Webhook key** and **Authorization header**; these open private panels. Ask it not to print the key in the conversation. Copy **POST to** from the URL panel and the complete **header** from the authorization panel. The full header already contains the key, so there is no separate key field in the dashboard.
 
 1. Paste the **Webhook URL**. This is where the gateway sends job notices.
 2. Paste the **Full authorization header**, including its name and value, for example `Authorization: Bearer example-key`. This tells the receiver to accept the request. Any supported HTTPS receiver and authentication header can be used.

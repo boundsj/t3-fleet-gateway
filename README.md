@@ -240,7 +240,7 @@ URL, key or header value in chat.
 
 Then, in the private dashboard:
 
-1. Open **Connect Grok Bot**.
+1. Open **Webhooks** and choose **Connect Grok Bot**.
 2. Paste the routine's **POST to** value into **Webhook URL** and its full **header** into **Full authorization header**. The header already includes the key.
 3. Choose a project and click **Connect & Test**.
 

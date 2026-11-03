@@ -42,6 +42,9 @@ function webhookTestText(test) {
 const SVG_NS = 'http://www.w3.org/2000/svg';
 /** Coming back to the tab after this long reloads the snapshot (database reads only; T3 is never contacted). */
 const STALE_MS = 60_000;
+// The engine ticks every few seconds; a round can wait on slow hosts, so only a long silence is called a stall.
+const ENGINE_STALL_MS = 5 * 60_000;
+const ENGINE_START_MS = 60_000;
 
 export function safeHref(value) {
   return typeof value === 'string' && (SAFE_ROUTE.test(value) || isThreadLink(value));
@@ -162,7 +165,7 @@ const STATE_LABELS = {
 // ------------------------------------------------------------------------------------------------ rendering
 
 /**
- * Render the whole app into `root`. `model` is { snapshot, route, error, notice, loading, checking, fetchedAt, jobFilter },
+ * Render the whole app into `root`. `model` is { snapshot, route, error, notice, loading, checking, fetchedAt, jobFilter, gatewayDown },
  * `actions` is { refresh, runChecks, setJobFilter, copy }. Returns the time elements to keep current.
  */
 export function render(doc, root, model, actions, nowMs = Date.now()) {
@@ -225,7 +228,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     h('div', { class: 'topbar__inner' },
       h('a', { class: 'brand', href: '#/overview' },
         h('img', { class: 'brand__mark', src: 'assets/mark.svg', alt: '', width: '32', height: '32' }),
-        h('span', { class: 'brand__name' }, 'Fleet gateway', h('span', null, ' · operator'))),
+        h('span', { class: 'brand__name' }, 'Fleet gateway')),
       snap ? h('span', { class: 'chip chip--version' }, `v${snap.gateway.version}`) : null,
       snap?.demoLabel ? h('span', { class: 'chip chip--demo', title: 'Synthetic data from the demo harness' }, snap.demoLabel) : null,
       h('span', { class: 'topbar__spacer' }),
@@ -405,25 +408,10 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
 
   function overviewView() {
     const issues = snap.attention.filter((item) => item.tone === 'bad' || item.tone === 'warn');
-    const unchecked = snap.hosts.filter((host) => host.reachability.state === 'unchecked').length;
-    let headline;
-    let lede;
-    if (issues.length === 1) {
-      headline = issues[0].title;
-      lede = issues[0].detail;
-    } else if (issues.length > 1) {
-      headline = `${issues.length} things need your attention`;
-      lede = 'They are listed below, most serious first. Approvals and job control happen in T3; host and client fixes on the gateway machine.';
-    } else if (unchecked > 0) {
-      headline = 'Nothing is waiting on you';
-      lede = `${plural(unchecked, 'host')} ${unchecked === 1 ? 'has' : 'have'} not been checked since the gateway started. Run checks to ask ${unchecked === 1 ? 'it' : 'them'} now.`;
-    } else {
-      headline = 'All clear';
-      lede = 'Every host answered its last observed call, and no job is waiting on you.';
-    }
+    // The tab bar already names the page and the tiles and attention list carry the status, so the heading is for
+    // screen readers and route-change focus only. Run checks lives on Checks, connecting a bot on Webhooks.
     return [
-      pageHead('Overview', headline, lede, checksButton(),
-        h('a', { class: 'btn btn--accent', href: '#/webhooks/connect' }, icon('link', 'btn__icon'), 'Connect Grok Bot')),
+      h('h1', { class: 'sr-only', tabindex: '-1', id: 'page-title' }, 'Overview'),
       vitals(),
       topology(),
       h('div', { class: 'grid-2' },
@@ -440,21 +428,90 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     return issues === 0 ? `${total} for information` : `${issues} to act on · ${total - issues} for information`;
   }
 
+  // Each tile states one verdict in plain words. A healthy part gets one quiet line; a problem names the host, client
+  // or job count and links to it, at most two lines per tile with the rest behind "+N more" (a link to the tab).
   function vitals() {
     const g = snap.gateway;
-    const engineText = g.engine.running ? (g.engine.lastTickAt ? ['engine ticked ', time(g.engine.lastTickAt)] : 'engine starting') : 'engine not running';
-    const dbOk = g.database.schemaVersion === g.database.expectedVersion;
-    const tile = (href, tone, iconName, label, value, sub) => h('a', { class: `panel vital tone-edge-${tone}`, href },
-      h('span', { class: 'vital__label' }, icon(iconName), label), h('span', { class: 'vital__value' }, value), h('span', { class: 'vital__sub' }, sub));
     const d = derived;
-    const hostSub = [d.unreachable && `${d.unreachable} unreachable`, d.hostWarn && `${d.hostWarn} ${d.hostWarn === 1 ? 'needs' : 'need'} attention`, d.unchecked && `${d.unchecked} not checked`].filter(Boolean).join(' · ') || 'all answered their last observed call';
-    const clientSub = [d.needsApproval && `${d.needsApproval} unusable`, d.neverSeen && `${d.neverSeen} never observed`, d.quiet && `${d.quiet} quiet`].filter(Boolean).join(' · ') || 'all seen in the last day';
-    const waitingSub = [d.waiting && `${d.waiting} waiting on you`, snap.jobs.counts.queued && `${snap.jobs.counts.queued} queued`, snap.jobs.counts.running && `${snap.jobs.counts.running} running`].filter(Boolean).join(' · ') || 'nothing waiting';
+    const dbOk = g.database.schemaVersion === g.database.expectedVersion;
+    const name = (text) => h('b', null, text);
+    const line = (tone, href, parts) => ({ tone, node: h('a', { class: 'vital__line', href },
+      h('span', { class: `vital__dot vital__dot--${tone}`, 'aria-hidden': 'true' }), h('span', null, parts)) });
+    const tile = (href, tone, iconName, label, value, sub, lines = []) => {
+      lines.sort((a, b) => TONE_RANK[a.tone] - TONE_RANK[b.tone]);
+      const shown = lines.slice(0, 2);
+      return h('section', { class: `panel vital tone-edge-${tone}` },
+        h('a', { class: 'vital__label', href }, icon(iconName), label, h('span', { class: 'vital__arrow', 'aria-hidden': 'true' }, '→')),
+        h('span', { class: 'vital__value' }, value),
+        sub ? h('span', { class: 'vital__sub' }, sub) : null,
+        shown.map((item) => item.node),
+        lines.length > shown.length ? h('a', { class: 'vital__more', href }, `+${lines.length - shown.length} more`) : null);
+    };
+
+    // Gateway: the page itself could not reach it, the schema, the job engine, and failed manual checks.
+    const gatewayLines = [];
+    // Measured against the snapshot's own time: an old snapshot is the page's problem, shown by "Not answering" and Updated.
+    const at = Date.parse(snap.generatedAt);
+    const lastRound = g.engine.lastTickAt ?? g.startedAt;
+    // serve opens the dashboard a moment before it starts the engine.
+    const starting = !g.engine.running && g.startedAt && at - Date.parse(g.startedAt) < ENGINE_START_MS;
+    if (!g.engine.running && !starting) gatewayLines.push(line('bad', '#/checks', [name('Job engine'), ' isn’t running']));
+    else if (g.engine.running && lastRound && at - Date.parse(lastRound) > ENGINE_STALL_MS) {
+      gatewayLines.push(line('bad', '#/checks', g.engine.lastTickAt ? [name('Job engine'), ' last checked jobs ', time(g.engine.lastTickAt)] : [name('Job engine'), ' hasn’t checked jobs yet']));
+    }
+    for (const item of snap.attention) {
+      if (item.kind === 'gateway' && (item.tone === 'bad' || item.tone === 'warn')) gatewayLines.push(line(item.tone, '#/checks', item.title));
+    }
+    const gatewayTone = model.gatewayDown || !dbOk ? 'bad' : gatewayLines.length > 0 ? gatewayLines.some((l) => l.tone === 'bad') ? 'bad' : 'warn' : 'good';
+
+    // Hosts, in the order hostStatus (snapshot.ts) decides a host's status.
+    const hostLines = [];
+    for (const host of snap.hosts) {
+      const n = name(host.label);
+      const href = `#/hosts/${host.id}`;
+      const r = host.reachability.state;
+      const c = host.credential;
+      if (r === 'credential_rejected') hostLines.push(line('bad', href, [n, ' refuses the gateway’s credential']));
+      else if (r === 'not_enrolled') hostLines.push(line('warn', href, [n, ' isn’t enrolled']));
+      else if (c.state === 'expired') hostLines.push(line('bad', href, [n, '’s credential has expired']));
+      else if (r === 'unreachable' || host.engine) hostLines.push(line('bad', href, [n, ' can’t be reached']));
+      else if (host.status.tone === 'bad') hostLines.push(line('bad', href, [n, ' is failing some calls']));
+      else if (r === 'unchecked') hostLines.push(line('unknown', href, [n, ' hasn’t been checked yet']));
+      else if (c.renewalError) hostLines.push(line('warn', href, c.expiresAt ? [n, ' needs re-pairing, expires ', time(c.expiresAt)] : [n, ' needs re-pairing']));
+      else if (c.state === 'renewal_due') hostLines.push(line('warn', href, c.expiresAt ? [n, '’s credential expires ', time(c.expiresAt)] : [n, '’s credential is due for renewal']));
+    }
+    const hostTone = hostLines.some((l) => l.tone === 'bad') ? 'bad' : hostLines.some((l) => l.tone === 'warn') ? 'warn' : d.unchecked ? 'unknown' : 'good';
+
+    // Clients: quiet is normal, so only unusable grants and clients never seen are named.
+    const clientLines = [];
+    for (const client of snap.clients.items) {
+      if (client.grant.state === 'revoked') continue;
+      const n = name(client.label);
+      const href = `#/clients/${client.id}`;
+      if (client.status.tone === 'bad') clientLines.push(line('bad', href, client.status.label === 'Token unusable' ? [n, '’s token no longer works'] : [n, ' needs approving again']));
+      else if (client.status.tone === 'unknown') clientLines.push(line('info', href, [n, ' hasn’t sent a request yet']));
+    }
+
+    // Jobs: only what needs the operator. Queued and running work is listed on the Jobs tab.
+    const jobItems = snap.attention.filter((item) => item.kind === 'job');
+    const failed = jobItems.filter((item) => item.tone === 'bad').length;
+    const unconfirmed = snap.jobs.counts.unknown ?? 0;
+    const jobLines = [
+      failed && line('bad', '#/jobs', [name(String(failed)), ' failed in the last day']),
+      d.waiting && line('warn', '#/jobs', [name(String(d.waiting)), ' waiting for your answer in T3']),
+      unconfirmed && line('warn', '#/jobs', [name(String(unconfirmed)), unconfirmed === 1 ? ' launch unconfirmed' : ' launches unconfirmed']),
+    ].filter(Boolean);
+
     return h('div', { class: 'vitals' },
-      tile('#/checks', !dbOk || d.gatewayIssues ? 'bad' : g.engine.running ? 'good' : 'unknown', 'pulse', 'Gateway', dbOk ? 'Running' : 'Schema mismatch', ['up ', span(g.startedAt, now), ' · ', engineText]),
-      tile('#/hosts', d.hostTone, 'hosts', 'Hosts', `${d.answering} of ${snap.hosts.length} answering`, hostSub),
-      tile('#/clients', d.clientTone, 'clients', 'Clients', d.activeClients === 0 ? 'None connected' : `${d.seen} of ${d.activeClients} seen today`, d.activeClients === 0 ? 'approve one with t3-fleet-gateway pair' : clientSub),
-      tile('#/jobs', d.waiting > 0 ? 'warn' : 'good', 'jobs', 'Jobs', `${snap.jobs.openTotal} open`, waitingSub));
+      tile('#/checks', gatewayTone, 'pulse', 'Gateway', model.gatewayDown ? 'Not answering' : dbOk ? 'Running' : 'Schema mismatch',
+        model.gatewayDown ? ['Last data ', time(snap.generatedAt)] : starting ? 'Starting' : ['Up ', span(g.startedAt, now)], gatewayLines),
+      tile('#/hosts', hostTone, 'hosts', 'Hosts', snap.hosts.length === 0 ? 'No hosts' : `${d.answering} of ${snap.hosts.length} online`,
+        hostLines.length === 0 && snap.hosts.length > 0 ? 'All answering' : null, hostLines),
+      tile('#/clients', d.needsApproval ? 'bad' : d.activeClients === 0 ? 'unknown' : 'good', 'clients', 'Clients',
+        d.activeClients === 0 ? 'None connected' : `${d.seen} of ${d.activeClients} active today`,
+        d.activeClients === 0 ? 'Approve one with t3-fleet-gateway pair' : clientLines.length === 0 ? 'All seen in the last day' : null, clientLines),
+      tile('#/jobs', failed ? 'bad' : jobLines.length > 0 ? 'warn' : 'good', 'jobs', 'Jobs', `${snap.jobs.openTotal} open`,
+        jobLines.length === 0 ? 'Nothing needs you' : null, jobLines));
   }
 
   function topology() {
@@ -784,8 +841,6 @@ export function derive(snap) {
   return {
     answering, unreachable, unchecked, hostWarn, seen, needsApproval, neverSeen, quiet,
     activeClients: activeClients.length,
-    hostTone: unreachable ? 'bad' : hostWarn ? 'warn' : unchecked ? 'unknown' : 'good',
-    clientTone: needsApproval ? 'bad' : neverSeen ? 'unknown' : quiet ? 'info' : 'good',
     issueCount: issues.length,
     worstTone: worst(issues.map((item) => item.tone)),
     clientIssues: snap.attention.filter((item) => item.kind === 'client' && item.tone === 'bad').length,
@@ -817,7 +872,7 @@ export function boot(win, doc) {
   doc.body.append(live);
   const route = parseRoute(win.location.hash);
   const model = {
-    snapshot: null, route, error: null, notice: null, loading: false, checking: false, fetchedAt: 0, jobFilter: 'attention',
+    snapshot: null, route, error: null, notice: null, loading: false, checking: false, fetchedAt: 0, jobFilter: 'attention', gatewayDown: false,
     repairHost: null, repairConfirmation: null, repairBusy: false,
     settleId: null, settleRequestId: null, settleBusy: false,
     webhooks: null, webhooksLoading: false, webhookBusy: null, webhookError: null, webhookNotice: null,
@@ -927,9 +982,12 @@ export function boot(win, doc) {
         if (first && model.route.id) win.setTimeout(() => draw(true), 0);
         model.fetchedAt = Date.now();
         model.error = null;
+        model.gatewayDown = false;
         announce('Dashboard updated.');
       } catch (error) {
-        model.error = error instanceof TypeError ? 'The gateway did not answer. It may be restarting.' : String(error.message ?? error);
+        // No HTTP answer at all: the Gateway tile says so, instead of showing the last snapshot's "Running".
+        model.gatewayDown = error instanceof TypeError;
+        model.error = model.gatewayDown ? 'The gateway did not answer. It may be restarting.' : String(error.message ?? error);
         announce(model.error);
       } finally {
         model.loading = false;
@@ -949,11 +1007,14 @@ export function boot(win, doc) {
         model.snapshot = body.snapshot;
         model.fetchedAt = Date.now();
         model.error = null;
+        model.gatewayDown = false;
         const failed = body.run.results.filter((result) => result.level === 'fail').length;
         model.notice = failed ? `Checks finished: ${plural(failed, 'check')} failed.` : 'Checks finished: nothing failed.';
         announce(model.notice);
       } catch (error) {
-        model.error = error instanceof TypeError ? 'The gateway did not answer. It may be restarting.' : String(error.message ?? error);
+        // No HTTP answer at all: the Gateway tile says so, instead of showing the last snapshot's "Running".
+        model.gatewayDown = error instanceof TypeError;
+        model.error = model.gatewayDown ? 'The gateway did not answer. It may be restarting.' : String(error.message ?? error);
         announce(model.error);
       } finally {
         model.checking = false;

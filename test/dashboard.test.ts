@@ -252,8 +252,8 @@ describe('dashboard: exposure', () => {
     const root = doc.createElement('div');
     app.render(doc, root, { snapshot: later, route: { view: 'overview', id: null }, error: null, notice: null, loading: false, checking: false, fetchedAt: Date.now(), jobFilter: 'attention' },
       { refresh() {}, runChecks() {}, setJobFilter() {}, copy() {} });
-    assert.doesNotMatch(root.textContent, /All clear/);
-    assert.match(root.textContent, /2 things need your attention/);
+    const attention = root.elements('ul').find((node) => node.getAttribute('class') === 'attention');
+    assert.equal(attention?.elements('li').length, 2, 'both failed checks are listed on the overview');
   });
 });
 
