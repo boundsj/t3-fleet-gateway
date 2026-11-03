@@ -51,7 +51,7 @@ export function parseDashboardRoute(urlInput: string, headerInput: string, optio
 
 interface ProjectOption { alias: string; host: string; projectId?: string; name?: string; label: string }
 
-/** Configured aliases win by host and pinned ID; selection values keep their existing semantics. */
+/** The first configured alias wins by host and pinned ID; selection values keep their existing semantics. */
 function projectOptions(config: GatewayConfig, discovered: { host: string; projectId: string; name: string }[] = []): ProjectOption[] {
   const projects: ProjectOption[] = [];
   const seen = new Set<string>();
@@ -79,11 +79,13 @@ function projectOptions(config: GatewayConfig, discovered: { host: string; proje
   }
   for (const group of groups.values()) {
     if (group.length < 2) continue;
-    const ids = group.map((project) => project.projectId ?? project.alias);
+    const ids = group.map((project) => project.projectId);
     for (const [index, project] of group.entries()) {
-      const id = ids[index]!;
+      const id = ids[index];
+      // Title-based aliases have no known ID; suffix the colliding discovered choices instead.
+      if (!id) continue;
       let length = Math.min(8, id.length);
-      while (length < id.length && ids.some((other, i) => i !== index && other.slice(0, length) === id.slice(0, length))) length++;
+      while (length < id.length && ids.some((other, i) => i !== index && other?.slice(0, length) === id.slice(0, length))) length++;
       project.label += ` (${id.slice(0, length)})`;
     }
   }

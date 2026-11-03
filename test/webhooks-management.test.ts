@@ -507,11 +507,16 @@ test('project options deduplicate aliases and compute readable labels with same-
     { ...host.projects[0]!, id: 'collision-a', title: 'Shared' },
     { ...host.projects[0]!, id: 'collision-b', title: 'Shared' },
     { ...host.projects[0]!, id: 'alias-collision', title: 'configured' },
+    { ...host.projects[0]!, id: 'title-only-id', title: 'title-alias' },
   );
   const gw = await startTestGateway(t, {
     config: { ...CONFIG,
       hosts: ['main', 'other'].map((id) => ({ id, t3Url: host.url, mintPairingCode: host.mintCommand(), discovery: { enabled: true } })),
-      projects: [{ alias: 'configured', host: 'main', t3ProjectId: 'aliased-id' }],
+      projects: [
+        { alias: 'configured', host: 'main', t3ProjectId: 'aliased-id' },
+        { alias: 'second-binding', host: 'main', t3ProjectId: 'aliased-id' },
+        { alias: 'title-alias', host: 'main', t3ProjectTitle: 'Title-selected project' },
+      ],
     }, jobEngine: { autoStart: false }, webhookSender: { autoStart: false },
   });
   await gw.services.registry.enroll('main');
@@ -519,7 +524,10 @@ test('project options deduplicate aliases and compute readable labels with same-
   const list = await access(gw).list();
   const options = list.projects as { alias: string; host: string; projectId?: string; label: string }[];
   const main = options.filter((p) => p.host === 'main');
-  assert.equal(main.length, 5, 'configured and discovered copies collapse into the alias option');
+  assert.equal(main.length, 7, 'each pinned project appears once, plus the title-based alias with no known ID');
+  assert.equal(main.some((p) => p.alias === 'second-binding'), false, 'first configured binding represents a shared project');
+  assert.equal(main.find((p) => p.alias === 'title-alias')!.label, 'title-alias');
+  assert.equal(main.find((p) => p.projectId === 'title-only-id')!.label, 'title-alias (title-on)');
   assert.equal(main.find((p) => p.projectId === 'aliased-id')!.alias, 'configured', 'keep alias selection semantics');
   assert.equal(main.find((p) => p.projectId === 'aliased-id')!.label, 'configured (aliased-)');
   assert.equal(main.find((p) => p.projectId === 'alias-collision')!.label, 'configured (alias-co)');
@@ -527,7 +535,7 @@ test('project options deduplicate aliases and compute readable labels with same-
   assert.equal(main.find((p) => p.projectId === 'collision-a')!.label, 'Shared (collision-a)');
   assert.equal(main.find((p) => p.projectId === 'collision-b')!.label, 'Shared (collision-b)');
   const other = options.filter((p) => p.host === 'other');
-  assert.equal(other.length, 5, 'alias on another host never hides a discovered project');
+  assert.equal(other.length, 6, 'alias on another host never hides a discovered project');
   assert.equal(other.find((p) => p.projectId === 'aliased-id')!.label, 'Discovered alias name');
   assert.equal(other.find((p) => p.projectId === 'alias-collision')!.label, 'configured', 'collisions on another host do not add a suffix');
   assert.equal(other.find((p) => p.projectId === 'unique-id')!.label, 'Readable name', 'same label across hosts needs no suffix');
