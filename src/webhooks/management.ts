@@ -49,6 +49,47 @@ export function parseDashboardRoute(urlInput: string, headerInput: string, optio
   return { url, header: header.toLowerCase(), value };
 }
 
+interface ProjectOption { alias: string; host: string; projectId?: string; name?: string; label: string }
+
+/** Configured aliases win by host and pinned ID; selection values keep their existing semantics. */
+function projectOptions(config: GatewayConfig, discovered: { host: string; projectId: string; name: string }[] = []): ProjectOption[] {
+  const projects: ProjectOption[] = [];
+  const seen = new Set<string>();
+  const add = (project: ProjectOption) => {
+    if (project.projectId) {
+      const key = JSON.stringify([project.host, project.projectId]);
+      if (seen.has(key)) return;
+      seen.add(key);
+    }
+    projects.push(project);
+  };
+  for (const project of config.projects) {
+    add({ alias: project.alias, host: project.host, label: project.alias,
+      ...(project.t3ProjectId ? { projectId: project.t3ProjectId } : {}) });
+  }
+  for (const project of discovered) {
+    add({ ...project, alias: JSON.stringify([project.host, project.projectId]), label: project.name });
+  }
+  const groups = new Map<string, ProjectOption[]>();
+  for (const project of projects) {
+    const key = JSON.stringify([project.host, project.label]);
+    const group = groups.get(key) ?? [];
+    group.push(project);
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const ids = group.map((project) => project.projectId ?? project.alias);
+    for (const [index, project] of group.entries()) {
+      const id = ids[index]!;
+      let length = Math.min(8, id.length);
+      while (length < id.length && ids.some((other, i) => i !== index && other.slice(0, length) === id.slice(0, length))) length++;
+      project.label += ` (${id.slice(0, length)})`;
+    }
+  }
+  return projects;
+}
+
 /** Private operator operations: parse, bounded deduplication, real ping, then a synchronous store CAS.
  * No async work holds a database transaction. Only safe results and request digests enter the replay cache.
  */
@@ -84,7 +125,7 @@ export class WebhookManagement {
     }
     return {
       session: this.#session,
-      projects: this.#config.projects.map(({ alias, host }) => ({ alias, host })),
+      projects: projectOptions(this.#config),
       connections: this.#store.listConnections().map((row) => ({ ...row, displayName: this.#displayName(row), health: this.#store.health(row.id)[0]!.health })),
     };
   }
@@ -92,7 +133,6 @@ export class WebhookManagement {
   /** Operator-requested discovery only. A failed host never discards another host's projects. */
   async discoverList() {
     const base = this.list();
-    const projects: { alias: string; host: string; projectId?: string; name?: string }[] = [...base.projects];
     const hosts = await Promise.all(this.#config.hosts.map(async (host) => {
       if (!host.discovery.enabled || !this.#discovery) return { host: host.id, status: 'discovery_disabled' };
       if (this.#discovery.registry.credentialStatus(host.id).state === 'missing') return { host: host.id, status: 'unavailable' };
@@ -101,15 +141,10 @@ export class WebhookManagement {
         return { host: host.id, status: 'available', projects: snapshot.value };
       } catch { return { host: host.id, status: 'unavailable' }; }
     }));
-    for (const host of hosts) {
-      for (const project of host.projects ?? []) {
-        projects.push({ alias: JSON.stringify([host.host, project.id]), host: host.host, projectId: project.id, name: project.name });
-      }
-    }
     const names = hosts.flatMap((host) => (host.projects ?? []).map((project) => ({
       host: host.host, projectId: project.id, name: project.name,
     })));
-    return { ...base, projects, hosts: hosts.map(({ host, status }) => ({ host, status })),
+    return { ...base, projects: projectOptions(this.#config, names), hosts: hosts.map(({ host, status }) => ({ host, status })),
       connections: base.connections.map((row) => ({ ...row, displayName: this.#displayName(row, names) })) };
   }
 

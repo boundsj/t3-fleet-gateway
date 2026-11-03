@@ -349,7 +349,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
       id: 'webhook-project', required: true, disabled: busy || data.projects.length === 0, 'aria-describedby': 'webhook-project-help',
     }, [...new Set(data.projects.map((item) => item.host))].map((host) =>
       h('optgroup', { label: host }, data.projects.filter((item) => item.host === host).map((item) =>
-        h('option', { value: item.alias }, item.name ? `${item.name} (${item.projectId})` : item.alias)))));
+        h('option', { value: item.alias }, item.label)))));
     const filters = [
       ['events', 'Events (optional)', 'Includes credential_alert and credential_resolved by default'],
       ['jobs', 'Job IDs (optional)', 'All matching jobs'],

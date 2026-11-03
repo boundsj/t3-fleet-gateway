@@ -95,7 +95,7 @@ const actionInput = (session: string, row: WebhookConnection) => ({ session, req
 describe('private webhook connection management', () => {
   test('setup persists defaults and never exports or logs route/header/response; empty-config sender wakes', async (t) => {
     const f = await fixture(t, true);
-    assert.deepEqual((await f.api.list()).projects, [{ alias: 'pilot', host: 'main' }]);
+    assert.deepEqual((await f.api.list()).projects, [{ alias: 'pilot', host: 'main', projectId: 'project-1', label: 'pilot' }]);
     const { connection } = await connect(f);
     assert.equal(connection.source, 'dashboard');
     assert.equal(connection.lastTest!.statusCode, 202);
@@ -495,4 +495,40 @@ test('connection display names resolve on the gateway at read time by host and p
   assert.equal(refreshed.find((row) => row.id === 'paired')!.displayName, 'after-restart');
   assert.equal(refreshed.find((row) => row.id === 'named')!.displayName, 'project-2', 'unavailable discovery falls back to ID');
   assert.deepEqual(restarted.services.webhooks.listConnections(), before);
+});
+
+
+test('project options deduplicate aliases and compute readable labels with same-host collision suffixes', async (t) => {
+  const { startFakeT3 } = await import('./helpers/fakeT3.ts');
+  const host = await startFakeT3(); t.after(() => host.close());
+  host.projects.splice(0, host.projects.length,
+    { ...host.projects[0]!, id: 'aliased-id', title: 'Discovered alias name' },
+    { ...host.projects[0]!, id: 'unique-id', title: 'Readable name' },
+    { ...host.projects[0]!, id: 'collision-a', title: 'Shared' },
+    { ...host.projects[0]!, id: 'collision-b', title: 'Shared' },
+    { ...host.projects[0]!, id: 'alias-collision', title: 'configured' },
+  );
+  const gw = await startTestGateway(t, {
+    config: { ...CONFIG,
+      hosts: ['main', 'other'].map((id) => ({ id, t3Url: host.url, mintPairingCode: host.mintCommand(), discovery: { enabled: true } })),
+      projects: [{ alias: 'configured', host: 'main', t3ProjectId: 'aliased-id' }],
+    }, jobEngine: { autoStart: false }, webhookSender: { autoStart: false },
+  });
+  await gw.services.registry.enroll('main');
+  await gw.services.registry.enroll('other');
+  const list = await access(gw).list();
+  const options = list.projects as { alias: string; host: string; projectId?: string; label: string }[];
+  const main = options.filter((p) => p.host === 'main');
+  assert.equal(main.length, 5, 'configured and discovered copies collapse into the alias option');
+  assert.equal(main.find((p) => p.projectId === 'aliased-id')!.alias, 'configured', 'keep alias selection semantics');
+  assert.equal(main.find((p) => p.projectId === 'aliased-id')!.label, 'configured (aliased-)');
+  assert.equal(main.find((p) => p.projectId === 'alias-collision')!.label, 'configured (alias-co)');
+  assert.equal(main.find((p) => p.projectId === 'unique-id')!.label, 'Readable name');
+  assert.equal(main.find((p) => p.projectId === 'collision-a')!.label, 'Shared (collision-a)');
+  assert.equal(main.find((p) => p.projectId === 'collision-b')!.label, 'Shared (collision-b)');
+  const other = options.filter((p) => p.host === 'other');
+  assert.equal(other.length, 5, 'alias on another host never hides a discovered project');
+  assert.equal(other.find((p) => p.projectId === 'aliased-id')!.label, 'Discovered alias name');
+  assert.equal(other.find((p) => p.projectId === 'alias-collision')!.label, 'configured', 'collisions on another host do not add a suffix');
+  assert.equal(other.find((p) => p.projectId === 'unique-id')!.label, 'Readable name', 'same label across hosts needs no suffix');
 });
