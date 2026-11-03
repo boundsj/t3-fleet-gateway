@@ -244,17 +244,27 @@ code, .mono { font-family: var(--mono); font-size: .86em; }
 /* ---------------------------------------------------------------- overview */
 
 .vitals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
-.vital { padding: 15px 16px 16px; display: grid; gap: 4px; text-decoration: none; position: relative; overflow: hidden; transition: border-color .15s, box-shadow .15s; }
-.vital:hover { border-color: var(--line-strong); box-shadow: var(--shadow-lift); }
+.vital { padding: 15px 16px 16px; display: grid; gap: 4px; align-content: start; position: relative; overflow: hidden; }
 .vital::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--line-strong); }
 .vital.tone-edge-good::before { background: var(--good); }
 .vital.tone-edge-warn::before { background: var(--warn); }
 .vital.tone-edge-bad::before { background: var(--bad); }
 .vital.tone-edge-info::before { background: var(--info); }
-.vital__label { display: flex; align-items: center; gap: 7px; color: var(--sub); font-size: 12.5px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; }
+.vital__label { display: flex; align-items: center; gap: 7px; width: fit-content; color: var(--sub); font-size: 12.5px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; text-decoration: none; }
+.vital__label:hover { color: var(--ink); }
+.vital__arrow { opacity: .6; }
 .vital__label svg { width: 15px; height: 15px; }
 .vital__value { font-size: 22px; font-weight: 680; letter-spacing: -.02em; line-height: 1.2; }
 .vital__sub { color: var(--sub); font-size: 13px; }
+.vital__line { display: flex; align-items: baseline; gap: 7px; width: fit-content; color: var(--ink); font-size: 13.5px; line-height: 1.35; text-decoration: none; }
+.vital__line:hover > span:last-child { text-decoration: underline; }
+.vital__line b { font-weight: 620; }
+.vital__dot { flex: none; width: 7px; height: 7px; border-radius: 50%; transform: translateY(-1px); background: var(--line-strong); }
+.vital__dot--bad { background: var(--bad); }
+.vital__dot--warn { background: var(--warn); }
+.vital__dot--info { background: var(--info); }
+.vital__more { width: fit-content; color: var(--sub); font-size: 13px; text-decoration: none; }
+.vital__more:hover { color: var(--ink); text-decoration: underline; }
 
 .topology { padding: 18px 20px 20px; }
 .topology .panel__head { padding: 0; flex-wrap: wrap; }
@@ -487,10 +497,11 @@ details.disclosure > summary .sub { font-weight: 400; margin-left: auto; }
 @media (max-width: 520px) {
   .updated { display: none; }
   .updated.updated--stale { display: inline; font-size: 12px; }
+  /* Problem lines name hosts and clients; two columns would wrap each into three or four lines. */
+  .vitals { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 380px) {
-  .vitals { grid-template-columns: minmax(0, 1fr); }
   .lane__nodes { grid-template-columns: minmax(0, 1fr); }
 }
 
@@ -499,6 +510,7 @@ details.disclosure > summary .sub { font-weight: 400; margin-left: auto; }
   .btn--small { min-height: 38px; }
   .segmented button { min-height: 40px; }
   .cmd button { min-width: 44px; }
+  .vital__label, .vital__line, .vital__more { min-height: 32px; align-items: center; }
 }
 
 @media (prefers-reduced-motion: reduce) {

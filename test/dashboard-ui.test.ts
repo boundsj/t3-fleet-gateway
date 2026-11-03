@@ -169,6 +169,152 @@ describe('dashboard page: safe rendering', () => {
   });
 });
 
+/** A plain-text fleet for the overview tiles: three hosts, two clients, jobs waiting and failed. */
+function tileSnapshot(): DashboardSnapshot {
+  const snap = hostileSnapshot();
+  const base = snap.hosts[0]!;
+  const host = (id: string, label: string, tone: 'good' | 'warn' | 'bad', state: 'reachable' | 'unreachable', credential: Partial<typeof base.credential> = {}) => ({
+    ...base, id, label, status: { tone, label: tone },
+    reachability: { ...base.reachability, state }, engine: null,
+    credential: { state: 'active' as const, expiresAt: ago(-60 * 24 * 30), daysLeft: 30, renewalError: null, alerts: [], ...credential },
+  });
+  snap.hosts = [
+    host('forge', 'Forge', 'bad', 'unreachable'),
+    host('lab', 'Lab', 'warn', 'reachable', { state: 'renewal_due', expiresAt: ago(-60 * 24 * 3), daysLeft: 3, renewalError: { code: 'enrollment_failed', at: ago(30), detail: 'x' } }),
+    host('studio', 'Studio', 'good', 'reachable'),
+  ];
+  const client = snap.clients.items[0]!;
+  snap.clients.items = [
+    { ...client, id: 'notion', label: 'Notion', grant: { ...client.grant, state: 'active' }, status: { tone: 'unknown', label: 'Never observed', detail: 'x' } },
+    { ...client, id: 'muse', label: 'Muse', grant: { ...client.grant, state: 'active' }, status: { tone: 'good', label: 'Seen recently', detail: 'x' } },
+  ];
+  snap.jobs.counts = { ...snap.jobs.counts, queued: 3, running: 2, needs_input: 1, unknown: 0 };
+  snap.jobs.openTotal = 7;
+  snap.attention = [
+    { tone: 'bad', kind: 'job', ref: 'j2', title: 'failed', detail: 'x', at: ago(5), action: null },
+    { tone: 'bad', kind: 'host', ref: 'forge', title: 'host', detail: 'x', at: ago(5), action: null },
+  ];
+  snap.checks = null;
+  return snap;
+}
+
+describe('dashboard overview tiles', () => {
+  const tiles = async (snap: DashboardSnapshot, model: Record<string, unknown> = {}) => {
+    const app = await loadApp();
+    const doc = new FakeDocument();
+    const root = doc.createElement('div');
+    app.render(doc, root, { snapshot: snap, route: { view: 'overview', id: null }, error: null, notice: null, loading: false, checking: false,
+      fetchedAt: Date.parse(NOW), jobFilter: 'attention', ...model }, actions().handlers, Date.parse(NOW));
+    assertSafeTree(root);
+    const sections = root.elements('section').filter((node) => node.getAttribute('class')?.includes('vital'));
+    assert.equal(sections.length, 4);
+    const [gateway, hosts, clients, jobs] = sections.map((node) => ({
+      text: node.textContent,
+      lines: node.elements('a').filter((a) => a.getAttribute('class') === 'vital__line').map((a) => [a.textContent, a.getAttribute('href')]),
+      more: node.elements('a').find((a) => a.getAttribute('class') === 'vital__more')?.textContent ?? null,
+      tone: /tone-edge-(\w+)/.exec(node.getAttribute('class') ?? '')?.[1],
+    }));
+    return { gateway: gateway!, hosts: hosts!, clients: clients!, jobs: jobs! };
+  };
+
+  test('a verdict per tile; problems are named and link to the host, client or job list; routine counts stay off', async () => {
+    const t = await tiles(tileSnapshot());
+    assert.match(t.gateway.text, /Running/);
+    assert.match(t.gateway.text, /Up 10 h/);
+    assert.doesNotMatch(t.gateway.text, /engine|ticked/, 'a healthy engine is not mentioned');
+    assert.equal(t.gateway.tone, 'good');
+    assert.match(t.hosts.text, /2 of 3 online/);
+    assert.deepEqual(t.hosts.lines.map(([, href]) => href), ['#/hosts/forge', '#/hosts/lab'], 'unreachable first, then renewal');
+    assert.equal(t.hosts.lines[0]![0], 'Forge can’t be reached');
+    assert.match(t.hosts.lines[1]![0]!, /^Lab needs re-pairing, expires in 3 d$/);
+    assert.equal(t.hosts.tone, 'bad');
+    assert.match(t.clients.text, /1 of 2 active today/);
+    assert.deepEqual(t.clients.lines, [['Notion hasn’t sent a request yet', '#/clients/notion']]);
+    assert.equal(t.clients.tone, 'good', 'a client never seen is information, not a fault');
+    assert.match(t.jobs.text, /7 open/);
+    assert.deepEqual(t.jobs.lines, [['1 failed in the last day', '#/jobs'], ['1 waiting for your answer in T3', '#/jobs']]);
+    assert.doesNotMatch(t.jobs.text, /queued|running/);
+    assert.equal(t.jobs.tone, 'bad');
+  });
+
+  test('healthy tiles say so in one quiet line', async () => {
+    const snap = tileSnapshot();
+    snap.hosts = snap.hosts.filter((host) => host.id === 'studio');
+    snap.clients.items = snap.clients.items.filter((client) => client.id === 'muse');
+    snap.jobs.counts = { ...snap.jobs.counts, needs_input: 0 };
+    snap.jobs.open = snap.jobs.open.filter((job) => job.state !== 'needs_input');
+    snap.attention = [];
+    const t = await tiles(snap);
+    assert.deepEqual([t.hosts, t.clients, t.jobs].map((tile) => [tile.lines.length, tile.tone]), [[0, 'good'], [0, 'good'], [0, 'good']]);
+    assert.match(t.hosts.text, /1 of 1 online.*All answering/);
+    assert.match(t.clients.text, /All seen in the last day/);
+    assert.match(t.jobs.text, /Nothing needs you/);
+  });
+
+  test('at most two problem lines per tile, then a count linking to the tab', async () => {
+    const snap = tileSnapshot();
+    snap.hosts = ['a', 'b', 'c', 'd'].map((id) => ({ ...snap.hosts[0]!, id, label: id.toUpperCase() }));
+    const t = await tiles(snap);
+    assert.equal(t.hosts.lines.length, 2);
+    assert.equal(t.hosts.more, '+2 more');
+    assert.match(t.hosts.text, /0 of 4 online/);
+  });
+
+  test('the gateway tile reports an engine that stopped or stalled, but not one still starting', async () => {
+    const stalled = tileSnapshot();
+    stalled.gateway.engine = { ...stalled.gateway.engine, lastTickAt: ago(10) };
+    assert.deepEqual((await tiles(stalled)).gateway.lines, [['Job engine last checked jobs 10 min ago', '#/checks']]);
+    const stopped = tileSnapshot();
+    stopped.gateway.engine = { ...stopped.gateway.engine, running: false, lastTickAt: null };
+    const t = await tiles(stopped);
+    assert.deepEqual(t.gateway.lines, [['Job engine isn’t running', '#/checks']]);
+    assert.equal(t.gateway.tone, 'bad');
+    const starting = tileSnapshot();
+    starting.gateway.startedAt = new Date(Date.parse(NOW) - 20_000).toISOString();
+    starting.gateway.engine = { ...starting.gateway.engine, running: false, lastTickAt: null };
+    const s = await tiles(starting);
+    assert.deepEqual(s.gateway.lines, []);
+    assert.match(s.gateway.text, /Starting/);
+  });
+
+  test('when the gateway stops answering, the tile says so instead of the last snapshot’s Running', async () => {
+    const t = await tiles(tileSnapshot(), { gatewayDown: true, error: 'The gateway did not answer. It may be restarting.' });
+    assert.match(t.gateway.text, /Not answering/);
+    assert.doesNotMatch(t.gateway.text, /Running/);
+    assert.match(t.gateway.text, /Last data just now/);
+    assert.equal(t.gateway.tone, 'bad');
+  });
+
+  test('a refresh with no HTTP answer marks the gateway down; the next answer clears it; an HTTP error does not', async () => {
+    let mode: 'ok' | 'down' | 'http' = 'ok';
+    const win = new FakeWindow(async (path) => {
+      assert.equal(path, 'api/snapshot');
+      if (mode === 'down') throw new TypeError('fetch failed');
+      if (mode === 'http') return new Response('{}', { status: 500 });
+      return Response.json(tileSnapshot());
+    });
+    win.location.hash = '#/overview';
+    const doc = new FakeDocument();
+    const root = doc.createElement('div');
+    root.setAttribute('id', 'app');
+    doc.body.append(root);
+    const app = await loadApp();
+    await app.boot(win, doc).ready;
+    const gatewayValue = () => root.elements('span').find((node) => node.getAttribute('class') === 'vital__value')?.textContent;
+    const refresh = async () => { await root.elements('button').find((node) => node.getAttribute('aria-label') === 'Refresh' || node.textContent.includes('Refresh'))!.dispatch('click'); };
+    assert.equal(gatewayValue(), 'Running');
+    mode = 'down';
+    await refresh();
+    assert.equal(gatewayValue(), 'Not answering');
+    mode = 'ok';
+    await refresh();
+    assert.equal(gatewayValue(), 'Running');
+    mode = 'http';
+    await refresh();
+    assert.equal(gatewayValue(), 'Running', 'the gateway answered, with an error');
+  });
+});
+
 const WEBHOOK_URL = 'https://hooks.example.test/private-synthetic-route';
 const AUTH_HEADER = 'Authorization: Bearer synthetic-private-key';
 const webhookRow = (source: 'config' | 'dashboard' = 'dashboard') => ({
@@ -244,7 +390,7 @@ async function webhookPage(options: {
 }
 
 describe('dashboard webhook connections: running browser handlers', () => {
-  test('overview entry and setup use two accessible paste fields, configured projects and a safe private-panel prompt', async () => {
+  test('setup uses two accessible paste fields, configured projects and a safe private-panel prompt', async () => {
     const page = await webhookPage();
     assert.equal(page.root.elements('input').filter((node) => ['webhook-url', 'webhook-auth'].includes(node.getAttribute('id') ?? '')).length, 2, 'two receiver fields');
     assert.equal(page.root.elements('input').filter((node) => node.getAttribute('type') === 'password').length, 1, 'one complete auth field');
