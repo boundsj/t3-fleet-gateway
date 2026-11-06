@@ -320,7 +320,9 @@ describe('browser approval owner boundary', () => {
     assert.equal(ownerPage.headers['referrer-policy'], 'no-referrer');
     assert.equal(ownerPage.headers['access-control-allow-origin'], undefined);
     assert.match(String(ownerPage.headers['permissions-policy']), /publickey-credentials-get=\(self\)/);
-    assert.doesNotMatch(ownerPage.body, /<script>|style=/);
+    assert.doesNotMatch(ownerPage.body, /\bstyle\s*=/i);
+    assert.equal(ownerPage.body.toLowerCase().split('<script').length - 1, 1);
+    assert.ok(ownerPage.body.includes('<script type="module" src="assets/owner.js"></script>'));
 
     const off = await start(t, { dashboard: { enabled: true, basePath: OWNER_BASE, allowedHosts: [OWNER_HOST] } });
     assert.equal((await rawRequest(off.port, { path: `${OWNER_BASE}/owner`, headers: { host: OWNER_HOST } })).status, 404);
