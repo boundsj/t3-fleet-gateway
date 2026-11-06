@@ -26,6 +26,8 @@ import { workTools } from './mcp/workTools.ts';
 import { ApprovalCodes } from './oauth/approvalCodes.ts';
 import { ClientStore } from './oauth/clients.ts';
 import { logTokenEvent, oauthRoutes } from './oauth/routes.ts';
+import { BrowserApprovals } from './oauth/browserApproval.ts';
+import { OwnerStore } from './owner/store.ts';
 import { TokenService } from './oauth/tokens.ts';
 import { MINUTE, systemClock, type Clock } from './time.ts';
 import { WebhookSender, type SenderOptions } from './webhooks/sender.ts';
@@ -41,6 +43,8 @@ export interface GatewayServices {
   logger: Logger;
   clients: ClientStore;
   approvals: ApprovalCodes;
+  /** The owner's passkeys, sessions and enrollment codes (browser approval). */
+  owner: OwnerStore;
   tokens: TokenService;
   registry: HostRegistry;
   /** Per-host T3 project and model catalogs for agents (opt-in per host). */
@@ -96,6 +100,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
     logger,
     clients: new ClientStore(db, clock),
     approvals: new ApprovalCodes(db, key, clock),
+    owner: new OwnerStore(db, key, clock),
     tokens: new TokenService(db, clock, { resource: mcpResource(config), ...config.tokens }, logTokenEvent(logger)),
     registry,
     catalog,
@@ -159,7 +164,18 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
     tools: (options.tools ?? gatewayTools)(services),
     logger,
   });
-  const router = createRouter([...oauthRoutes({ ...services, publicUrl: config.publicUrl, hosts: config.hosts }), mcp.route], logger);
+  const approvalOrigin = config.dashboard.enabled && config.dashboard.browserApproval.enabled ? config.dashboard.browserApproval.origin : undefined;
+  const browser = approvalOrigin === undefined ? undefined : new BrowserApprovals({
+    publicUrl: config.publicUrl,
+    ownerPageUrl: `${approvalOrigin}${config.dashboard.basePath === '/' ? '' : config.dashboard.basePath}/owner`,
+    clock: services.clock,
+    logger,
+    clients: services.clients,
+    tokens: services.tokens,
+    owner: services.owner,
+    hosts: config.hosts,
+  });
+  const router = createRouter([...oauthRoutes({ ...services, publicUrl: config.publicUrl, hosts: config.hosts, browser }), mcp.route], logger);
   const engine = new JobEngine({
     config,
     store: services.jobs.store,
@@ -195,6 +211,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
         management,
         jobs: services.jobs,
         available: () => ready,
+        ...(browser && approvalOrigin ? { owner: { store: services.owner, approvals: browser, origin: approvalOrigin } } : {}),
         ...(options.dashboardPort === undefined ? {} : { port: options.dashboardPort }),
         sources: {
           config, db: services.db, clock: services.clock, registry: services.registry, store: services.jobs.store, engine, startedAt,

@@ -10,7 +10,10 @@ import type { JobService } from '../jobs/service.ts';
 import { OPERATOR_CLIENT_ID } from '../jobs/store.ts';
 import { OPERATE_SCOPE, THREAD_READ_SCOPE, THREAD_CONTROL_SCOPE } from '../oauth/scopes.ts';
 import type { WebhookManagement } from '../webhooks/management.ts';
+import type { BrowserApprovals } from '../oauth/browserApproval.ts';
+import type { OwnerStore } from '../owner/store.ts';
 import type { DashboardChecks } from './checks.ts';
+import { ownerRoutes } from './owner.ts';
 import { buildSnapshot, type DashboardSources } from './snapshot.ts';
 
 /**
@@ -45,7 +48,7 @@ const SECURITY_HEADERS: Record<string, string> = {
   'referrer-policy': 'no-referrer',
   'cross-origin-resource-policy': 'same-origin',
   'cross-origin-opener-policy': 'same-origin',
-  'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+  'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), publickey-credentials-create=(self), publickey-credentials-get=(self)',
 };
 
 interface Asset {
@@ -60,6 +63,9 @@ const ASSET_TYPES: Record<string, string> = {
   'threadId.js': 'text/javascript; charset=utf-8',
   'app.css': 'text/css; charset=utf-8',
   'mark.svg': 'image/svg+xml',
+  'owner.html': 'text/html; charset=utf-8',
+  'owner.js': 'text/javascript; charset=utf-8',
+  'owner.css': 'text/css; charset=utf-8',
 };
 
 function loadAssets(): Map<string, Asset> {
@@ -92,6 +98,8 @@ export interface DashboardOptions {
   management?: WebhookManagement;
   jobs?: JobService;
   available?: () => boolean;
+  /** Owner sign-in and browser approval of OAuth requests, when `dashboard.browserApproval` is enabled. */
+  owner?: { store: OwnerStore; approvals: BrowserApprovals; origin: string };
   /** Listen on this port instead of `dashboard.listen.port`; 0 lets the OS pick one (tests and the demo). */
   port?: number;
 }
@@ -193,6 +201,17 @@ export function dashboardHandler(
       },
     },
   ];
+  if (options.owner) {
+    routes.push(
+      { path: `${base}/owner`, methods: page('owner.html', 'no-store') },
+      { path: `${base}/assets/owner.js`, methods: page('owner.js', 'no-cache') },
+      { path: `${base}/assets/owner.css`, methods: page('owner.css', 'no-cache') },
+      ...ownerRoutes({
+        base, origin: options.owner.origin, owner: options.owner.store, approvals: options.owner.approvals, clock: sources.clock, logger,
+        apiRequest, refuse, available: () => options.available?.() ?? true,
+      }),
+    );
+  }
   for (const action of ['prepare', 'confirm'] as const) {
     routes.push({ path: `${base}/api/hosts/repair/${action}`, methods: { POST: async (req, res) => {
       res.setHeader('cache-control', 'no-store');

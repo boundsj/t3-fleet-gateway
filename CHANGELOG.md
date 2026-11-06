@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Upgrading
+
+- **Migration 22, additive.** Adds empty owner passkey, session and enrollment-code tables for browser approval. Existing clients, grants, tokens and jobs are unchanged, and nothing changes until `dashboard.browserApproval` is enabled and a passkey is enrolled. Back up with ledger users stopped. Older builds refuse schema 22; rollback restores the pre-upgrade backup and loses later writes.
+
+### Added
+
+- **Browser approval with a passkey** (opt-in `dashboard.browserApproval`). The approval page links to an owner page on the dashboard listener, where the owner signs in with a passkey, reviews the agent's name, return origin and requested access, and allows or denies with the same Read/Operate and machine choices as the code form; the agent finishes with its PKCE exchange. Pending requests are opaque single-use handles held in memory for 10 minutes. New CLI: `owner enroll` (one-time enrollment code for first setup and recovery), `owner list`, `owner revoke`, `owner signout`. The approval-code form, bearer tokens, scopes, ceilings, throttles and token rules are unchanged; denying on the code form now also prevents a later approval of that same request.
+
 ## 0.3.0 (2026-10-31)
 
 ### Upgrading

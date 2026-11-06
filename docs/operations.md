@@ -38,6 +38,33 @@ For each host: reachability and T3 version (checked live), credential state (`mi
 
 3. Enter the code, choose **Read** or **Operate**, choose the machines, approve.
 
+### Approve in the browser with a passkey
+
+Optional. Instead of minting a code each time, approve connections from your own browser, signed in with a passkey. The code form keeps working beside it.
+
+1. In the config, enable the dashboard and browser approval with the exact origin your browser uses for the dashboard (its host also in `dashboard.allowedHosts`), then restart the gateway:
+
+   ```json
+   "dashboard": {
+     "enabled": true,
+     "basePath": "/fleet",
+     "allowedHosts": ["<machine>.<tailnet>.ts.net"],
+     "browserApproval": { "enabled": true, "origin": "https://<machine>.<tailnet>.ts.net" }
+   }
+   ```
+
+2. Mint a one-time enrollment code on the gateway machine and follow what it prints:
+
+   ```sh
+   t3-fleet-gateway owner enroll            # valid 15 minutes; --ttl 1m to 24h
+   ```
+
+   On the device that will hold the passkey, open the printed `…/owner#/enroll` page, enter the code and create the passkey. That browser is now signed in for 12 hours.
+
+3. From then on, when an agent opens the approval page, choose **Review in the gateway dashboard**, sign in with the passkey if asked, check the agent's name, where it returns to and the access it asks for, choose Read or Operate and the machines, and press **Allow** or **Deny**. The browser returns to the agent, which finishes signing in by itself.
+
+The link appears only once a passkey exists. Add a passkey on another device, or recover from a lost one, with another `owner enroll`. `owner list` shows passkeys and how many browsers are signed in, `owner revoke <id>` removes a passkey and signs out its browsers, and `owner signout` signs out every browser. A request is held for 10 minutes and forgotten if the gateway restarts; start the connection again from the agent then. If your device cannot reach the dashboard, use the approval code as before.
+
 **Machines.** *All machines* is a fleet-wide grant (`fleet:read`, `fleet:operate`): every configured host, including hosts you add later, exactly what every grant before v0.1.5 was. *Selected machines* grants only the ticked hosts (scopes `host:<id>:read` and `host:<id>:operate`, see [design.md](design.md#per-host-grants)): the agent's `fleet_status` lists only those hosts and their projects and standing jobs, `work_list` and `work_feed` hold only their jobs, and every job tool answers a job on another host as if it did not exist. A host added later is not included; approve the agent again to add it. The page lists every configured host by label and id. Ticking machines while *All machines* is chosen, choosing *Selected machines* with none ticked, or anything malformed is refused before the code is used, so you can correct it and approve with the same code. A refused page, including one with a wrong code, comes back with your machines and access as you chose them, so correcting the code alone never grants more. An agent that asks for host scopes itself (scope `host:<id>:…`) cannot be given more than it asked for; agents that ask for the advertised fleet scopes, as MCP SDKs do, can be given either.
 
 To change an agent's machines, approve it again from the agent (its earlier grant stays valid until revoked; revoke the client and reconnect to drop it), or for a bearer token mint a new one and revoke the old client.

@@ -11,6 +11,7 @@ fieldset{border:0;padding:0;margin:1rem 0}label{display:block;margin:.3rem 0}
 input[type=text]{font:inherit;font-family:ui-monospace,monospace;letter-spacing:.1em;padding:.4rem;width:12rem}
 button{font:inherit;padding:.45rem 1rem;margin-right:.5rem;border-radius:6px;border:1px solid #888;background:#fff}
 button[value=approve]{background:#1b1b1f;color:#fff;border-color:#1b1b1f}
+a.primary{display:inline-block;background:#1b1b1f;color:#fff;padding:.5rem 1rem;border-radius:6px;text-decoration:none;font-weight:600}
 .error{color:#a40000;font-weight:600}.muted{color:#555;font-size:.9rem}.hosts{margin-left:1.6rem}
 `;
 const STYLE_HASH = createHash('sha256').update(STYLE).digest('base64');
@@ -99,6 +100,8 @@ export function renderApprovalPage(options: {
   signature: string;
   error?: string;
   choice?: ApprovalChoice;
+  /** The owner's browser approval page for this request on the dashboard listener, when browser approval is set up. */
+  browserLink?: string;
 }): RenderedPage {
   const { request } = options;
   const requestedScopes = request.requestedScopes;
@@ -147,6 +150,9 @@ export function renderApprovalPage(options: {
 <dt>Returns to</dt><dd><code>${escapeHtml(redirectOrigin)}</code></dd>
 <dt>Requested access</dt><dd>${escapeHtml(requested)}</dd>
 </dl></div>
+${options.browserLink ? `<div class="card"><p><a class="primary" href="${escapeHtml(options.browserLink)}">Review in the gateway dashboard</a></p>
+<p class="muted">Sign in there with your passkey to allow or deny this request. The dashboard is reachable only from your own devices.</p></div>
+<p class="muted">Or approve here with a one-time code from the gateway machine (<code>t3-fleet-gateway pair</code>).</p>` : ''}
 <p class="muted">Approve only if you started this connection from your agent just now. Get a one-time code on the gateway machine with <code>t3-fleet-gateway pair</code>.</p>
 ${error}
 <form method="post" action="/oauth/authorize">${hiddenInputs}
