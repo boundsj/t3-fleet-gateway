@@ -215,3 +215,93 @@ test('owner page: without a passkey it explains setup and offers nothing to appr
   assert.equal(root.elements('button').length, 0);
   assert.deepEqual(win.prompts, []);
 });
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function navigate(win: OwnerWindow, handle: string): Promise<void> {
+  win.location.hash = `#/approve/${handle}`;
+  await Promise.all((win.listeners.get('hashchange') ?? []).map((handler) => handler()));
+}
+
+test('owner consent ignores reversed request responses and stale buttons', async (t) => {
+  const { h, browser, passkey } = await setup(t);
+  await browser.enroll(passkey, h.services.owner.mintEnrollmentCode().code);
+  const connect = async (name: string) => {
+    const client = await registerClient(h.baseUrl, { client_name: name });
+    const approval = await loadApprovalPage(authorizeUrl(h.baseUrl, standardAuthorizeParams(client, pkcePair().challenge)));
+    return browserLinkHandle(approval.html)!;
+  };
+  const a = await connect('Client A');
+  const b = await connect('Client B');
+  const win = new OwnerWindow(browser, passkey, '#/');
+  const mounted = mount(win);
+  await mounted.app.ready;
+  const original = win.fetch.bind(win);
+  const held = deferred();
+  const started = deferred();
+  win.fetch = async (path, init) => {
+    const response = await original(path, init);
+    if (path === 'api/authorizations/view' && JSON.parse(String(init?.body)).handle === a) {
+      started.resolve();
+      await held.promise;
+    }
+    return response;
+  };
+  const loadingA = navigate(win, a);
+  await started.promise;
+  await navigate(win, b);
+  assert.match(text(mounted.root), /Client B/);
+  const staleAllow = mounted.root.elements('button').find((node) => node.textContent === 'Allow')!;
+  held.resolve();
+  await loadingA;
+  assert.match(text(mounted.root), /Client B/);
+  assert.doesNotMatch(text(mounted.root), /Client A/);
+  // Even a saved event handler cannot approve after a new fragment, before its hashchange is dispatched.
+  win.location.hash = `#/approve/${a}`;
+  for (const handler of staleAllow.listeners.get('click') ?? []) await handler({});
+  assert.equal(win.requests.filter((request) => request.path === 'api/authorizations/decide').length, 0);
+  const loading = navigate(win, a);
+  assert.equal(mounted.root.elements('button').filter((node) => node.textContent === 'Allow').length, 0);
+  await loading;
+  assert.match(text(mounted.root), /Client A/);
+  await click(mounted.root, 'Allow');
+  const decision = win.requests.find((request) => request.path === 'api/authorizations/decide')!;
+  assert.equal(JSON.parse(String(decision.init?.body)).handle, a);
+});
+
+test('leaving consent during a pending decision discards its response and prevents another decision', async (t) => {
+  const { h, browser, passkey } = await setup(t);
+  await browser.enroll(passkey, h.services.owner.mintEnrollmentCode().code);
+  const client = await registerClient(h.baseUrl);
+  const connect = async () => browserLinkHandle((await loadApprovalPage(authorizeUrl(h.baseUrl,
+    standardAuthorizeParams(client, pkcePair().challenge)))).html)!;
+  const a = await connect();
+  const b = await connect();
+  const win = new OwnerWindow(browser, passkey, `#/approve/${a}`);
+  const { root, app } = mount(win);
+  await app.ready;
+  const original = win.fetch.bind(win);
+  const held = deferred();
+  const started = deferred();
+  win.fetch = async (path, init) => {
+    const response = await original(path, init);
+    if (path === 'api/authorizations/decide') { started.resolve(); await held.promise; }
+    return response;
+  };
+  const deciding = click(root, 'Allow');
+  await started.promise;
+  await navigate(win, b);
+  await click(root, 'Allow');
+  assert.equal(win.requests.filter((request) => request.path === 'api/authorizations/decide').length, 1);
+  held.resolve();
+  await deciding;
+  assert.deepEqual(win.location.assigned, []);
+  assert.doesNotMatch(text(root), /Access allowed/);
+  assert.match(text(root), /Allow this agent to connect/);
+  await click(root, 'Deny');
+  assert.equal(new URL(win.location.assigned[0]!).searchParams.get('error'), 'access_denied');
+});

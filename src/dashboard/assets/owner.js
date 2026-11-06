@@ -161,6 +161,7 @@ function approveView(h, model, actions, error) {
   const request = model.request;
   if (!request) return [h('h1', null, 'Connection request'), error ?? h('p', null, 'Loading the request…')];
   const choice = model.choice;
+  const handle = model.requestHandle;
   const radio = (name, value, label, checked, disabled) =>
     h('label', null, h('input', { type: 'radio', name, value, checked, disabled, on: { change: () => actions.choose(name, value) } }), label);
   const hostBoxes = request.hosts.map((host) => h('label', null,
@@ -183,8 +184,8 @@ function approveView(h, model, actions, error) {
       radio('machines', 'selected', 'Selected machines only', choice.machines === 'selected', false),
       h('div', { class: 'hosts' }, hostBoxes)),
     h('div', { class: 'actions' },
-      h('button', { class: 'primary', type: 'button', disabled: model.busy, on: { click: () => actions.decide('allow') } }, 'Allow'),
-      h('button', { type: 'button', disabled: model.busy, on: { click: () => actions.decide('deny') } }, 'Deny')),
+      h('button', { class: 'primary', type: 'button', disabled: model.busy, on: { click: () => actions.decide('allow', handle) } }, 'Allow'),
+      h('button', { type: 'button', disabled: model.busy, on: { click: () => actions.decide('deny', handle) } }, 'Deny')),
   ];
 }
 
@@ -194,6 +195,7 @@ export function boot(win, doc) {
   const root = doc.getElementById('owner');
   const model = { status: null, route: parseOwnerRoute(win.location.hash), request: null, choice: null, error: null, busy: false, answered: null, enrollCode: '', enrollLabel: '' };
   const draw = () => render(doc, root, model, actions);
+  let requestGeneration = 0;
 
   async function api(path, body) {
     const init = { method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin', headers: { [API_HEADER]: '1' } };
@@ -215,11 +217,18 @@ export function boot(win, doc) {
   const passkeys = () => win.navigator?.credentials;
 
   async function loadRequest() {
+    const generation = ++requestGeneration;
+    const handle = model.route.handle;
     model.request = null;
+    model.requestHandle = null;
+    model.choice = null;
+    draw();
     if (model.route.view !== 'approve' || !model.status?.signedIn) return;
-    const result = await api('authorizations/view', { handle: model.route.handle });
+    const result = await api('authorizations/view', { handle });
+    if (generation !== requestGeneration || parseOwnerRoute(win.location.hash).handle !== handle) return;
     if (!result.ok) return fail(result);
     model.request = result.data;
+    model.requestHandle = handle;
     const hosts = result.data.hosts.filter((host) => host.selected).map((host) => host.id);
     model.choice = { access: result.data.access, machines: result.data.machines, hosts };
   }
@@ -315,30 +324,41 @@ export function boot(win, doc) {
       else model.status.signedIn = false;
       draw();
     },
-    async decide(decision) {
+    async decide(decision, handle) {
+      // Consent belongs to the request actually displayed, including when a hashchange event is still queued.
+      if (model.busy || !model.request || handle !== model.requestHandle || handle !== model.route.handle ||
+          handle !== parseOwnerRoute(win.location.hash).handle) return;
+      const request = model.request;
+      const generation = requestGeneration;
+      const choice = { ...model.choice, hosts: [...model.choice.hosts] };
       model.error = null;
       model.busy = true;
       draw();
-      const choice = model.choice;
-      const body = decision === 'deny' ? { handle: model.route.handle, decision }
-        : { handle: model.route.handle, decision, access: choice.access, hostsMode: choice.machines, hosts: choice.machines === 'selected' ? choice.hosts : [] };
-      const result = await api('authorizations/decide', body);
-      model.busy = false;
-      if (!result.ok) {
-        fail(result);
-        if (result.data.error === 'gone') model.request = null;
+      try {
+        const body = decision === 'deny' ? { handle, decision }
+          : { handle, decision, access: choice.access, hostsMode: choice.machines, hosts: choice.machines === 'selected' ? choice.hosts : [] };
+        const result = await api('authorizations/decide', body);
+        // A response for a page the owner left must never change consent or navigate the current page.
+        if (generation !== requestGeneration || handle !== parseOwnerRoute(win.location.hash).handle) return;
+        if (!result.ok) {
+          fail(result);
+          if (result.data.error === 'gone') model.request = null;
+          return;
+        }
+        const { responseUrl, returnOrigin, approved } = result.data;
+        if (!safeReturn(responseUrl, returnOrigin) || returnOrigin !== request.returnOrigin) {
+          model.error = 'The gateway answered with an unexpected return address. Start the connection again from your agent.';
+          return;
+        }
+        model.answered = { approved: approved === true, returnOrigin };
         draw();
-        return;
-      }
-      const { responseUrl, returnOrigin, approved } = result.data;
-      if (!safeReturn(responseUrl, returnOrigin) || returnOrigin !== model.request.returnOrigin) {
-        model.error = 'The gateway answered with an unexpected return address. Start the connection again from your agent.';
+        win.location.assign(responseUrl);
+      } catch {
+        if (generation === requestGeneration) model.error = 'The answer could not be confirmed. Start the connection again from your agent.';
+      } finally {
+        model.busy = false;
         draw();
-        return;
       }
-      model.answered = { approved: approved === true, returnOrigin };
-      draw();
-      win.location.assign(responseUrl);
     },
   };
 

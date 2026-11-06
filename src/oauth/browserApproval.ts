@@ -143,7 +143,7 @@ export class BrowserApprovals {
    * available or the store is full (the approval-code form still works). A client's oldest request gives way to its sixth.
    */
   offer(request: AuthorizationRequest, signature: string, issuedAt: number): string | undefined {
-    if (!this.available()) return undefined;
+    if (!this.available() || this.approved.lookup(signature)) return undefined;
     this.#prune();
     const mine = [...this.#pending].filter(([, entry]) => entry.request.client.id === request.client.id);
     if (mine.length >= MAX_PENDING_PER_CLIENT) this.#pending.delete(mine[0]![0]);
@@ -162,7 +162,7 @@ export class BrowserApprovals {
     this.#prune();
     const key = sha256Hex(handle);
     const entry = this.#pending.get(key);
-    if (!entry || !this.#options.clients.getActive(entry.request.client.id)) return undefined;
+    if (!entry || this.approved.lookup(entry.signature) || !this.#options.clients.getActive(entry.request.client.id)) return undefined;
     return [key, entry];
   }
 
@@ -198,12 +198,12 @@ export class BrowserApprovals {
   decide(handle: unknown, choice: OwnerDecision, passkeyId: string): DecisionResult {
     const found = this.#lookup(handle);
     if (!found) return { kind: 'gone' };
-    const [key, { request, signature }] = found;
+    const [, { request, signature }] = found;
     const { publicUrl, logger } = this.#options;
     const clientId = request.client.id;
     const returnOrigin = new URL(request.redirectUri).origin;
     if (choice.decision === 'deny') {
-      this.#pending.delete(key);
+      this.settle(signature);
       this.approved.rememberDenied(signature);
       logger.info('oauth.browser_approval_denied', { clientId, passkeyId });
       const responseUrl = authorizationRedirect(request.redirectUri, { error: 'access_denied', state: request.state, iss: publicUrl });
@@ -214,7 +214,7 @@ export class BrowserApprovals {
     if (picked === null) return { kind: 'refused', message: 'Tick machines from the list, then approve.' };
     const grant = chooseGrant(request, choice.access, modes, picked, this.#options.hosts);
     if ('error' in grant) return { kind: 'refused', message: grant.error };
-    this.#pending.delete(key);
+    this.settle(signature);
     const issuedAt = this.#options.clock();
     const code = this.#options.tokens.issueAuthorizationCode({
       clientId,

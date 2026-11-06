@@ -199,6 +199,25 @@ describe('browser approval end to end', () => {
     assert.equal((await h.browser.call('api/authorizations/view', { handle: second.handle })).status, 404);
   });
 
+  test('sibling handles share settlement and answered signatures cannot be offered again', async (t) => {
+    const h = await start(t);
+    await enrolledOwner(h);
+    const clientId = await registerClient(h.baseUrl);
+    for (const decision of ['allow', 'deny']) {
+      const url = authorizeUrl(h.baseUrl, standardAuthorizeParams(clientId, pkcePair().challenge));
+      // The injected clock does not advance: these pages have identical signed requests, but distinct handles.
+      const first = await loadApprovalPage(url);
+      const second = await loadApprovalPage(url);
+      const handles = [browserLinkHandle(first.html)!, browserLinkHandle(second.html)!];
+      assert.notEqual(handles[0], handles[1]);
+      const choice = { access: 'read', hostsMode: 'all', hosts: [] };
+      assert.equal((await h.browser.call('api/authorizations/decide', { handle: handles[0], decision, ...choice })).status, 200);
+      assert.equal((await h.browser.call('api/authorizations/view', { handle: handles[1] })).status, 404);
+      assert.equal((await h.browser.call('api/authorizations/decide', { handle: handles[1], decision: 'allow', ...choice })).status, 404);
+      assert.equal(browserLinkHandle((await loadApprovalPage(url)).html), undefined);
+    }
+  });
+
   test('pending requests expire with the form, are bounded per client and are forgotten on restart', async (t) => {
     const h = await start(t);
     const passkey = await enrolledOwner(h);
