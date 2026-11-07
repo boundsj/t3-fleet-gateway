@@ -32,13 +32,19 @@ function readPage(client: T3Client, threadId: string, afterPosition: number | nu
 export async function readActivity(client: T3Client, threadId: string, afterPosition: number | null): Promise<ActivityRead> {
   const items: ThreadItem[] = [];
   let position = afterPosition;
+  let complete = false;
+  let threadUpdatedAt: string | undefined;
+  let threadSettled: boolean | undefined;
   for (let page = 0; page < MAX_ACTIVITY_PAGES; page++) {
     const read = await readPage(client, threadId, position);
     items.push(...read.items);
+    complete = !read.hasMore;
+    threadUpdatedAt = read.thread.updatedAt;
+    threadSettled = read.thread.settled;
     position = read.nextPosition ?? read.items.at(-1)?.position ?? position;
     if (!read.hasMore || read.nextPosition === null) break;
   }
-  return { items, nextPosition: position };
+  return { items, nextPosition: position, complete, threadUpdatedAt, threadSettled };
 }
 
 /**

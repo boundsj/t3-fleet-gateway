@@ -1130,6 +1130,8 @@ export class JobService {
       if (!key) this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
       throw rootBusy(job);
     }
+    this.store.wakeMonitoring(job.id);
+    this.wake();
     let sent;
     let sendIdentity: string | undefined;
     let sendGuardRejected = false;
@@ -1220,6 +1222,8 @@ export class JobService {
     // An answer starts the worker again: an idle root job takes its folder back first (see continue).
     const attempt = job.state === 'idle' ? this.store.reserveRoot(job.id, `respond:${input.requestId}`) : ({ kind: 'not_needed' } as const);
     if (attempt.kind === 'busy') throw rootBusy(job);
+    this.store.wakeMonitoring(job.id);
+    this.wake();
     try {
       await client.respondToPendingRequest(job.threadId, input.requestId, input.answers);
     } catch (error) {

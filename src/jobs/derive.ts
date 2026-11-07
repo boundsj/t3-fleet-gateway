@@ -92,6 +92,10 @@ export function trackDelegated(
  * were not among the items (null: T3 no longer has the item).
  */
 export interface ActivityRead {
+  /** True only after reaching the end of the activity view. */
+  complete?: boolean;
+  threadUpdatedAt?: string;
+  threadSettled?: boolean;
   items: readonly ThreadItem[];
   nextPosition: number | null;
   refreshed?: ReadonlyMap<string, ThreadItem | null>;

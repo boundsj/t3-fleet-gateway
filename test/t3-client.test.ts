@@ -27,6 +27,18 @@ function transportFailure(code: string, delivery: 'not_delivered' | 'unknown') {
   return (error: unknown) => error instanceof T3TransportError && error.code === code && error.delivery === delivery;
 }
 
+test('shared monitoring retains only bounded lifecycle metadata from all projects', async (t) => {
+  const { fake, client } = await setup(t);
+  fake.launchDirect({ projectId: 'project-1', title: 'Synthetic title not retained', message: 'Synthetic message not retained' });
+  const other = fake.launchDirect({ projectId: 'project-2', title: 'Synthetic other project', message: 'Synthetic' });
+  fake.threads.get(other.threadId)!.settled = true;
+  const page = await client.monitoringThreads(0);
+  assert.equal(page.projectId, null);
+  assert.equal(page.threads.length, 2);
+  assert.equal(page.threads.find((thread) => thread.threadId === other.threadId)?.settled, true);
+  for (const thread of page.threads) assert.deepEqual(Object.keys(thread).sort(), ['latestRunId', 'settled', 'status', 'threadId', 'updatedAt']);
+});
+
 const LAUNCH = {
   projectId: 'project-1',
   title: 'Synthetic job [job:abc123]',

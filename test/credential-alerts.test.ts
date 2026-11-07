@@ -21,6 +21,7 @@ import { WebhookStore } from '../src/webhooks/store.ts';
 import { startFakeT3 } from './helpers/fakeT3.ts';
 import { startTestGateway } from './helpers/gateway.ts';
 import { testClock } from './helpers/clock.ts';
+import { rowsWithoutMonitoring } from './helpers/migrations.ts';
 import { tempDir } from './helpers/tmp.ts';
 
 async function fixture(t: TestContext, extra: Record<string, unknown> = {}) {
@@ -246,7 +247,7 @@ test('migration 19 preserves populated version 18 credentials, routes, jobs and 
     const tables = ['host_credentials', 'host_renewals', 'jobs', 'job_events', 'webhook_subscriptions', 'webhook_deliveries', 'webhook_attempts'];
     const before = tables.map((table) => db.prepare(`SELECT * FROM ${table}`).all());
     migrate(db);
-    assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table}`).all()), before);
+    assert.deepEqual(tables.map((table) => rowsWithoutMonitoring(db, table)), before);
     assert.deepEqual(db.prepare('SELECT * FROM credential_alerts').all(), []);
     assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
     assert.throws(() => migrate(db, MIGRATIONS.slice(0, 18)), /newer than this build supports/);

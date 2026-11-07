@@ -525,12 +525,12 @@ describe('browser approval storage', () => {
     old.close();
     const db = openDatabase(path);
     t.after(() => db.close());
-    assert.equal(schemaVersion(db), 22);
+    assert.equal(schemaVersion(db), 23);
     assert.deepEqual(db.prepare('SELECT * FROM oauth_clients ORDER BY id').all(), before);
     assert.ok(client.id);
     for (const table of ['owner_passkeys', 'owner_sessions', 'owner_enrollment_codes', 'owner_enrollment_failures']) {
       assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n, 0);
     }
-    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 21)), /schema version 22 is newer than this build supports \(21\)/);
+    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 21)), /schema version 23 is newer than this build supports \(21\)/);
   });
 });

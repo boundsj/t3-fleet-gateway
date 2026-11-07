@@ -14,6 +14,13 @@ import { isTerminal, RUNNING_STATES, TERMINAL_STATES, type JobState } from './st
 import type { ResolvedWorkspace } from './workspace.ts';
 
 export interface Job {
+  /** A quiet, fully caught-up T3 settlement. Null means detailed monitoring remains necessary. */
+  monitoringSettledAt: number | null;
+  /** T3's updatedAt at that observation; metadata changes require a fresh detailed read. */
+  monitoringUpdatedAt: string | null;
+  monitoringCheckedAt: number | null;
+  /** Advances before resuming work, so an older observation cannot suspend it. */
+  monitoringGeneration: number;
   /**
    * The tracked PRs (up to MAX_TRACKED_PULL_REQUESTS, in key order), null when unknown. This is what events compare, not what
    * anyone sees: show or send it only through `displayPullRequests` (at most MAX_PULL_REQUESTS).
@@ -181,10 +188,16 @@ export type JobChanges = Partial<
     | 'probeRetryAt'
     | 'pullRequests'
     | 'pullRequestsCheckedAt'
+    | 'monitoringSettledAt'
+    | 'monitoringUpdatedAt'
+    | 'monitoringCheckedAt'
   >
 >;
 
 const COLUMNS: Record<keyof JobChanges, string> = {
+  monitoringSettledAt: 'monitoring_settled_at',
+  monitoringUpdatedAt: 'monitoring_updated_at',
+  monitoringCheckedAt: 'monitoring_checked_at',
   t3ProjectId: 't3_project_id',
   threadId: 't3_thread_id',
   threadTitle: 't3_thread_title',
@@ -214,6 +227,10 @@ const COLUMNS: Record<keyof JobChanges, string> = {
 };
 
 interface JobRow {
+  monitoring_settled_at: number | null;
+  monitoring_updated_at: string | null;
+  monitoring_checked_at: number | null;
+  monitoring_generation: number;
   pull_requests: string | null;
   pull_requests_checked_at: number | null;
   id: string;
@@ -353,6 +370,10 @@ function parseStoredPullRequests(text: string | null): PullRequest[] | null {
 function toJob(row: JobRow): Job {
   const stored = readLaunchSpec(row.launch_spec);
   return {
+    monitoringSettledAt: row.monitoring_settled_at,
+    monitoringUpdatedAt: row.monitoring_updated_at,
+    monitoringCheckedAt: row.monitoring_checked_at,
+    monitoringGeneration: row.monitoring_generation,
     pullRequests: parseStoredPullRequests(row.pull_requests),
     pullRequestsCheckedAt: row.pull_requests_checked_at,
     id: row.id,
@@ -559,7 +580,7 @@ export class JobStore {
   }
 
   /** Jobs newest first, optionally filtered. `clientId` and `hostIds`: see JobScope. */
-  list(filter: { projectAlias?: string; states?: readonly JobState[]; limit: number } & JobScope): Job[] {
+  list(filter: { projectAlias?: string; states?: readonly JobState[]; monitoring?: 'open' | 'history'; limit: number } & JobScope): Job[] {
     const where: string[] = ['1'];
     const params: (string | number)[] = [];
     if (filter.projectAlias !== undefined) {
@@ -570,6 +591,8 @@ export class JobStore {
       where.push(`state IN (${filter.states.map(() => '?').join(', ')})`);
       params.push(...filter.states);
     }
+    if (filter.monitoring === 'open') where.push('monitoring_settled_at IS NULL');
+    if (filter.monitoring === 'history') where.push("(monitoring_settled_at IS NOT NULL OR state IN ('cancelled', 'failed', 'released'))");
     const scope = scopeClause(filter);
     const rows = this.#db
       .prepare(`SELECT * FROM jobs WHERE ${where.join(' AND ')} ${scope.sql} ORDER BY created_at DESC, rowid DESC LIMIT ?`)
@@ -942,6 +965,25 @@ export class JobStore {
     return row?.type === 'thread_settled';
   }
 
+  /** Wake before a mutation, including one whose response may be lost. Never changes the job's execution state. */
+  wakeMonitoring(id: string): void {
+    this.#db.prepare(`UPDATE jobs SET monitoring_settled_at = NULL, monitoring_updated_at = NULL,
+      monitoring_checked_at = NULL, monitoring_generation = monitoring_generation + 1 WHERE id = ?`).run(id);
+  }
+
+  /** An uncertain/in-flight send must remain watched even if a concurrent read still sees the old settled thread. */
+  hasPendingSend(id: string): boolean {
+    return this.#db.prepare(`SELECT 1 FROM idempotency_keys WHERE job_id = ? AND tool = 'work_continue'
+      AND (response IS NULL OR json_extract(response, '$.sendAttempts') IS NOT NULL
+        OR json_extract(response, '$.attachmentOutcome') = 'unknown') LIMIT 1`).get(id) !== undefined;
+  }
+
+  /** A summary only refreshes an already confirmed observation, guarded against concurrent sends and watchers. */
+  confirmMonitoring(expected: Job, checkedAt: number): void {
+    this.transition(expected.id, { from: [expected.state], to: expected.state, expected,
+      changes: { monitoringCheckedAt: checkedAt } });
+  }
+
   /** Claim settlement once across concurrent requests/processes. */
   claimSettlement(clientId: string, requestId: string, key: Omit<IdempotencyKey, 'response'>): boolean {
     return transaction(this.#db, () => {
@@ -1027,9 +1069,10 @@ export class JobStore {
   }
 
   /** How many jobs are in each state, per host. */
-  stateCounts(): { hostId: string; state: JobState; standing: boolean; count: number }[] {
+  stateCounts(excludeSettled = false): { hostId: string; state: JobState; standing: boolean; count: number }[] {
     const rows = this.#db
-      .prepare('SELECT host_id, state, standing, COUNT(*) AS n FROM jobs GROUP BY host_id, state, standing ORDER BY host_id, state, standing')
+      .prepare(`SELECT host_id, state, standing, COUNT(*) AS n FROM jobs ${excludeSettled ? 'WHERE monitoring_settled_at IS NULL' : ''}
+        GROUP BY host_id, state, standing ORDER BY host_id, state, standing`)
       .all() as { host_id: string; state: JobState; standing: number; n: number }[];
     return rows.map((row) => ({ hostId: row.host_id, state: row.state, standing: row.standing === 1, count: row.n }));
   }
@@ -1059,7 +1102,7 @@ export class JobStore {
         `SELECT * FROM jobs
           WHERE (state IN ('needs_input', 'unknown') OR (state IN ('idle', 'failed') AND state_changed_at >= ?)
             OR (state = 'idle' AND delegated_ended_at >= ?)) ${filter.sql}
-          ${excludeSettled ? `AND (SELECT type FROM job_events WHERE job_id = jobs.id
+          ${excludeSettled ? `AND monitoring_settled_at IS NULL AND (SELECT type FROM job_events WHERE job_id = jobs.id
             AND type NOT IN ('pull_request_opened', 'pull_request_merged') ORDER BY id DESC LIMIT 1) IS NOT 'thread_settled'` : ''}
           ORDER BY MAX(state_changed_at, COALESCE(delegated_ended_at, 0)) DESC, rowid DESC LIMIT ?`,
       )
@@ -1148,10 +1191,13 @@ export class JobStore {
     const sets: string[] = [];
     const params: (string | number | null)[] = [];
     let effective = changes;
+    if ((state !== undefined && state !== 'idle') || changes.delegatedWork?.length || changes.delegatedUntracked) {
+      effective = { ...effective, monitoringSettledAt: null, monitoringUpdatedAt: null };
+    }
     if (state !== undefined && state !== current.state) {
       sets.push('state = ?', 'state_changed_at = ?', 'finished_at = ?');
       params.push(state, now, isTerminal(state) ? now : null);
-      effective = { ...changes, delegatedEndedAt: null };
+      effective = { ...effective, delegatedEndedAt: null };
       if (isTerminal(state)) effective = { ...effective, delegatedWork: [], delegatedUntracked: 0, delegatedUntrackedRunId: null };
     }
     for (const [key, value] of Object.entries(effective) as [keyof JobChanges, JobChanges[keyof JobChanges]][]) {
@@ -1183,7 +1229,7 @@ export class JobStore {
     }
     if (sets.length === 0) return false;
     // A successful poll of unchanged PRs is freshness, not new job activity.
-    if (sets.some((set) => set !== 'pull_requests_checked_at = ?')) {
+    if (sets.some((set) => !['pull_requests_checked_at = ?', 'monitoring_settled_at = ?', 'monitoring_updated_at = ?', 'monitoring_checked_at = ?'].includes(set))) {
       sets.push('updated_at = ?');
       params.push(now);
     }

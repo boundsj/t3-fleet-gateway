@@ -535,6 +535,15 @@ CREATE TABLE owner_enrollment_failures (
   failed_at INTEGER NOT NULL
 ) STRICT;`,
   },
+  {
+    version: 23,
+    name: 'settled job monitoring',
+    sql: `ALTER TABLE jobs ADD COLUMN monitoring_settled_at INTEGER;
+ALTER TABLE jobs ADD COLUMN monitoring_updated_at TEXT;
+ALTER TABLE jobs ADD COLUMN monitoring_checked_at INTEGER;
+ALTER TABLE jobs ADD COLUMN monitoring_generation INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX jobs_monitoring ON jobs(host_id, monitoring_settled_at, monitoring_checked_at);`,
+  },
 ];
 
 /**

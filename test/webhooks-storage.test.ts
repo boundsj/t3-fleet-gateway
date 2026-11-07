@@ -12,7 +12,7 @@ import { webhooksSchema } from '../src/webhooks/config.ts';
 import { MAX_ATTEMPTS_PER_SUBSCRIPTION, MAX_PAYLOAD_BYTES, MAX_PENDING_PER_SUBSCRIPTION, MAX_SUBSCRIPTIONS,
   WebhookStore, type DashboardTest } from '../src/webhooks/store.ts';
 import { testClock } from './helpers/clock.ts';
-import { rowsWithoutV12 } from './helpers/migrations.ts';
+import { rowsWithoutMonitoring, rowsWithoutV12 } from './helpers/migrations.ts';
 import { tempDir } from './helpers/tmp.ts';
 
 function fixture(t: TestContext) {
@@ -430,7 +430,7 @@ test('migration 15 preserves populated v14 subscriptions, secrets, revisions, qu
   const before = tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
   migrate(db);
   assert.equal(schemaVersion(db), SCHEMA_VERSION);
-  assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
+  assert.deepEqual(tables.map((table) => rowsWithoutMonitoring(db, table)), before);
   assert.deepEqual(webhooks.route(connection.id, connection.revision), dashboardRoute);
   assert.throws(() => migrate(db, MIGRATIONS.slice(0, 14)), /schema version \d+ is newer/);
   assert.equal(webhooks.claim(1, 30_000).length, 1, 'pending delivery still dispatches');

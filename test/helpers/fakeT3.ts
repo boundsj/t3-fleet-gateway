@@ -184,6 +184,7 @@ const readInput = z.strictObject({
   maxCharsPerItem: nullable(z.int().min(1).max(50000)),
 });
 const listInput = z.strictObject({
+  allProjects: nullable(z.boolean()),
   projectId: nullable(z.string()),
   statuses: nullable(z.array(z.enum(THREAD_STATUSES)).max(10)),
   titleContains: nullable(z.string()),
@@ -824,11 +825,11 @@ export class FakeT3 {
     tool('t3_thread_list', listInput, (input) => {
       const overridden = this.threadListPages.get(input.cursor ?? 0);
       if (overridden) return overridden;
-      const projectId = this.#target(input.projectId);
+      const projectId = input.allProjects ? null : this.#target(input.projectId);
       const matching = [...this.threads.values()]
         .filter(
           (thread) =>
-            thread.projectId === projectId && !thread.archived && !thread.sideChat &&
+            (projectId === null || thread.projectId === projectId) && !thread.archived && !thread.sideChat &&
             (input.includeSubagents !== false || !this.#delegations.has(thread.threadId)) &&
             (input.settled == null || thread.settled === input.settled) &&
             (!input.titleContains || thread.title.includes(input.titleContains)),
