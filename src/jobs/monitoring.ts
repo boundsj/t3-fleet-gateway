@@ -17,6 +17,7 @@ interface Scan {
   cursor: number;
   pages: number;
   observations: Map<string, Observation>;
+  fallbackAttempts: Map<string, number>;
 }
 
 /**
@@ -38,10 +39,12 @@ export class SettledJobMonitor {
     const known = new Set(settled.map((job) => job.threadId!));
     let scan = this.#scans.get(hostId);
     if (!scan) {
-      scan = { nextAt: 0, cursor: 0, pages: 0, observations: new Map() };
+      scan = { nextAt: 0, cursor: 0, pages: 0, observations: new Map(), fallbackAttempts: new Map() };
       this.#scans.set(hostId, scan);
     }
     for (const id of scan.observations.keys()) if (!known.has(id)) scan.observations.delete(id);
+    const ids = new Set(settled.map((job) => job.id));
+    for (const id of scan.fallbackAttempts.keys()) if (!ids.has(id)) scan.fallbackAttempts.delete(id);
     if (this.#clock() >= scan.nextAt) {
       try {
         for (let page = 0; page < PAGES_PER_TICK; page++) {
@@ -62,18 +65,22 @@ export class SettledJobMonitor {
       }
     }
     let fallbacks = FALLBACKS_PER_TICK;
-    settled.sort((a, b) => (a.monitoringCheckedAt ?? 0) - (b.monitoringCheckedAt ?? 0));
+    const lastChecked = (job: Job) => Math.max(job.monitoringCheckedAt ?? 0, scan.fallbackAttempts.get(job.id) ?? 0);
+    settled.sort((a, b) => lastChecked(a) - lastChecked(b));
     for (const original of settled) {
+      const observation = scan.observations.get(original.threadId!);
+      const fresh = observation && observation.at > (original.monitoringCheckedAt ?? -Infinity);
+      const fallback = fallbacks > 0 && this.#clock() - lastChecked(original) >= FALLBACK_INTERVAL;
+      if (!fresh && !fallback) continue;
       const job = this.#store.get(original.id);
       if (!job || job.monitoringGeneration !== original.monitoringGeneration || job.monitoringSettledAt === null || job.state !== 'idle') continue;
-      const observation = scan.observations.get(job.threadId!);
       if (observation && observation.at > (job.monitoringCheckedAt ?? -Infinity)) {
         if (unchanged(job, observation.thread)) this.#store.confirmMonitoring(job, observation.at);
         else { this.#store.wakeMonitoring(job.id); wake.add(job.id); }
-      } else if (fallbacks > 0 && this.#clock() - (job.monitoringCheckedAt ?? 0) >= FALLBACK_INTERVAL) {
+      } else if (fallback && this.#clock() - lastChecked(job) >= FALLBACK_INTERVAL) {
         fallbacks--;
-        // One bounded full observation also catches missing threads and drains any new final turn.
-        this.#store.wakeMonitoring(job.id);
+        scan.fallbackAttempts.set(job.id, this.#clock());
+        // Keep confirmed history until a successful observation changes it; a host outage isn't reopened work.
         wake.add(job.id);
       }
     }

@@ -201,7 +201,10 @@ export const monitoringThreadSchema = z.object({
 export type MonitoringThread = z.infer<typeof monitoringThreadSchema>;
 export const monitoringPageSchema = z.object({
   projectId: z.null(),
-  threads: z.array(monitoringThreadSchema).max(100),
+  threads: z.array(z.unknown()).max(100).transform((rows) => rows.flatMap((row) => {
+    const parsed = monitoringThreadSchema.safeParse(row);
+    return parsed.success ? [parsed.data] : [];
+  })),
   nextCursor: z.number().int().nonnegative().nullable(),
   total: z.number().int().nonnegative(),
 });

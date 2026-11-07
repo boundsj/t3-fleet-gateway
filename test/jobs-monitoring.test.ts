@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import { startJob, startJobHarness } from './helpers/jobs.ts';
-import { MINUTE } from '../src/time.ts';
+import { startJob, startJobHarness, type JobHarnessOptions } from './helpers/jobs.ts';
+import { HOUR, MINUTE } from '../src/time.ts';
 import { buildSnapshot } from '../src/dashboard/snapshot.ts';
 import { JobEngine } from '../src/jobs/engine.ts';
 
-async function settledJob(t: TestContext) {
-  const h = await startJobHarness(t);
+async function settledJob(t: TestContext, options: JobHarnessOptions = {}) {
+  const h = await startJobHarness(t, options);
   const started = await startJob(h.agent);
   await h.tick();
   const thread = h.fake.threadForJob(started.jobId);
@@ -279,4 +279,128 @@ test('ordinary open work is observed before a slow shared history scan', async (
   assert.equal(h.store.require(started.jobId).latestMessageExcerpt, 'Synthetic open reply');
   h.fake.releaseHeld();
   await tick;
+});
+
+test('a running engine lets a held gateway send record followup before observing the new run', async (t) => {
+  const h = await settledJob(t, { intervalMs: HOUR });
+  const service = h.gw.services.jobs;
+  const wake = service.wake;
+  let wakes = 0;
+  service.wake = () => { wakes++; wake(); };
+  const prior = Math.max(...h.store.recentEvents(h.job().id, 100).map((event) => event.id));
+  h.fake.holdResponses.add('t3_thread_send');
+  const send = h.agent.call('work_continue', { jobId: h.job().id, message: 'Synthetic held followup', requestId: 'held-followup' });
+  await h.fake.whenHeld('t3_thread_send');
+  assert.equal(wakes, 0, 'no tick is requested until the outcome is recorded');
+  h.fake.reads.length = 0;
+  await h.tickAfter(MINUTE); // Also cover an ordinary timer tick while the response is pending.
+  assert.equal(h.fake.reads.length, 0);
+  assert.equal(h.job().state, 'idle');
+  h.fake.releaseHeld();
+  await send;
+  await h.tick();
+  assert.equal(wakes, 1);
+  assert.equal(h.store.monitoringResumeInFlight(h.job().id), false);
+  const events = h.store.recentEvents(h.job().id, 100).filter((event) => event.id > prior && event.toState === 'running');
+  assert.deepEqual(events.map((event) => [event.type, event.detail.reason]), [['state_changed', 'followup']]);
+  const turn = h.gw.services.db.prepare('SELECT client_id FROM job_turns WHERE job_id = ? AND run_id = ?')
+    .get(h.job().id, h.job().lastRunId);
+  assert.equal(turn?.client_id, h.agent.clientId);
+});
+
+test('overlapping sends keep the watcher deferred until every response has been recorded', async (t) => {
+  const h = await settledJob(t);
+  h.fake.holdResponses.add('t3_thread_send');
+  const first = h.agent.call('work_continue', { jobId: h.job().id, message: 'Synthetic first', requestId: 'first' });
+  await h.fake.whenHeld('t3_thread_send');
+  const second = h.agent.call('work_continue', { jobId: h.job().id, message: 'Synthetic second', requestId: 'second' });
+  await h.fake.whenHeld('t3_thread_send', 2);
+  h.fake.releaseHeld('first');
+  await first;
+  assert.equal(h.store.monitoringResumeInFlight(h.job().id), true);
+  h.fake.reads.length = 0;
+  await h.tickAfter(MINUTE);
+  assert.equal(h.fake.reads.length, 0);
+  h.fake.releaseHeld();
+  await second;
+  assert.equal(h.store.monitoringResumeInFlight(h.job().id), false);
+});
+
+test('a held question answer records input_answered before the watcher sees its resumed run', async (t) => {
+  const h = await settledJob(t);
+  h.fake.userTurn(h.thread.threadId, 'Synthetic question turn');
+  const requestId = h.fake.askQuestion(h.thread.threadId, [{ id: 'q', header: 'Choice', question: 'Pick?', options: [] }]);
+  await h.tickAfter(MINUTE);
+  assert.equal(h.job().state, 'needs_input');
+  h.fake.holdResponses.add('t3_pending_request_respond');
+  const answer = h.agent.call('work_respond', { jobId: h.job().id, requestId, answers: { q: 'Synthetic answer' } });
+  await h.fake.whenHeld('t3_pending_request_respond');
+  await h.tick();
+  assert.equal(h.job().state, 'needs_input');
+  h.fake.releaseHeld();
+  await answer;
+  const transition = h.store.recentEvents(h.job().id, 100).find((event) => event.type === 'state_changed' && event.fromState === 'needs_input');
+  assert.equal(transition?.detail.reason, 'input_answered');
+  assert.equal(h.store.monitoringResumeInFlight(h.job().id), false);
+});
+
+test('uncertain sends age out without removing retry evidence, and a retry restarts the grace period', async (t) => {
+  const h = await settledJob(t);
+  const input = { jobId: h.job().id, message: 'Synthetic uncertain followup', requestId: 'age-out' };
+  h.fake.dropResponseOnce.add('t3_thread_send');
+  await h.agent.callError('work_continue', input);
+  h.fake.finishTurn(h.thread.threadId, 'Synthetic delivered result');
+  h.thread.settled = true;
+  await h.tickAfter(MINUTE);
+  assert.equal(h.job().monitoringSettledAt, null);
+  await h.tickAfter(10 * MINUTE);
+  assert.notEqual(h.job().monitoringSettledAt, null);
+  assert.notEqual(h.store.idempotencyKey(h.agent.clientId, 'work_continue', input.requestId)?.response, null);
+  h.fake.dropResponseOnce.add('t3_thread_send');
+  await h.agent.callError('work_continue', input);
+  await h.tickAfter(MINUTE);
+  assert.equal(h.store.hasPendingSend(h.job().id), true, 'latest attempt, not the original request creation time');
+  assert.equal(h.job().monitoringSettledAt, null);
+  await h.tickAfter(10 * MINUTE);
+  assert.notEqual(h.job().monitoringSettledAt, null);
+  h.fake.userTurn(h.thread.threadId, 'Synthetic later turn');
+  await h.tickAfter(MINUTE);
+  assert.equal(h.job().state, 'running');
+});
+
+test('a crashed unsent claim does not keep settled history open permanently', async (t) => {
+  const h = await settledJob(t);
+  h.store.claimIdempotencyKey(h.agent.clientId, 'work_continue', 'crashed-claim', { jobId: h.job().id, inputHash: 'synthetic' });
+  h.store.wakeMonitoring(h.job().id);
+  await h.tickAfter(MINUTE);
+  assert.equal(h.job().monitoringSettledAt, null);
+  await h.tickAfter(10 * MINUTE);
+  assert.notEqual(h.job().monitoringSettledAt, null);
+  assert.equal(h.store.idempotencyKey(h.agent.clientId, 'work_continue', 'crashed-claim')?.response, null);
+});
+
+test('an unsuccessful fallback preserves history instead of inventing reopened work', async (t) => {
+  const h = await settledJob(t);
+  h.thread.sideChat = true; // Omitted from list; direct reads still address the recorded thread.
+  await h.fake.stop();
+  await h.tickAfter(16 * MINUTE);
+  assert.notEqual(h.job().monitoringSettledAt, null);
+  assert.equal(h.store.list({ states: ['idle'], monitoring: 'open', limit: 100 }).length, 0);
+  assert.equal(h.store.list({ monitoring: 'history', limit: 100 }).length, 1);
+  await h.fake.start();
+  h.fake.userTurn(h.thread.threadId, 'Synthetic recovered host turn');
+  await h.tickAfter(16 * MINUTE);
+  assert.equal(h.job().state, 'running');
+});
+
+test('an invalid summary row does not hide a valid changed thread or raise a host alarm', async (t) => {
+  const h = await settledJob(t);
+  h.fake.userTurn(h.thread.threadId, 'Synthetic reopened turn');
+  h.fake.threadListPages.set(0, { projectId: null, total: 2, nextCursor: null, threads: [
+    { threadId: 'unreadable-summary' },
+    { threadId: h.thread.threadId, latestRunId: h.thread.runs.at(-1)!.runId, settled: false, status: 'running', updatedAt: h.thread.updatedAt },
+  ] });
+  await h.tickAfter(MINUTE);
+  assert.equal(h.job().state, 'running');
+  assert.equal(h.gw.services.registry.signals('main').snapshot().some((s) => s.kind === 't3_thread_list' && s.problem), false);
 });

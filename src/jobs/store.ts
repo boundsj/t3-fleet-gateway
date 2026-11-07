@@ -5,7 +5,7 @@ import { sha256Hex } from '../crypto.ts';
 import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
 import type { Logger } from '../log.ts';
-import type { Clock } from '../time.ts';
+import { MINUTE, type Clock } from '../time.ts';
 import { WebhookStore } from '../webhooks/store.ts';
 import { readPullRequests, type PullRequest } from './pullRequests.ts';
 import type { DelegatedTask } from './derive.ts';
@@ -545,6 +545,8 @@ export class JobStore {
   readonly #webhooks: WebhookStore;
   /** Jobs whose unreadable launch spec this process has already reported: once per job, not once per read. */
   readonly #reportedUnreadable = new Set<string>();
+  /** Live sends/answers must record their own outcome before the watcher derives one. Counts include overlapping requests. */
+  readonly #monitoringResumes = new Map<string, number>();
 
   constructor(db: Database, clock: Clock, logger: Logger, webhooks = new WebhookStore(db, clock)) {
     this.#db = db;
@@ -971,11 +973,27 @@ export class JobStore {
       monitoring_checked_at = NULL, monitoring_generation = monitoring_generation + 1 WHERE id = ?`).run(id);
   }
 
-  /** An uncertain/in-flight send must remain watched even if a concurrent read still sees the old settled thread. */
+  beginMonitoringResume(id: string): () => void {
+    this.wakeMonitoring(id);
+    this.#monitoringResumes.set(id, (this.#monitoringResumes.get(id) ?? 0) + 1);
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      const count = this.#monitoringResumes.get(id)! - 1;
+      if (count) this.#monitoringResumes.set(id, count);
+      else this.#monitoringResumes.delete(id);
+    };
+  }
+
+  monitoringResumeInFlight(id: string): boolean { return this.#monitoringResumes.has(id); }
+
+  /** Uncertain sends retain detailed monitoring for ten minutes after the latest attempt, including across a restart. */
   hasPendingSend(id: string): boolean {
     return this.#db.prepare(`SELECT 1 FROM idempotency_keys WHERE job_id = ? AND tool = 'work_continue'
+      AND COALESCE(json_extract(response, '$.sendAttemptedAt'), created_at) > ?
       AND (response IS NULL OR json_extract(response, '$.sendAttempts') IS NOT NULL
-        OR json_extract(response, '$.attachmentOutcome') = 'unknown') LIMIT 1`).get(id) !== undefined;
+        OR json_extract(response, '$.attachmentOutcome') = 'unknown') LIMIT 1`).get(id, this.#clock() - 10 * MINUTE) !== undefined;
   }
 
   /** A summary only refreshes an already confirmed observation, guarded against concurrent sends and watchers. */
@@ -1123,8 +1141,9 @@ export class JobStore {
 
   /** No downstream retry key exists for attachment sends. Write the uncertainty before touching that API. */
   beginAttachmentSend(clientId: string, requestId: string): boolean {
-    return this.#db.prepare(`UPDATE idempotency_keys SET response = '{"attachmentOutcome":"unknown"}'
-      WHERE client_id = ? AND tool = 'work_continue' AND request_id = ? AND response IS NULL`).run(clientId, requestId).changes === 1;
+    return this.#db.prepare(`UPDATE idempotency_keys SET response = ?
+      WHERE client_id = ? AND tool = 'work_continue' AND request_id = ? AND response IS NULL`)
+      .run(JSON.stringify({ attachmentOutcome: 'unknown', sendAttemptedAt: this.#clock() }), clientId, requestId).changes === 1;
   }
 
   /** Bind an uncertain plain send to its original authorization identity before touching T3. No credential is stored here. */
@@ -1138,15 +1157,16 @@ export class JobStore {
         throw new GatewayError('t3_response_lost', 'The earlier send cannot be safely retried under this T3 authorization. Inspect the thread before starting new work.');
       }
       this.completeIdempotencyKey(clientId, 'work_continue', requestId,
-        JSON.stringify({ sendIdentity: identity, sendAttempts: (stored?.sendAttempts ?? 0) + 1 }));
+        JSON.stringify({ sendIdentity: identity, sendAttempts: (stored?.sendAttempts ?? 0) + 1, sendAttemptedAt: this.#clock() }));
     });
   }
 
   /** A definite failure can release only a first attempt with no overlapping/repeated attempts. */
   releaseFirstTextSend(clientId: string, requestId: string, identity: string): boolean {
     return this.#db.prepare(`DELETE FROM idempotency_keys
-      WHERE client_id = ? AND tool = 'work_continue' AND request_id = ? AND response = ?`)
-      .run(clientId, requestId, JSON.stringify({ sendIdentity: identity, sendAttempts: 1 })).changes === 1;
+      WHERE client_id = ? AND tool = 'work_continue' AND request_id = ?
+        AND json_extract(response, '$.sendIdentity') = ? AND json_extract(response, '$.sendAttempts') = 1`)
+      .run(clientId, requestId, identity).changes === 1;
   }
 
   idempotencyKey(clientId: string, tool: IdempotentTool, requestId: string): IdempotencyKey | undefined {

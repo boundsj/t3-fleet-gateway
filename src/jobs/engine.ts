@@ -755,9 +755,10 @@ export class JobEngine {
     jobs.sort((a, b) => (this.#prAttempted.get(a.id) ?? a.pullRequestsCheckedAt ?? -Infinity) -
       (this.#prAttempted.get(b.id) ?? b.pullRequestsCheckedAt ?? -Infinity));
     const poll = async (id: string, awakened = false) => {
+      if (store.monitoringResumeInFlight(id)) return;
       const job = store.get(id);
       if (!job || !['running', 'needs_input', 'cancel_requested', 'idle'].includes(job.state) || job.threadId === null) return;
-      if (job.state === 'idle' && job.monitoringSettledAt !== null) return;
+      if (job.state === 'idle' && job.monitoringSettledAt !== null && !awakened) return;
       if (job.state === 'idle' && !awakened && clock() - (this.#lastPolled.get(job.id) ?? 0) < IDLE_POLL_MS) return;
       try {
         await this.#observeJob(job, job.threadId, prBudget);
@@ -767,7 +768,7 @@ export class JobEngine {
       this.#lastPolled.set(job.id, clock());
     };
     // Open work gets its normal observations before optional history scans can wait on a slow host.
-    for (const job of jobs) await poll(job.id);
+    for (const job of jobs) if (job.monitoringSettledAt === null) await poll(job.id);
     const awakened = await this.#monitor.inspect(host.id, this.#options.registry.client(host.id), jobs);
     for (const id of awakened) await poll(id, true);
   }
