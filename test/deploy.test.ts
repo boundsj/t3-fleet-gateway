@@ -125,15 +125,15 @@ describe('launchd installer', () => {
     assert.equal(existsSync(stub.plist), false);
   });
 
-  test('refuses a Node release that does not block the compromised eMudhra/emSign intermediates', async (t) => {
+  test('refuses a Node release below the November 2026 security minimums', async (t) => {
     const stub = stubs(t, { loadedPrints: 0, failingBootstraps: 0 });
     const oldNode = join(tempDir(t), 'node');
-    writeFileSync(oldNode, `#!/usr/bin/env bash\nexec "${process.execPath}" --import "${pretendNode('24.22.0')}" "$@"\n`);
+    writeFileSync(oldNode, `#!/usr/bin/env bash\nexec "${process.execPath}" --import "${pretendNode('24.22.2')}" "$@"\n`);
     chmodSync(oldNode, 0o755);
     const refused = await install({ ...stub.env, NODE_BIN: oldNode }, '--dry-run');
     assert.notEqual(refused.code, 0);
-    assert.match(refused.stderr, /Node\.js 24\.22\.0 is not supported/);
-    assert.match(refused.stderr, /cannot run the gateway; Node\.js 24\.22\.1 or a later 24\.x, or 26\.12\.1 or newer, is required/);
+    assert.match(refused.stderr, /Node\.js 24\.22\.2 is not supported/);
+    assert.match(refused.stderr, /cannot run the gateway; Node\.js 24\.22\.3 or a later 24\.x, or 26\.13\.1 or newer, is required/);
     assert.equal(refused.stdout, '', 'no plist is rendered');
 
     const fixed = await install(stub.env, '--dry-run');
