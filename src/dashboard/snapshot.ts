@@ -138,7 +138,7 @@ function hostView(sources: DashboardSources, host: HostConfig, counts: Map<strin
   }
   const backoff = engine.hosts.find((entry) => entry.hostId === host.id);
   const unreachable = db
-    .prepare(`SELECT MIN(host_unreachable_since) AS since FROM jobs WHERE host_id = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(', ')})`)
+    .prepare(`SELECT MIN(host_unreachable_since) AS since FROM jobs WHERE host_id = ? AND monitoring_settled_at IS NULL AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(', ')})`)
     .get(host.id, ...TERMINAL_STATES) as { since: number | null };
   const count = (states: readonly JobState[], standing?: boolean) =>
     states.reduce((sum, state) => sum + (standing === undefined
@@ -146,7 +146,7 @@ function hostView(sources: DashboardSources, host: HostConfig, counts: Map<strin
       : counts.get(key(host.id, state, standing)) ?? 0), 0);
   const projects = config.projects.filter((project) => project.host === host.id);
   const perProject = new Map(
-    (db.prepare(`SELECT project_alias, standing, COUNT(*) AS n FROM jobs WHERE host_id = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(', ')})
+    (db.prepare(`SELECT project_alias, standing, COUNT(*) AS n FROM jobs WHERE host_id = ? AND monitoring_settled_at IS NULL AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(', ')})
       GROUP BY project_alias, standing`).all(host.id, ...TERMINAL_STATES) as { project_alias: string; standing: number; n: number }[])
       .map((row) => [`${row.project_alias}\u0000${row.standing}`, row.n]),
   );
@@ -589,7 +589,7 @@ export function buildSnapshot(sources: DashboardSources): DashboardSnapshot {
   const { config, db, clock, store } = sources;
   const now = clock();
   const engine = sources.engine.status();
-  const stateRows = store.stateCounts();
+  const stateRows = store.stateCounts(true);
   const counts = new Map(stateRows.map((row) => [key(row.hostId, row.state, row.standing), row.count]));
   const totals = Object.fromEntries(JOB_STATES.map((state) => [state, 0])) as Record<JobState, number>;
   for (const row of stateRows) totals[row.state] += row.count;
@@ -605,9 +605,9 @@ export function buildSnapshot(sources: DashboardSources): DashboardSnapshot {
     Number(a.revokedAt !== null) - Number(b.revokedAt !== null) || (b.lastUsedAt ?? b.createdAt) - (a.lastUsedAt ?? a.createdAt));
   const clients = ordered.slice(0, LIMITS.clients).flatMap((summary) => clientView(sources, summary, now) ?? []);
 
-  const view = (job: Job) => jobView(job, clientLabels, store.settlementAcknowledged(job.id));
-  const open = store.list({ states: OPEN_STATES, limit: LIMITS.openJobs }).map(view);
-  const recent = store.list({ states: TERMINAL_STATES, limit: LIMITS.recentJobs }).map(view);
+  const view = (job: Job) => jobView(job, clientLabels, job.monitoringSettledAt !== null || store.settlementAcknowledged(job.id));
+  const open = store.list({ states: OPEN_STATES, monitoring: 'open', limit: LIMITS.openJobs }).map(view);
+  const recent = store.list({ monitoring: 'history', limit: LIMITS.recentJobs }).map(view);
   const attentionJobs = store.attention(now, DAY, LIMITS.jobAttention, {}, true).map(view);
   const openTotal = OPEN_STATES.reduce((sum, state) => sum + totals[state], 0);
 

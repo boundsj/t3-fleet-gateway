@@ -223,6 +223,7 @@ The operator dashboard (v0.1.9): gateway, hosts, agent clients, jobs and recent 
 | `basePath` | `"/"` | The path it is served under: `/` or up to four lowercase segments such as `/t3-fleet-gateway`, with no trailing slash. Set it to the proxy's mount path, and have the proxy keep the path (for `tailscale serve --set-path /t3-fleet-gateway`, target `http://127.0.0.1:3791/t3-fleet-gateway`). |
 | `allowedHosts` | `[]` | `Host` header values the dashboard accepts besides its own loopback address and port, exact and lowercase, with a port only when the browser shows one: your proxy's host name, such as `<machine>.<tailnet>.ts.net`. Anything else gets `421` (protection against DNS rebinding). At most 16. |
 | `clientLabels` | `{}` | Display names for agent clients by client id (see `clients list`), for example a connector that registers under a generic name shown as `Grok Bot`. At most 100, each up to 80 characters. The registered name is still shown beside it. |
+| `browserApproval` | `{ "enabled": false }` | Owner approval of agent connections in the browser with a passkey ([operations](operations.md#approve-in-the-browser-with-a-passkey), [design](design.md#browser-approval)). `enabled` needs `dashboard.enabled` and `origin`: the exact origin your browser opens the dashboard on, https with its host listed in `allowedHosts`, or `http://localhost:<port>`. It must differ from `publicUrl` and `allowedOrigins`; on the same host name as `publicUrl`, `basePath` must not be `/`. |
 
 ```json
 "dashboard": {

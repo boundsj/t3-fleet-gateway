@@ -12,6 +12,7 @@ import { openStorage } from '../src/gateway.ts';
 import { ApprovalCodes, MAX_FAILURES_PER_HOUR } from '../src/oauth/approvalCodes.ts';
 import { ClientStore, MAX_REGISTRATIONS_PER_HOUR } from '../src/oauth/clients.ts';
 import { TokenService } from '../src/oauth/tokens.ts';
+import { OwnerStore } from '../src/owner/store.ts';
 import { systemClock } from '../src/time.ts';
 import { startFakeT3, type FakeT3 } from './helpers/fakeT3.ts';
 import { openFrontDoor, type FrontDoor } from './helpers/frontDoor.ts';
@@ -110,6 +111,43 @@ describe('cli', () => {
     assert.match(result.out, /in 29m|in 30m/);
     assert.equal((await run(env, ['pair', '--ttl', '2d'])).code, 2);
     assert.equal((await run(env, ['pair', '--ttl', 'soon'])).code, 2);
+  });
+
+  test('owner enroll, list, revoke and signout; browser approval off refuses enrollment', async (t) => {
+    const off = await environment(t);
+    const refused = await run(off, ['owner', 'enroll']);
+    assert.equal(refused.code, 1);
+    assert.match(refused.err, /Browser approval is off/);
+    const env = await environment(t, undefined, { dashboard: { enabled: true, basePath: '/fleet', allowedHosts: ['gateway.example.test'],
+      browserApproval: { enabled: true, origin: 'https://gateway.example.test' } } });
+    assert.match((await run(env, ['owner', 'list'])).out, /No owner passkeys/);
+    const enrolled = await run(env, ['owner', 'enroll', '--ttl', '30m']);
+    assert.equal(enrolled.code, 0);
+    assert.match(enrolled.out, /^Enrollment code: [0-9A-Z]{5}-[0-9A-Z]{5}$/m);
+    assert.match(enrolled.out, /open https:\/\/gateway\.example\.test\/fleet\/owner#\/enroll,/);
+    assert.equal((await run(env, ['owner', 'enroll', '--ttl', '2d'])).code, 2);
+    assert.equal((await run(env, ['owner', 'list', '--ttl', '5m'])).code, 2);
+    // A passkey as an enrollment would store it: synthetic key material, never printed.
+    const storage = openStorage(env.dataDir);
+    const store = new OwnerStore(storage.db, storage.key, systemClock);
+    const { code } = store.mintEnrollmentCode();
+    const check = store.checkEnrollmentCode(code);
+    assert.equal(check.kind, 'ok');
+    const added = store.addPasskey(check.kind === 'ok' ? check.codeId : '', { credentialId: 'c3ludGhldGljLWNyZWRlbnRpYWw', publicKey: 'c3ludGhldGljLWtleQ', algorithm: -7, signCount: 0 }, 'Desk\u001b[31m');
+    assert.equal(added.kind, 'ok');
+    const id = added.kind === 'ok' ? added.passkey.id : '';
+    store.createSession(id);
+    storage.db.close();
+    const listed = await run(env, ['owner', 'list']);
+    assert.match(listed.out, new RegExp(`${id}.*active`));
+    assert.match(listed.out, /1 signed-in browser session/);
+    assert.doesNotMatch(listed.out, /c3ludGhldGlj|\u001b/);
+    assert.match((await run(env, ['owner', 'signout'])).out, /Signed out 1 owner browser session/);
+    assert.equal((await run(env, ['owner', 'revoke', 'nope'])).code, 1);
+    const revoked = await run(env, ['owner', 'revoke', id]);
+    assert.match(revoked.out, /No active passkey remains/);
+    assert.match((await run(env, ['owner', 'list'])).out, /revoked/);
+    assert.equal((await run(env, ['owner', 'bogus'])).code, 2);
   });
 
   test('throttle status and reset; pair reports a lifted approval pause', async (t) => {

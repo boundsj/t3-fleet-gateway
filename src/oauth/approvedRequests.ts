@@ -4,10 +4,12 @@ import { APPROVAL_PAGE_TTL } from './authorizationRequest.ts';
 interface Approved {
   /** The authorization response; held only until its code expires, then dropped. */
   response: { url: string; code: string; expiresAt: number } | null;
+  /** Answered with a denial (in the dashboard): never approved afterwards on the code form. */
+  denied?: boolean;
   forgetAt: number;
 }
 
-export type RepeatedApproval = { kind: 'resend'; url: string; code: string } | { kind: 'spent' };
+export type RepeatedApproval = { kind: 'resend'; url: string; code: string } | { kind: 'spent' } | { kind: 'denied' };
 
 /**
  * Authorization requests approved recently, keyed by the approval form's signature, so that submitting the same
@@ -29,11 +31,18 @@ export class ApprovedRequests {
     this.#entries.set(signature, { response, forgetAt: now + APPROVAL_PAGE_TTL });
   }
 
+  /** A request the owner denied; its form is answered as already answered until it would have expired. */
+  rememberDenied(signature: string): void {
+    const now = this.#prune();
+    this.#entries.set(signature, { response: null, denied: true, forgetAt: now + APPROVAL_PAGE_TTL });
+  }
+
   /** What to tell a repeated submission of an approved form, or undefined when the form was not approved. */
   lookup(signature: string): RepeatedApproval | undefined {
     this.#prune();
     const entry = this.#entries.get(signature);
     if (!entry) return undefined;
+    if (entry.denied) return { kind: 'denied' };
     return entry.response ? { kind: 'resend', url: entry.response.url, code: entry.response.code } : { kind: 'spent' };
   }
 

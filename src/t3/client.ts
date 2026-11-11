@@ -22,6 +22,7 @@ import {
   environmentSchema,
   interruptResultSchema,
   launchResultSchema,
+  monitoringPageSchema,
   pendingRequestListSchema,
   pendingRequestSchema,
   projectListSchema,
@@ -216,8 +217,12 @@ export class T3Client {
         // Resolve before sending, on this exact session (including a reconnect after HTTP 404).
         // A failed response never switches tool names: answers have no downstream retry key.
         const action = PENDING_ACTIONS[name];
-        const discover = action !== undefined || name === 't3_thread_launch' || name === 'orchestrator_capabilities';
+        const monitor = name === 't3_thread_list' && args.allProjects === true;
+        const discover = monitor || action !== undefined || name === 't3_thread_launch' || name === 'orchestrator_capabilities';
         const tools = discover ? await this.#tools(connection, client, timeout) : undefined;
+        if (monitor && !this.#hasInput(tools!, name, 'allProjects')) {
+          throw new GatewayError('t3_tool_failed', 'This host does not support shared thread monitoring.');
+        }
         let combined = false;
         if (action !== undefined) {
           try { combined = this.#usesCombinedPendingRequests(tools!); }
@@ -437,6 +442,12 @@ export class T3Client {
 
   listThreadCatalogPage(input: { projectId: string; includeSubagents: boolean; limit: number; cursor: number }) {
     return this.callTool('t3_thread_list', input, threadCatalogPageSchema, { readOnly: true });
+  }
+
+  /** Shared monitoring over all shelves, including child threads explicitly tracked by the operator. */
+  monitoringThreads(cursor: number) {
+    return this.callTool('t3_thread_list', { allProjects: true, includeSubagents: true, cursor, limit: 100 },
+      monitoringPageSchema, { readOnly: true, timeoutMs: 5_000 });
   }
 
   searchThreads(input: { projectId: string; query: string; limit?: number }): Promise<ThreadSearch> {

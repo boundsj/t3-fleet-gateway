@@ -368,7 +368,18 @@ describe('outbound job webhooks through MCP, watcher and HTTP', () => {
     await h.tick();
     await h.deliver();
     assert.deepEqual(sink.received.at(-1)!.payload.turnInitiator, { kind: 'gateway', clientId: h.agent.clientId });
-    await other.call('work_continue', { jobId: job.jobId, message: 'Synthetic new turn', requestId: 'next' });
+    h.fake.holdResponses.add('t3_thread_send');
+    const resumed = other.call('work_continue', { jobId: job.jobId, message: 'Synthetic new turn', requestId: 'next' });
+    await h.fake.whenHeld('t3_thread_send');
+    await h.tick();
+    await h.deliver();
+    assert.equal(sink.received.at(-1)!.payload.type, 'idle', 'no premature running notification while attribution is in flight');
+    h.fake.holdResponses.delete('t3_thread_send');
+    h.fake.releaseHeld();
+    await resumed;
+    await h.deliver();
+    assert.deepEqual([sink.received.at(-1)!.payload.type, sink.received.at(-1)!.payload.turnInitiator],
+      ['running', { kind: 'gateway', clientId: other.clientId }]);
     h.fake.finishTurn(threadId, 'Synthetic next result');
     await h.tick();
     await h.deliver();

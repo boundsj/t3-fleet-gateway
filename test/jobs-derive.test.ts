@@ -8,6 +8,7 @@ const T0 = '2026-01-15T12:00:00.000Z';
 
 function job(overrides: Partial<Job> = {}): Job {
   return {
+    monitoringSettledAt: null, monitoringUpdatedAt: null, monitoringCheckedAt: null, monitoringGeneration: 0,
     pullRequests: null,
     pullRequestsCheckedAt: null,
     id: 'job1',

@@ -1130,69 +1130,75 @@ export class JobService {
       if (!key) this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
       throw rootBusy(job);
     }
-    let sent;
-    let sendIdentity: string | undefined;
-    let sendGuardRejected = false;
+    let endResume: (() => void) | undefined;
     try {
-      const client = this.#registry.client(job.hostId);
-      if (attachments.length) {
-        const uploaded = await client.uploadAttachments(attachments);
-        await this.#validateAdoptedResume(this.store.require(job.id));
-        const current = this.store.require(job.id);
-        if (!['idle', 'running', 'needs_input'].includes(current.state)) {
-          throw new GatewayError('job_state_conflict', `Job ${job.id} is ${current.state}; the attachment follow-up was not sent.`);
+      let sent;
+      let sendIdentity: string | undefined;
+      let sendGuardRejected = false;
+      try {
+        const client = this.#registry.client(job.hostId);
+        if (attachments.length) {
+          const uploaded = await client.uploadAttachments(attachments);
+          await this.#validateAdoptedResume(this.store.require(job.id));
+          const current = this.store.require(job.id);
+          if (!['idle', 'running', 'needs_input'].includes(current.state)) {
+            throw new GatewayError('job_state_conflict', `Job ${job.id} is ${current.state}; the attachment follow-up was not sent.`);
+          }
+          if (current.workspaceKind === 'root' && current.state === 'idle' &&
+              (attempt.kind !== 'held' || !current.workspaceResumeTokens.includes(attempt.token) || current.workspaceRootHeldAt === null)) {
+            attempt = this.store.reserveRoot(job.id, `continue:${caller.clientId}:${input.requestId}`);
+            if (attempt.kind === 'busy') throw rootBusy(current);
+          }
+          // CAS is durable across processes. After this boundary, never resend without a downstream retry key.
+          if (!this.store.beginAttachmentSend(caller.clientId, input.requestId)) throw attachmentOutcomeUnknown();
+          endResume = this.store.beginMonitoringResume(job.id);
+          const result = await client.sendAttachments(threadId, input.message, uploaded);
+          sent = { ...result, delivery: 'accepted' };
+        } else {
+          endResume = this.store.beginMonitoringResume(job.id);
+          sent = await client.sendToThread({
+            threadId,
+            message: input.message,
+            mode: 'auto',
+            clientRequestId: `t3fg-${job.id}-${sha256Hex(`${caller.clientId}\n${input.requestId}`).slice(0, 24)}`,
+          }, { beforeSend: (identity) => {
+            try { this.store.beginTextSend(caller.clientId, input.requestId, identity, key === undefined); }
+            catch (error) { sendGuardRejected = true; throw error; }
+            sendIdentity = identity;
+          } });
         }
-        if (current.workspaceKind === 'root' && current.state === 'idle' &&
-            (attempt.kind !== 'held' || !current.workspaceResumeTokens.includes(attempt.token) || current.workspaceRootHeldAt === null)) {
-          attempt = this.store.reserveRoot(job.id, `continue:${caller.clientId}:${input.requestId}`);
-          if (attempt.kind === 'busy') throw rootBusy(current);
+      } catch (error) {
+        if (attachments.length && this.store.idempotencyKey(caller.clientId, 'work_continue', input.requestId)?.response !== null) {
+          throw attachmentOutcomeUnknown();
         }
-        // CAS is durable across processes. After this boundary, never resend without a downstream retry key.
-        if (!this.store.beginAttachmentSend(caller.clientId, input.requestId)) throw attachmentOutcomeUnknown();
-        const result = await client.sendAttachments(threadId, input.message, uploaded);
-        sent = { ...result, delivery: 'accepted' };
-      } else sent = await client.sendToThread({
-        threadId,
-        message: input.message,
-        mode: 'auto',
-        clientRequestId: `t3fg-${job.id}-${sha256Hex(`${caller.clientId}\n${input.requestId}`).slice(0, 24)}`,
-      }, { beforeSend: (identity) => {
-        try { this.store.beginTextSend(caller.clientId, input.requestId, identity, key === undefined); }
-        catch (error) { sendGuardRejected = true; throw error; }
-        sendIdentity = identity;
-      } });
-    } catch (error) {
-      if (attachments.length && this.store.idempotencyKey(caller.clientId, 'work_continue', input.requestId)?.response !== null) {
-        throw attachmentOutcomeUnknown();
+        if (sendGuardRejected) {
+          if (attempt.kind === 'held') this.store.abandonResume(job.id, attempt.token);
+          throw error;
+        }
+        if (attachments.length || error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered')) {
+          let released = false;
+          if (!key) {
+            if (sendIdentity === undefined) {
+              this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
+              released = true;
+            } else released = this.store.releaseFirstTextSend(caller.clientId, input.requestId, sendIdentity);
+          }
+          // This attempt was refused or definitely undelivered; only its own reservation token ends here.
+          if (attempt.kind === 'held') this.store.abandonResume(job.id, attempt.token);
+          if (!released) {
+            throw new GatewayError('t3_response_lost', 'A previous send attempt still has an uncertain outcome. Retry with the same requestId and T3 authorization, or inspect the thread.');
+          }
+          throw error;
+        }
+        const described = describeError(error);
+        throw new GatewayError(
+          described.code,
+          `${described.message}. The message may or may not have reached T3: call work_continue again with the same requestId; T3 deduplicates it.`,
+        );
       }
-      if (sendGuardRejected) {
-        if (attempt.kind === 'held') this.store.abandonResume(job.id, attempt.token);
-        throw error;
-      }
-      if (attachments.length || error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered')) {
-        let released = false;
-        if (!key) {
-          if (sendIdentity === undefined) {
-            this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
-            released = true;
-          } else released = this.store.releaseFirstTextSend(caller.clientId, input.requestId, sendIdentity);
-        }
-        // This attempt was refused or definitely undelivered; only its own reservation token ends here.
-        if (attempt.kind === 'held') this.store.abandonResume(job.id, attempt.token);
-        if (!released) {
-          throw new GatewayError('t3_response_lost', 'A previous send attempt still has an uncertain outcome. Retry with the same requestId and T3 authorization, or inspect the thread.');
-        }
-        throw error;
-      }
-      const described = describeError(error);
-      throw new GatewayError(
-        described.code,
-        `${described.message}. The message may or may not have reached T3: call work_continue again with the same requestId; T3 deduplicates it.`,
-      );
-    }
-    this.store.recordSend(job.id, sent, caller.clientId, input.requestId, attempt.kind === 'held' ? attempt.token : undefined);
-    this.wake();
-    return { job: this.store.require(job.id), delivery: sent.delivery, replayed: false };
+      this.store.recordSend(job.id, sent, caller.clientId, input.requestId, attempt.kind === 'held' ? attempt.token : undefined);
+      return { job: this.store.require(job.id), delivery: sent.delivery, replayed: false };
+    } finally { endResume?.(); this.wake(); }
   }
 
   /** Answer one of the job's pending questions. Only requests T3 lists for the job's own thread are accepted. */
@@ -1220,28 +1226,30 @@ export class JobService {
     // An answer starts the worker again: an idle root job takes its folder back first (see continue).
     const attempt = job.state === 'idle' ? this.store.reserveRoot(job.id, `respond:${input.requestId}`) : ({ kind: 'not_needed' } as const);
     if (attempt.kind === 'busy') throw rootBusy(job);
+    const endResume = this.store.beginMonitoringResume(job.id);
     try {
-      await client.respondToPendingRequest(job.threadId, input.requestId, input.answers);
-    } catch (error) {
-      if (attempt.kind === 'held' && (error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered'))) {
-        this.store.abandonResume(job.id, attempt.token);
+      try {
+        await client.respondToPendingRequest(job.threadId, input.requestId, input.answers);
+      } catch (error) {
+        if (attempt.kind === 'held' && (error instanceof T3ToolError || (error instanceof T3TransportError && error.delivery === 'not_delivered'))) {
+          this.store.abandonResume(job.id, attempt.token);
+        }
+        throw error;
       }
-      throw error;
-    }
-    const remaining = pending.filter((id) => id !== input.requestId);
-    this.store.appendEvent(job.id, 'input_answered', job.state, { requestId: input.requestId });
-    const moved =
-      remaining.length === 0 &&
-      this.store.transition(job.id, { from: attempt.kind === 'held' ? ['needs_input', 'idle'] : ['needs_input'], to: 'running', changes: { pendingRequestIds: remaining }, detail: { reason: 'input_answered' } });
-    if (!moved) {
-      const waiting = attempt.kind === 'held' && remaining.length > 0 && this.store.transition(job.id, {
-        from: ['idle'], to: 'needs_input', changes: { pendingRequestIds: remaining }, detail: { reason: 'question' },
-      });
-      if (!waiting) this.store.update(job.id, { pendingRequestIds: remaining });
-    }
-    if (attempt.kind === 'held') this.store.settleResume(job.id, attempt.token);
-    this.wake();
-    return this.store.require(job.id);
+      const remaining = pending.filter((id) => id !== input.requestId);
+      this.store.appendEvent(job.id, 'input_answered', job.state, { requestId: input.requestId });
+      const moved =
+        remaining.length === 0 &&
+        this.store.transition(job.id, { from: attempt.kind === 'held' ? ['needs_input', 'idle'] : ['needs_input'], to: 'running', changes: { pendingRequestIds: remaining }, detail: { reason: 'input_answered' } });
+      if (!moved) {
+        const waiting = attempt.kind === 'held' && remaining.length > 0 && this.store.transition(job.id, {
+          from: ['idle'], to: 'needs_input', changes: { pendingRequestIds: remaining }, detail: { reason: 'question' },
+        });
+        if (!waiting) this.store.update(job.id, { pendingRequestIds: remaining });
+      }
+      if (attempt.kind === 'held') this.store.settleResume(job.id, attempt.token);
+      return this.store.require(job.id);
+    } finally { endResume(); this.wake(); }
   }
 
   /**

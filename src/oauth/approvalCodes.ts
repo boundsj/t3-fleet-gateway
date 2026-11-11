@@ -22,7 +22,8 @@ export function normalizeApprovalCode(input: string): string {
     .replaceAll('O', '0');
 }
 
-function generateCode(): string {
+/** A new one-time code: 10 Crockford base32 characters (50 bits), shown as XXXXX-XXXXX. */
+export function generateCode(): string {
   const bytes = randomBytes(CODE_LENGTH);
   let code = '';
   for (const byte of bytes) code += ALPHABET[byte & 31];

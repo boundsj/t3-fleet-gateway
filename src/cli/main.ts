@@ -13,6 +13,7 @@ import { diagnoseClient } from '../oauth/diagnostics.ts';
 import { describeAccess, parseHostScope, parseScope, scopesForGrant, type HostChoice } from '../oauth/scopes.ts';
 import { changeThreadScopes, clientThreadScopes } from '../oauth/threadScopes.ts';
 import { NEVER_EXPIRES } from '../oauth/tokens.ts';
+import { DEFAULT_ENROLLMENT_TTL, MAX_ENROLLMENT_TTL, OwnerStore } from '../owner/store.ts';
 import { FATAL_SHUTDOWN_MS, guardProcess } from '../processErrors.ts';
 import { DAY, HOUR, MINUTE, parseDuration, systemClock } from '../time.ts';
 import { GATEWAY_NAME, GATEWAY_VERSION } from '../version.ts';
@@ -37,6 +38,11 @@ Commands:
   serve                     Run the gateway (HTTP server, job engine, credential renewal,
                             webhooks and optional private operator dashboard)
   pair [--ttl 15m]          Mint a one-time approval code for connecting an agent
+  owner enroll [--ttl 15m]  Mint a one-time code to add the owner's passkey for browser approval
+                            (first setup, another device, or recovery)
+  owner list                List owner passkeys (no key material)
+  owner revoke <id>         Revoke a passkey and sign out the browsers it signed in
+  owner signout             Sign out every owner browser session
   clients list              List registered agent clients
   clients token --name <name> [--access operate|read] [--hosts all|<id>,<id>] [--ttl 1y|never]
                             Mint a bearer token for an agent that cannot sign in with OAuth;
@@ -135,6 +141,63 @@ function pair(paths: Paths, io: CliIo, ttlText: string | undefined): number {
     io.out(`Expires ${shortTime(expiresAt)} (${relative(expiresAt - Date.now())}). It works once.`);
     io.out('Enter it on the approval page your agent opens, then choose Read or Operate, and All machines or Selected machines.');
     return 0;
+  } finally {
+    storage.db.close();
+  }
+}
+
+/** Browser approval's owner passkeys (docs/design.md, "Browser approval"). Never prints key material or session tokens. */
+function owner(paths: Paths, io: CliIo, action: string | undefined, id: string | undefined, ttlText: string | undefined): number {
+  if (action !== 'enroll' && ttlText !== undefined) throw new UsageError('--ttl is only for owner enroll');
+  if (action !== 'revoke' && id !== undefined) throw new UsageError(`Unexpected arguments: ${id}`);
+  if (action === 'enroll') {
+    const ttl = ttlText === undefined ? DEFAULT_ENROLLMENT_TTL : parseDuration(ttlText);
+    if (ttl === undefined || ttl < MINUTE || ttl > MAX_ENROLLMENT_TTL) throw new UsageError('--ttl must be a duration from 1m to 24h, for example 15m');
+    const config = loadConfig(paths.configPath);
+    const approval = config.dashboard.browserApproval;
+    if (!config.dashboard.enabled || !approval.enabled || approval.origin === undefined) {
+      throw new GatewayError('config_invalid', 'Browser approval is off. Set dashboard.enabled and dashboard.browserApproval (enabled, origin) in the config, restart the gateway, then run owner enroll again.');
+    }
+    const storage = openStorage(paths.dataDir);
+    try {
+      const { code, expiresAt } = new OwnerStore(storage.db, storage.key, systemClock).mintEnrollmentCode(ttl);
+      const base = config.dashboard.basePath === '/' ? '' : config.dashboard.basePath;
+      io.out(`Enrollment code: ${code}`);
+      io.out(`Expires ${shortTime(expiresAt)} (${relative(expiresAt - Date.now())}). It adds one passkey.`);
+      io.out(`On the device that will hold the passkey, open ${approval.origin}${base}/owner#/enroll, enter the code and create the passkey.`);
+      return 0;
+    } finally {
+      storage.db.close();
+    }
+  }
+  const storage = openStorage(paths.dataDir);
+  try {
+    const store = new OwnerStore(storage.db, storage.key, systemClock);
+    if (action === 'list') {
+      const passkeys = store.allPasskeys();
+      if (passkeys.length === 0) {
+        io.out('No owner passkeys. Browser approval is unavailable until one is enrolled (owner enroll).');
+        return 0;
+      }
+      io.out(table(['ID', 'NAME', 'CREATED', 'LAST SIGN-IN', 'STATUS'], passkeys.map((passkey) => [
+        passkey.id, escapeControls(passkey.label), shortTime(passkey.createdAt),
+        passkey.lastUsedAt === null ? 'never' : shortTime(passkey.lastUsedAt), passkey.revokedAt === null ? 'active' : 'revoked',
+      ])));
+      io.out(`${store.activeSessions()} signed-in browser session(s).`);
+      return 0;
+    }
+    if (action === 'revoke') {
+      if (id === undefined) throw new UsageError('Use: owner revoke <id> (see owner list)');
+      if (!store.revokePasskey(id)) throw new GatewayError('not_found', 'No active owner passkey with that id.');
+      io.out(`Revoked passkey ${id} and signed out the browsers it signed in.`);
+      if (!store.enrolled()) io.out('No active passkey remains: browser approval is unavailable until owner enroll adds one.');
+      return 0;
+    }
+    if (action === 'signout') {
+      io.out(`Signed out ${store.revokeAllSessions()} owner browser session(s).`);
+      return 0;
+    }
+    throw new UsageError('Use: owner enroll [--ttl 15m] | owner list | owner revoke <id> | owner signout');
   } finally {
     storage.db.close();
   }
@@ -561,7 +624,8 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       ['no-projects', values['no-projects'], 'clients projects', command === 'clients' && action === 'projects'],
       ['token-id', values['token-id'], 'clients rotate/revoke-token', command === 'clients' && (action === 'rotate' || action === 'revoke-token')],
       ['overlap', values.overlap, 'clients rotate', command === 'clients' && action === 'rotate'],
-      ['ttl', values.ttl, 'pair and clients token/rotate', command === 'pair' || (command === 'clients' && (action === 'token' || action === 'rotate'))],
+      ['ttl', values.ttl, 'pair, owner enroll and clients token/rotate',
+        command === 'pair' || command === 'owner' || (command === 'clients' && (action === 'token' || action === 'rotate'))],
       ['name', values.name, 'clients token', command === 'clients' && action === 'token'],
       ['access', values.access, 'clients token', command === 'clients' && action === 'token'],
       ['hosts', values.hosts, 'clients token', command === 'clients' && action === 'token'],
@@ -584,6 +648,8 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         return await serve(paths, io);
       case 'pair':
         return pair(paths, io, values.ttl);
+      case 'owner':
+        return owner(paths, io, action, id, values.ttl);
       case 'clients':
         if (action === 'projects') return clientProjects(paths, io, id, values.project, values['all-projects'], values['no-projects']);
         if (['tokens', 'rotate', 'revoke-token'].includes(action ?? '')) {

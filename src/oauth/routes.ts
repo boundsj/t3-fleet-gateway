@@ -13,6 +13,7 @@ import {
   type ApprovalHost,
 } from './approvalPage.ts';
 import { ApprovedRequests } from './approvedRequests.ts';
+import { chooseGrant, type BrowserApprovals } from './browserApproval.ts';
 import {
   authorizationRedirect,
   parseAuthorizationRequest,
@@ -24,7 +25,7 @@ import {
 import type { ClientStore } from './clients.ts';
 import { OAuthError } from './errors.ts';
 import { authorizationServerMetadata, protectedResourceMetadata } from './metadata.ts';
-import { formatScope, scopesForGrant, withinRequest, type AccessChoice, type HostChoice } from './scopes.ts';
+import { formatScope } from './scopes.ts';
 import { AUTHORIZATION_CODE_TTL, type TokenEvent, type TokenService } from './tokens.ts';
 
 const OAUTH_BODY_LIMIT = 16 * 1024;
@@ -41,26 +42,8 @@ export interface OAuthDependencies {
   tokens: TokenService;
   /** The configured hosts, offered on the approval page for a grant restricted to selected machines. */
   hosts: readonly ApprovalHost[];
-}
-
-/**
- * The machines chosen on the approval form. `hosts_mode` all is the fleet-wide grant; selected needs at least one
- * ticked, configured host. A form rendered before host selection existed sends neither field and means all, as it
- * did then; anything ambiguous or malformed is refused, never taken for all.
- */
-function hostSelection(form: URLSearchParams, hosts: readonly ApprovalHost[]): { hosts: HostChoice } | { error: string } {
-  const modes = form.getAll('hosts_mode');
-  const picked = form.getAll('host');
-  if (modes.length > 1) return { error: 'Choose All machines or Selected machines, then approve.' };
-  const mode = modes[0];
-  if (mode === undefined || mode === 'all') {
-    if (picked.length === 0) return { hosts: 'all' };
-    return { error: 'Machines are ticked but All machines is chosen. Choose Selected machines to limit access to them, or untick them.' };
-  }
-  if (mode !== 'selected') return { error: 'Choose All machines or Selected machines, then approve.' };
-  if (picked.length === 0) return { error: 'Tick at least one machine for Selected machines, or choose All machines.' };
-  if (picked.some((id) => !hosts.some((host) => host.id === id))) return { error: 'A ticked machine is not configured on this gateway. Reload the page.' };
-  return { hosts: [...new Set(picked)] };
+  /** Browser approval by the signed-in owner on the dashboard listener, when configured. */
+  browser?: BrowserApprovals | undefined;
 }
 
 /**
@@ -89,7 +72,7 @@ export function logTokenEvent(logger: Logger): (event: TokenEvent) => void {
 
 export function oauthRoutes(deps: OAuthDependencies): Route[] {
   const { publicUrl, logger } = deps;
-  const approved = new ApprovedRequests(deps.clock);
+  const approved = deps.browser?.approved ?? new ApprovedRequests(deps.clock);
   const hostIds = deps.hosts.map((host) => host.id);
 
   /**
@@ -128,7 +111,9 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
     const issuedAt = retry?.issuedAt ?? deps.clock();
     const signature = signAuthorizationRequest(deps.key, request, issuedAt);
     const shown = retry ? { error: retry.error, choice: retry.choice } : {};
-    sendHtml(res, status, renderApprovalPage({ request, hosts: deps.hosts, issuedAt, signature, ...shown }));
+    // A new page also offers the owner's browser approval, when it is set up; a retried form keeps to the code it was using.
+    const browserLink = retry ? undefined : deps.browser?.offer(request, signature, issuedAt);
+    sendHtml(res, status, renderApprovalPage({ request, hosts: deps.hosts, issuedAt, signature, ...shown, ...(browserLink ? { browserLink } : {}) }));
   };
 
   const authorizeGet = (_req: IncomingMessage, res: ServerResponse, url: URL): void => {
@@ -158,7 +143,9 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
       // The same form submitted again after it was approved: never a new code, and not a failed attempt.
       const resend = repeated.kind === 'resend' && deps.tokens.authorizationCodePending(repeated.code);
       logger.info('oauth.approval_repeated', { clientId, resent: resend });
-      const page = resend
+      const page = repeated.kind === 'denied'
+        ? renderNoticePage('Already answered', 'This request was denied. Start the connection again from your agent if that was a mistake.')
+        : resend
         ? renderReturnPage({
             title: 'Already approved',
             message: `This request was already approved for ${request.client.name}.`,
@@ -171,6 +158,8 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
     }
     const decision = form.get('decision');
     if (decision === 'deny') {
+      deps.browser?.settle(signature);
+      approved.rememberDenied(signature);
       logger.info('oauth.approval_denied', { clientId });
       const location = authorizationRedirect(request.redirectUri, { error: 'access_denied', state: request.state, iss: publicUrl });
       returnToClient(res, location, 'Access denied', `Access was denied for ${request.client.name}. Returning to the agent.`);
@@ -179,22 +168,17 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
     // Every refusal below shows the form again with the operator's choice, never the defaults.
     const showAgain = (error: string): void =>
       showApprovalPage(res, request, 400, { error, issuedAt, choice: submittedChoice(form, deps.hosts) });
-    const access = form.get('access');
-    if (decision !== 'approve' || (access !== 'read' && access !== 'operate')) {
+    if (decision !== 'approve') {
       showAgain('Choose Read or Operate, then approve.');
       return;
     }
     // Checked before the approval code is spent: a refused choice costs no code and counts as no failed attempt.
-    const selection = hostSelection(form, deps.hosts);
-    if ('error' in selection) {
-      showAgain(selection.error);
+    const grant = chooseGrant(request, form.get('access'), form.getAll('hosts_mode'), form.getAll('host'), deps.hosts);
+    if ('error' in grant) {
+      showAgain(grant.error);
       return;
     }
-    const scopes = scopesForGrant(access as AccessChoice, selection.hosts);
-    if (!withinRequest(request.requestedScopes, scopes)) {
-      showAgain('That is more access than the agent asked for. Choose only the machines and access it requested.');
-      return;
-    }
+    const { scopes } = grant;
     const throttle = deps.approvals.throttleState(signature);
     if (throttle !== 'ok') {
       logger.warn('oauth.approval_throttled', { clientId, limit: throttle === 'global_locked' ? 'global' : 'request' });
@@ -219,6 +203,7 @@ export function oauthRoutes(deps: OAuthDependencies): Route[] {
     });
     const location = authorizationRedirect(request.redirectUri, { code, state: request.state, iss: publicUrl });
     approved.remember(signature, { url: location, code, expiresAt: issuedCodeAt + AUTHORIZATION_CODE_TTL });
+    deps.browser?.settle(signature);
     logger.info('oauth.approval_granted', { clientId, scope: formatScope(scopes) });
     const origin = new URL(location).origin;
     returnToClient(res, location, 'Access approved', `Access was approved for ${request.client.name}. Returning you to ${origin}.`);

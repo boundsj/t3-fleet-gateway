@@ -682,22 +682,22 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
     const filter = model.jobFilter;
     const lists = { attention: snap.jobs.attention, open: snap.jobs.open, finished: snap.jobs.recent };
     const counts = { attention: snap.jobs.attention.length, open: snap.jobs.openTotal, finished: snap.jobs.recent.length };
-    const labels = { attention: 'Waiting or recent', open: 'Open', finished: 'Finished' };
+    const labels = { attention: 'Waiting or recent', open: 'Open', finished: 'History' };
     const empty = {
       attention: 'No job is waiting on anyone, and none went idle or failed in the last day.',
       open: 'No open jobs.',
-      finished: 'No finished jobs yet.',
+      finished: 'No settled or finished jobs yet.',
     };
     const list = lists[filter] ?? lists.attention;
     const stateCounts = Object.entries(snap.jobs.counts).filter(([, n]) => n > 0);
     return [
       pageHead('Jobs', 'Work in the fleet',
-        'Every job is an ordinary T3 thread. To approve, answer, stop or steer one, open it in T3. Task text, replies and questions are never shown here.'),
+        'Open jobs are still being followed. Settled and finished jobs stay in History. To approve, answer, stop or steer work, open its T3 thread.'),
       stateCounts.length ? h('div', { class: 'counts' }, stateCounts.map(([state, n]) => h('span', { class: `state st-${state}` }, `${n} ${STATE_LABELS[state] ?? state}`))) : null,
       h('div', { class: 'section' },
         h('div', { class: 'segmented', role: 'group', 'aria-label': 'Show jobs' }, Object.keys(lists).map((key) =>
           h('button', { type: 'button', 'aria-pressed': key === filter ? 'true' : 'false', on: { click: () => actions.setJobFilter(key) } },
-            labels[key], h('span', { class: 'count' }, String(counts[key]))))),
+            labels[key], key === 'finished' ? null : h('span', { class: 'count' }, String(counts[key]))))),
         list.length === 0 ? h('section', { class: 'panel section' }, emptyState(empty[filter] ?? empty.attention)) : h('ul', { class: 'jobs' }, list.map(jobRow)),
         filter === 'open' && snap.jobs.openTotal > snap.jobs.open.length
           ? h('p', { class: 'sub section' }, `Showing the newest ${snap.jobs.open.length} of ${snap.jobs.openTotal} open jobs. t3-fleet-gateway jobs list shows all.`) : null),

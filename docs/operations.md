@@ -38,6 +38,33 @@ For each host: reachability and T3 version (checked live), credential state (`mi
 
 3. Enter the code, choose **Read** or **Operate**, choose the machines, approve.
 
+### Approve in the browser with a passkey
+
+Optional. Instead of minting a code each time, approve connections from your own browser, signed in with a passkey. The code form keeps working beside it.
+
+1. In the config, enable the dashboard and browser approval with the exact origin your browser uses for the dashboard (its host also in `dashboard.allowedHosts`), then restart the gateway:
+
+   ```json
+   "dashboard": {
+     "enabled": true,
+     "basePath": "/fleet",
+     "allowedHosts": ["<machine>.<tailnet>.ts.net"],
+     "browserApproval": { "enabled": true, "origin": "https://<machine>.<tailnet>.ts.net" }
+   }
+   ```
+
+2. Mint a one-time enrollment code on the gateway machine and follow what it prints:
+
+   ```sh
+   t3-fleet-gateway owner enroll            # valid 15 minutes; --ttl 1m to 24h
+   ```
+
+   On the device that will hold the passkey, open the printed `…/owner#/enroll` page, enter the code and create the passkey. That browser is now signed in for 12 hours.
+
+3. From then on, when an agent opens the approval page, choose **Review in the gateway dashboard**, sign in with the passkey if asked, check the agent's name, where it returns to and the access it asks for, choose Read or Operate and the machines, and press **Allow** or **Deny**. The browser returns to the agent, which finishes signing in by itself.
+
+The link appears only once a passkey exists. Add a passkey on another device, or recover from a lost one, with another `owner enroll`. `owner list` shows passkeys and how many browsers are signed in, `owner revoke <id>` removes a passkey and signs out its browsers, and `owner signout` signs out every browser. A request is held for 10 minutes and forgotten if the gateway restarts; start the connection again from the agent then. If your device cannot reach the dashboard, use the approval code as before.
+
 **Machines.** *All machines* is a fleet-wide grant (`fleet:read`, `fleet:operate`): every configured host, including hosts you add later, exactly what every grant before v0.1.5 was. *Selected machines* grants only the ticked hosts (scopes `host:<id>:read` and `host:<id>:operate`, see [design.md](design.md#per-host-grants)): the agent's `fleet_status` lists only those hosts and their projects and standing jobs, `work_list` and `work_feed` hold only their jobs, and every job tool answers a job on another host as if it did not exist. A host added later is not included; approve the agent again to add it. The page lists every configured host by label and id. Ticking machines while *All machines* is chosen, choosing *Selected machines* with none ticked, or anything malformed is refused before the code is used, so you can correct it and approve with the same code. A refused page, including one with a wrong code, comes back with your machines and access as you chose them, so correcting the code alone never grants more. An agent that asks for host scopes itself (scope `host:<id>:…`) cannot be given more than it asked for; agents that ask for the advertised fleet scopes, as MCP SDKs do, can be given either.
 
 To change an agent's machines, approve it again from the agent (its earlier grant stays valid until revoked; revoke the client and reconnect to drop it), or for a bearer token mint a new one and revoke the old client.
@@ -150,6 +177,7 @@ Agents with **Operate** start work with `work_start`; the gateway queues the job
 
   Unspecified flags alone do not require escalation or prevent an answer. Follow explicit question wording; when there is no instruction to select several, try a single listed value (or its label if no value is supplied) as a conservative answer attempt. This is not a claim about T3 defaults: T3 validates the answer. After uncertain delivery, consult `work_status` before retrying. Synthetic text-only tests cover omitted/null flags; a live Codex test accepted a real single listed label answer with absent flags. Other providers, multi-select/custom answers and rejected-answer retention remain unconfirmed live.
 - **Concurrency.** At most `maxConcurrentJobs` jobs per host hold a slot (`dispatching`, `running`, `needs_input`, `cancel_requested`, `unknown`); the rest wait as `queued`. `fleet_status` shows the counts. An `idle` job holds no slot.
+- **Idle versus settled.** An open idle thread still gets a detailed check each minute, including while its delegated work runs. After settlement and a complete final read, the dashboard moves it to **History** and stops counting it as Open. Settled history shares a small metadata scan each minute; reopening a thread in T3 restores detailed monitoring, and `work_continue` restores it before sending. If a host cannot list history or omits a thread, direct checks resume after 15 minutes without fresh metadata, in bounded batches. An uncertain send keeps detailed monitoring for ten minutes after its latest attempt, then a confirmed quiet settled thread can return to History without losing retry evidence. Old jobs keep their replies and links. After an upgrade, the first normal observations classify existing jobs; a previous settlement acknowledgement alone is insufficient.
 - **Host down.** Jobs keep their state; `work_status` shows `hostUnreachableSince` and the gateway retries with backoff (up to every 5 minutes). Queued jobs launch when the host is back.
 - **Unknown launches.** On a session advertising launch retry keys, the gateway first retries one transport failure with the same job-derived `clientRequestId` and identical launch input. Legacy hosts keep the earlier behavior. If a launch's response is still lost, the job is `unknown` and the gateway looks for `[job:<id>]` in the project's threads. Found: it continues, unless T3 created the thread but never started a run on it (the task was not delivered): then `failed` with `launch_not_started`, and the job keeps the thread's id and link so you can inspect it. Not found for `watcher.reconcileWindowMinutes` (default 10) while the host answers: `failed` with `launch_not_confirmed`. The gateway never launches twice; the agent decides whether to start again.
 - **Cleanup.** Cancelled, failed and finished jobs leave their T3 thread, worktree and branch in place for you. Remove them in T3 or with git when you no longer need them. A scratch job has no gateway-created worktree or branch (its `branch` is empty); T3 owns the folders of its scratch workspace.

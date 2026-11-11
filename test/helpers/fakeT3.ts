@@ -184,6 +184,7 @@ const readInput = z.strictObject({
   maxCharsPerItem: nullable(z.int().min(1).max(50000)),
 });
 const listInput = z.strictObject({
+  allProjects: nullable(z.boolean()),
   projectId: nullable(z.string()),
   statuses: nullable(z.array(z.enum(THREAD_STATUSES)).max(10)),
   titleContains: nullable(z.string()),
@@ -315,7 +316,7 @@ export class FakeT3 {
   /** Child thread id to the parent's thread and the position of its `subagent` item there. */
   readonly #delegations = new Map<string, { parentThreadId: string; position: number }>();
   readonly #held: { tool: string; release: () => void }[] = [];
-  readonly #holdWaiters: { tool: string; resolve: () => void }[] = [];
+  readonly #holdWaiters: { tool: string; count: number; resolve: () => void }[] = [];
   #server: Server | undefined;
   #port = 0;
   #offline = false;
@@ -511,9 +512,9 @@ export class FakeT3 {
   }
 
   /** Resolves once a call to `tool` has taken effect and its answer is being held (see holdResponses). */
-  whenHeld(tool: string): Promise<void> {
-    if (this.#held.some((held) => held.tool === tool)) return Promise.resolve();
-    return new Promise((resolve) => this.#holdWaiters.push({ tool, resolve }));
+  whenHeld(tool: string, count = 1): Promise<void> {
+    if (this.#held.filter((held) => held.tool === tool).length >= count) return Promise.resolve();
+    return new Promise((resolve) => this.#holdWaiters.push({ tool, count, resolve }));
   }
 
   /** Send every held answer, or only the `first` or `last` one to be held (callers in flight finish in the order the test chooses). */
@@ -824,11 +825,11 @@ export class FakeT3 {
     tool('t3_thread_list', listInput, (input) => {
       const overridden = this.threadListPages.get(input.cursor ?? 0);
       if (overridden) return overridden;
-      const projectId = this.#target(input.projectId);
+      const projectId = input.allProjects ? null : this.#target(input.projectId);
       const matching = [...this.threads.values()]
         .filter(
           (thread) =>
-            thread.projectId === projectId && !thread.archived && !thread.sideChat &&
+            (projectId === null || thread.projectId === projectId) && !thread.archived && !thread.sideChat &&
             (input.includeSubagents !== false || !this.#delegations.has(thread.threadId)) &&
             (input.settled == null || thread.settled === input.settled) &&
             (!input.titleContains || thread.title.includes(input.titleContains)),
@@ -941,7 +942,7 @@ export class FakeT3 {
 
   #hold(tool: string): Promise<void> {
     const held = new Promise<void>((release) => this.#held.push({ tool, release }));
-    for (const waiter of this.#holdWaiters.filter((candidate) => candidate.tool === tool)) {
+    for (const waiter of this.#holdWaiters.filter((candidate) => candidate.tool === tool && this.#held.filter((held) => held.tool === tool).length >= candidate.count)) {
       this.#holdWaiters.splice(this.#holdWaiters.indexOf(waiter), 1);
       waiter.resolve();
     }

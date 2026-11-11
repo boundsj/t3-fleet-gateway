@@ -190,6 +190,25 @@ export const threadReadSchema = z.looseObject({
 });
 export type ThreadRead = z.infer<typeof threadReadSchema>;
 
+/** Monitoring keeps only lifecycle metadata; titles, model settings and unrelated catalog content are discarded. */
+export const monitoringThreadSchema = z.object({
+  threadId: responseThreadIdSchema,
+  latestRunId: z.string().nullable(),
+  status: z.string(),
+  settled: z.boolean(),
+  updatedAt: z.string(),
+});
+export type MonitoringThread = z.infer<typeof monitoringThreadSchema>;
+export const monitoringPageSchema = z.object({
+  projectId: z.null(),
+  threads: z.array(z.unknown()).max(100).transform((rows) => rows.flatMap((row) => {
+    const parsed = monitoringThreadSchema.safeParse(row);
+    return parsed.success ? [parsed.data] : [];
+  })),
+  nextCursor: z.number().int().nonnegative().nullable(),
+  total: z.number().int().nonnegative(),
+});
+
 export const sendResultSchema = z.looseObject({
   threadId: responseThreadIdSchema,
   messageId: z.string(),

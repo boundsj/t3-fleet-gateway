@@ -14,6 +14,7 @@ import { readActivity, refreshDelegated, scanActivity } from './activity.ts';
 import { EXCERPT_CHARS, isActiveStatus, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { deliverInterrupt } from './interrupt.ts';
 import { validateSelection, type LaunchSpec, type ModelSelection } from './launchSpec.ts';
+import { quietThread, SettledJobMonitor } from './monitoring.ts';
 import { jobMarker } from './service.ts';
 import type { Job, JobChanges, JobStore } from './store.ts';
 import { launchPolicy, mapProjects } from './targets.ts';
@@ -190,6 +191,7 @@ export interface JobEngineOptions {
  * conservatively.
  */
 export class JobEngine {
+  readonly #monitor: SettledJobMonitor;
   readonly #options: JobEngineOptions;
   readonly #intervalMs: number;
   readonly #launchTimeoutMs: number;
@@ -211,6 +213,7 @@ export class JobEngine {
 
   constructor(options: JobEngineOptions) {
     this.#options = options;
+    this.#monitor = new SettledJobMonitor(options.store, options.clock);
     this.#intervalMs = options.intervalMs ?? options.config.watcher.pollSeconds * SECOND;
     this.#launchTimeoutMs = options.launchTimeoutMs ?? LAUNCH_TIMEOUT_MS;
   }
@@ -751,16 +754,23 @@ export class JobEngine {
     const jobs = store.onHost(host.id, ['running', 'needs_input', 'cancel_requested', 'idle']);
     jobs.sort((a, b) => (this.#prAttempted.get(a.id) ?? a.pullRequestsCheckedAt ?? -Infinity) -
       (this.#prAttempted.get(b.id) ?? b.pullRequestsCheckedAt ?? -Infinity));
-    for (const job of jobs) {
-      if (job.threadId === null) continue;
-      if (job.state === 'idle' && clock() - (this.#lastPolled.get(job.id) ?? 0) < IDLE_POLL_MS) continue;
+    const poll = async (id: string, awakened = false) => {
+      if (store.monitoringResumeInFlight(id)) return;
+      const job = store.get(id);
+      if (!job || !['running', 'needs_input', 'cancel_requested', 'idle'].includes(job.state) || job.threadId === null) return;
+      if (job.state === 'idle' && job.monitoringSettledAt !== null && !awakened) return;
+      if (job.state === 'idle' && !awakened && clock() - (this.#lastPolled.get(job.id) ?? 0) < IDLE_POLL_MS) return;
       try {
         await this.#observeJob(job, job.threadId, prBudget);
       } catch (error) {
         this.#jobFailed(job, error, 'jobs.watch_failed');
       }
       this.#lastPolled.set(job.id, clock());
-    }
+    };
+    // Open work gets its normal observations before optional history scans can wait on a slow host.
+    for (const job of jobs) if (job.monitoringSettledAt === null) await poll(job.id);
+    const awakened = await this.#monitor.inspect(host.id, this.#options.registry.client(host.id), jobs);
+    for (const id of awakened) await poll(id, true);
   }
 
   async #observeJob(job: Job, threadId: string, prBudget: { remaining: number }): Promise<void> {
@@ -821,7 +831,15 @@ export class JobEngine {
     const hadDelegated = job.delegatedWork.length > 0 || job.delegatedUntracked > 0;
     const hasDelegated = seen.delegatedWork.length > 0 || seen.delegatedUntracked > 0;
     const delegatedEnded = job.state === 'idle' && seen.state === 'idle' && hadDelegated && !hasDelegated && !seen.anotherTurnFinished;
+    const caughtUp = !read.hasMore && activity.complete === true && seen.readPosition === read.nextPosition;
+    const settled = seen.state === 'idle' && quietThread(read.thread.status) && read.thread.settled === true &&
+      activity.threadSettled === true && activity.threadUpdatedAt === read.thread.updatedAt && caughtUp &&
+      !hasDelegated && questions.length === 0 && read.thread.pendingRequestCount === 0 &&
+      job.workspaceResumeTokens.length === 0 && !store.hasPendingSend(job.id);
     const changes: JobChanges = {
+      monitoringSettledAt: settled ? job.monitoringSettledAt ?? clock() : null,
+      monitoringUpdatedAt: settled ? read.thread.updatedAt : null,
+      monitoringCheckedAt: clock(),
       ...prChanges,
       pendingRequestIds: seen.pendingRequestIds,
       delegatedWork: seen.delegatedWork,

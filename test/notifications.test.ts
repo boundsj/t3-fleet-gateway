@@ -13,6 +13,7 @@ import { webhooksSchema } from '../src/webhooks/config.ts';
 import { ARCHIVE_RETENTION_MS, MAX_ARCHIVE_EVENTS, MAX_JOB_BINDINGS, MAX_PENDING_PER_SUBSCRIPTION,
   RETRY_WINDOW_MS, WebhookStore, type NotificationCaller } from '../src/webhooks/store.ts';
 import { testClock } from './helpers/clock.ts';
+import { rowsWithoutMonitoring } from './helpers/migrations.ts';
 import { tempDir } from './helpers/tmp.ts';
 
 const owner: NotificationCaller = { clientId: 'client-a', scopes: ['host:main:read', 'host:main:operate'] };
@@ -236,7 +237,7 @@ test('migration 18 preserves populated v17 routes, revisions, queued payloads an
   const tables = ['jobs', 'job_events', 'webhook_subscriptions', 'webhook_deliveries', 'webhook_attempts'];
   const before = tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
   migrate(db);
-  assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), before);
+  assert.deepEqual(tables.map((table) => rowsWithoutMonitoring(db, table)), before);
   const store = new WebhookStore(db, clock);
   assert.equal(store.health()[0]!.health.lastSuccessAt, null);
   assert.equal(store.health()[0]!.health.failureStreak, 0);

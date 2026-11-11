@@ -154,6 +154,14 @@ const dashboardSchema = z.strictObject({
     .record(z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, 'use a client id from clients list'), z.string().min(1).max(80))
     .refine((labels) => Object.keys(labels).length <= 100, { message: 'at most 100 client labels' })
     .default({}),
+  /**
+   * Browser approval of OAuth requests by the gateway owner (docs/design.md, "Browser approval"). Off by default. `origin` is the
+   * exact origin the owner's browser uses for this dashboard (the tailnet proxy's, for example https://gateway.example.ts.net):
+   * it is the passkey relying party, the only Origin owner requests are accepted from, and where the approval page links.
+   */
+  browserApproval: z
+    .strictObject({ enabled: z.boolean().default(false), origin: originUrl('dashboard.browserApproval.origin').optional() })
+    .default({ enabled: false }),
 });
 
 export const DEFAULT_DASHBOARD: z.output<typeof dashboardSchema> = {
@@ -162,7 +170,40 @@ export const DEFAULT_DASHBOARD: z.output<typeof dashboardSchema> = {
   basePath: '/',
   allowedHosts: [],
   clientLabels: {},
+  browserApproval: { enabled: false },
 };
+
+/**
+ * Browser approval needs the dashboard, an origin of its own that the dashboard accepts as a Host, and never the MCP origin:
+ * the owner's session cookie must not be sent to the listener the public tunnel carries. Cookies ignore ports, so on the same
+ * host name the dashboard must sit under a path of its own, where the cookie is scoped.
+ */
+function browserApprovalIssues(config: {
+  publicUrl: string;
+  allowedOrigins: string[];
+  dashboard: { enabled: boolean; basePath: string; allowedHosts: string[]; browserApproval: { enabled: boolean; origin?: string | undefined } };
+}): string[] {
+  const { dashboard } = config;
+  const approval = dashboard.browserApproval;
+  if (!approval.enabled) return [];
+  if (!dashboard.enabled) return ['browserApproval needs dashboard.enabled true'];
+  if (approval.origin === undefined) return ['browserApproval needs origin: the exact https origin the owner opens the dashboard on'];
+  const origin = new URL(approval.origin);
+  const issues: string[] = [];
+  if (origin.protocol === 'http:' && origin.hostname !== 'localhost') {
+    issues.push('browserApproval.origin must be https, or http://localhost:<port> (passkeys do not accept IP addresses)');
+  }
+  if (origin.protocol === 'https:' && !dashboard.allowedHosts.includes(origin.host)) {
+    issues.push(`browserApproval.origin's host must be listed in dashboard.allowedHosts ("${origin.host}")`);
+  }
+  if (approval.origin === config.publicUrl || config.allowedOrigins.includes(approval.origin)) {
+    issues.push('browserApproval.origin must differ from publicUrl and allowedOrigins: owner sign-in never shares the MCP origin');
+  }
+  if (origin.hostname === new URL(config.publicUrl).hostname && dashboard.basePath === '/') {
+    issues.push('browserApproval on the same host name as publicUrl needs a dashboard.basePath such as "/fleet", so the owner cookie stays on that path');
+  }
+  return issues;
+}
 
 const configSchema = z
   .strictObject({
@@ -215,6 +256,7 @@ const configSchema = z
         message: 'dashboard.listen.port must differ from listen.port: the dashboard never shares the MCP listener',
       });
     }
+    browserApprovalIssues(config).forEach((message) => ctx.addIssue({ code: 'custom', path: ['dashboard', 'browserApproval'], message }));
     const hostIds = new Set<string>();
     config.hosts.forEach((host, index) => {
       if (hostIds.has(host.id)) ctx.addIssue({ code: 'custom', path: ['hosts', index, 'id'], message: `duplicate host id "${host.id}"` });
