@@ -6,7 +6,7 @@ Having trouble along the way? Use the [symptom-based troubleshooting guide](trou
 
 ## Before you start
 
-- Node.js 24.22.1 or a later 24.x, or 26.12.1 or newer.
+- Node.js 24.22.3 or a later 24.x, or 26.13.1 or newer.
 - A running T3 Code server and a `t3` CLI that can mint pairing codes for it.
 - A machine that stays on while agents work. macOS and Linux service templates are included.
 - An HTTPS tunnel to the gateway for cloud clients. The gateway listens on loopback; Tailscale Funnel, Cloudflare Tunnel or another tunnel can carry its public MCP endpoint.

@@ -144,7 +144,7 @@ One page for the operator: which hosts answer, which bots connected and when, jo
 
 ### Before you start
 
-- An always-on machine with **Node.js 24.22.1 or a later 24.x, or 26.12.1 or newer**. Older releases lack the required [TLS protection](docs/security.md#compromised-emudhra-intermediates).
+- An always-on machine with **Node.js 24.22.3 or a later 24.x, or 26.13.1 or newer**. Older releases lack the required [security fixes](docs/security.md#node-security-minimums).
 - T3 Code running on each machine you want to use, and a `t3` CLI that can create pairing codes for it.
 - A public HTTPS tunnel, such as Tailscale Funnel or Cloudflare Tunnel: [how bots reach the gateway](#how-bots-reach-the-gateway).
 - For the dashboard, a separate private route such as Tailscale Serve. Never put the dashboard on the public tunnel.
@@ -161,7 +161,7 @@ this machine as a background service. Read its README, docs/setup.md,
 docs/configuration.md and docs/operations.md ("Run as a service") first,
 and follow them.
 
-- Check that Node is 24.22.1+ on 24.x or 26.12.1+. If not, stop and tell me.
+- Check that Node is 24.22.3+ on 24.x or 26.13.1+. If not, stop and tell me.
 - Use a clone dedicated to the service, then run `npm ci --omit=dev` there.
 - Create the private config ~/.config/t3-fleet-gateway/config.json (mode
   600) from config.example.json:

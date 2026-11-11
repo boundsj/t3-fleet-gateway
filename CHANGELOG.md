@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Security
+
+- Require Node 24.22.3 or a later 24.x, or 26.13.1 or newer for the [November 2026 security fixes](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases). CI pins exactly 24.22.3 on Linux and 26.13.1 on Linux and macOS; package engines, launcher, installer and setup documentation use the same minimums. Upgrade Node before deploying: the launcher refuses older releases. Node 22 remains unsupported. Historical requirements below describe their original releases.
+
 ## 0.3.0 (2026-10-31)
 
 ### Upgrading

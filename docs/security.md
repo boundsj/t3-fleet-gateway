@@ -137,11 +137,20 @@ This automates T3's consent step using **your own access to the machine**: the s
 
 T3 issues no refresh tokens; credentials last 30 days. The renewal loop re-enrolls a host when fewer than `renewWhenDaysLeft` days remain and keeps the old credential until the new one is verified. Old T3 sessions expire on their own; you can revoke them earlier in T3 under Settings → Connections, or with `t3 auth session list` and `t3 auth session revoke <id>`.
 
+## Node security minimums
+
+The gateway requires **Node 24.22.3 or a later 24.x, or 26.13.1 or newer** for the
+[November 2026 security fixes](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases),
+including HTTP/2, TLS, llhttp and undici updates. Node 22 remains unsupported even with its security update.
+The package engines, launcher guard, installer and exact CI pins agree on these minimums.
+Upgrade Node before deploying this build: the launcher refuses older releases.
+These releases also retain the compromised-intermediate protection described below.
+
 ## Compromised eMudhra intermediates
 
 Node itself blocks the eight compromised eMudhra/emSign intermediate **public keys** (CVE-2026-111943) during TLS chain verification, from [nodejs/node#66871](https://github.com/nodejs/node/pull/66871) ("tls: reject chains containing blocked public keys"), released in **Node 24.22.1** (LTS) and **Node 26.12.1**. The block is by key, so it also catches cross-signed and reissued certificates with the same keys, and it removes no root: unrelated chains through the same roots, system CAs (`--use-system-ca`), `NODE_EXTRA_CA_CERTS` and per-connection private CAs keep working. A blocked chain fails with `CERT_REVOKED`, which webhook deliveries report as `tls_error`. [Mozilla bug 2083449](https://bugzilla.mozilla.org/show_bug.cgi?id=2083449) and [Mozilla's announcement](https://blog.mozilla.org/security/2026/10/20/protecting-firefox-users-following-the-compromise-of-emudhra-intermediate-certificates/) describe the compromise.
 
-The gateway therefore requires Node 24.22.1 or a later 24.x, or 26.12.1 or newer (`engines` in package.json, `src/nodeVersion.ts`). The launcher (`bin/t3-fleet-gateway.js`) refuses to start on any other release, including 25.x and 26.0 to 26.12.0, and `deploy/launchd/install.sh` refuses to install with one. CI runs on exactly those minimum releases. For a while `main` carried its own preload for this (`src/tlsTrust.ts`, never in a release); it is gone, so **upgrade Node before deploying a build without it**. Through the launcher an older Node refuses to start rather than run unprotected; a process that loads the sources some other way gets no check and no block.
+The gateway now requires Node 24.22.3 or a later 24.x, or 26.13.1 or newer (`engines` in package.json, `src/nodeVersion.ts`). The launcher (`bin/t3-fleet-gateway.js`) refuses to start on any other release, including 25.x and 26.0 to 26.13.0, and `deploy/launchd/install.sh` refuses to install with one. CI runs on exactly those minimum releases. For a while `main` carried its own preload for this (`src/tlsTrust.ts`, never in a release); it is gone, so **upgrade Node before deploying a build without it**. Through the launcher an older Node refuses to start rather than run unprotected; a process that loads the sources some other way gets no check and no block.
 
 Everything the gateway sends over TLS goes through Node's TLS: T3 HTTPS/MCP and its OAuth enrollment and token calls, webhook deliveries and setup tests, and the public-URL and dashboard exposure checks. Child executables (pairing commands, probes) use their own runtimes and are not covered. `rejectUnauthorized: false` or `NODE_TLS_REJECT_UNAUTHORIZED=0` turns off certificate verification altogether and must not be used.
 
