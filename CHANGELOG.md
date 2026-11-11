@@ -8,16 +8,16 @@
 
 ### Security
 
-- The [November 2026 Node security releases](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases) (26.13.1, 24.22.3 and 22.23.5) address HTTP/2 and TLS crashes, memory corruption/disclosure and mutual-TLS authentication bypasses, plus other fixes. The current advisory lists 16 CVEs, seven rated high, rather than the earlier count of 14. It also includes llhttp and undici dependency updates.
-- The assessment accompanying [#69](https://github.com/boundsj/t3-fleet-gateway/pull/69) found no clear direct exploit path into the gateway, which does not use HTTP/2 or client certificates. That is not a claim of immunity: residual risk remains through bundled networking libraries such as llhttp and undici. The package engines, launcher, installer and CI pins enforce the updated Node minimums.
+- The [November 2026 Node security releases](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases) (26.13.1, 24.22.3 and 22.23.5) address HTTP/2 and TLS crashes, memory corruption/disclosure and mutual-TLS authentication bypasses, plus other fixes. The current advisory lists 16 CVEs, seven rated high, rather than the earlier count of 14. It also includes llhttp and undici dependency updates, plus SQLite updates on Node 22.x and 24.x.
+- Our source-based assessment identified no clear direct exploit path, but was not exhaustive. The gateway serves HTTP without HTTP/2 or client-certificate authentication; outbound webhooks use HTTPS and T3 calls use fetch. Outbound TLS and bundled networking libraries such as llhttp and undici remain relevant, so this is not a claim of immunity. [#69](https://github.com/boundsj/t3-fleet-gateway/pull/69) aligns the package engines, launcher, installer and CI pins with the updated Node minimums.
 
 ### Upgrading
 
-- **Stop all ledger users and back up the data directory and configuration before updating.** Upgrading from 0.3.0 applies additive migrations 22 (owner passkeys, sessions and enrollment) and 23 (settled-job monitoring metadata). Existing clients, grants, tokens and jobs are preserved. Browser approval remains off until configured and a passkey is enrolled. Older builds refuse the new schema; rollback requires restoring the pre-upgrade backup and loses subsequent writes. Replacing the code alone is insufficient.
+- **Stop all ledger users and back up the data directory and configuration before updating.** Upgrading from 0.3.0 applies additive migrations 22 (owner passkeys, sessions and enrollment) and 23 (settled-job monitoring metadata). Existing clients, grants, tokens and jobs are preserved. Browser approval remains off until configured and a passkey is enrolled. Older builds refuse the new schema; rollback requires restoring the pre-upgrade backup and loses subsequent writes. Downgrading the code without restoring that backup cannot roll back the database.
 
 ### Added
 
-- **Opt-in passkey OAuth approval** ([#67](https://github.com/boundsj/t3-fleet-gateway/pull/67)). With `dashboard.browserApproval`, the owner signs in on the private dashboard, reviews the client, callback origin, access and machines, and allows or denies the request. The agent completes its existing PKCE exchange. New `owner enroll`, `owner list`, `owner revoke` and `owner signout` commands support setup and recovery. Existing approval-code and bearer-token flows remain supported; pending requests are bounded, expiring and single-use across browser and code approval.
+- **Opt-in passkey OAuth approval** ([#67](https://github.com/boundsj/t3-fleet-gateway/pull/67)). With `dashboard.browserApproval`, the owner signs in on the private dashboard, reviews the client, callback origin, access and machines, and allows or denies the request. The agent completes its existing PKCE exchange. New `owner enroll`, `owner list`, `owner revoke` and `owner signout` commands support setup and recovery. Existing approval-code and bearer-token flows remain supported; pending requests expire after 10 minutes and are bounded and single-use across browser and code approval. Denial on the code form also prevents later browser approval of the same request.
 
 ### Fixed
 
