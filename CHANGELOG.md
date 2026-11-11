@@ -2,17 +2,31 @@
 
 ## Unreleased
 
-### Upgrading
+## 0.3.1 (2026-11-11)
 
-- **Migration 22, additive.** Adds empty owner passkey, session and enrollment-code tables for browser approval. Existing clients, grants, tokens and jobs are unchanged, and nothing changes until `dashboard.browserApproval` is enabled and a passkey is enrolled. Back up with ledger users stopped. Older builds refuse schema 22; rollback restores the pre-upgrade backup and loses later writes.
-
-### Added
-
-- **Browser approval with a passkey** (opt-in `dashboard.browserApproval`). The approval page links to an owner page on the dashboard listener, where the owner signs in with a passkey, reviews the agent's name, return origin and requested access, and allows or denies with the same Read/Operate and machine choices as the code form; the agent finishes with its PKCE exchange. Pending requests are opaque single-use handles held in memory for 10 minutes. New CLI: `owner enroll` (one-time enrollment code for first setup and recovery), `owner list`, `owner revoke`, `owner signout`. The approval-code form, bearer tokens, scopes, ceilings, throttles and token rules are unchanged; denying on the code form now also prevents a later approval of that same request.
+**This is a security-motivated release. It requires Node >=24.22.3 on 24.x or >=26.13.1 and refuses to start on older Node. Upgrade Node first, then update the gateway.** Node 22 remains unsupported.
 
 ### Security
 
-- Require Node 24.22.3 or a later 24.x, or 26.13.1 or newer for the [November 2026 security fixes](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases). CI pins exactly 24.22.3 on Linux and 26.13.1 on Linux and macOS; package engines, launcher, installer and setup documentation use the same minimums. Upgrade Node before deploying: the launcher refuses older releases. Node 22 remains unsupported. Historical requirements below describe their original releases.
+- The [November 2026 Node security releases](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases) (26.13.1, 24.22.3 and 22.23.5) address HTTP/2 and TLS crashes, memory corruption/disclosure and mutual-TLS authentication bypasses, plus other fixes. The current advisory lists 16 CVEs, seven rated high, rather than the earlier count of 14. It also includes llhttp and undici dependency updates.
+- The assessment accompanying [#69](https://github.com/boundsj/t3-fleet-gateway/pull/69) found no clear direct exploit path into the gateway, which does not use HTTP/2 or client certificates. That is not a claim of immunity: residual risk remains through bundled networking libraries such as llhttp and undici. The package engines, launcher, installer and CI pins enforce the updated Node minimums.
+
+### Upgrading
+
+- **Stop all ledger users and back up the data directory and configuration before updating.** Upgrading from 0.3.0 applies additive migrations 22 (owner passkeys, sessions and enrollment) and 23 (settled-job monitoring metadata). Existing clients, grants, tokens and jobs are preserved. Browser approval remains off until configured and a passkey is enrolled. Older builds refuse the new schema; rollback requires restoring the pre-upgrade backup and loses subsequent writes. Replacing the code alone is insufficient.
+
+### Added
+
+- **Opt-in passkey OAuth approval** ([#67](https://github.com/boundsj/t3-fleet-gateway/pull/67)). With `dashboard.browserApproval`, the owner signs in on the private dashboard, reviews the client, callback origin, access and machines, and allows or denies the request. The agent completes its existing PKCE exchange. New `owner enroll`, `owner list`, `owner revoke` and `owner signout` commands support setup and recovery. Existing approval-code and bearer-token flows remain supported; pending requests are bounded, expiring and single-use across browser and code approval.
+
+### Fixed
+
+- **Settled jobs move to History and stop repeated detailed polling** ([#68](https://github.com/boundsj/t3-fleet-gateway/pull/68)). After final messages and activity are drained, confirmed quiet settled jobs leave the Open count and use shared lifecycle metadata scans. New activity or a gateway resume wakes detailed monitoring; unsupported or incomplete listings receive bounded direct fallback checks. Open idle jobs and coordinators waiting on delegated work retain detailed polling.
+- **Readable webhook connection names and deduplicated project choices** ([#66](https://github.com/boundsj/t3-fleet-gateway/pull/66)). The gateway computes labels from configured aliases or discovered project names, with IDs as a fallback and collision suffixes where needed. Configured and discovered duplicates are suppressed; saved routes and revisions are unchanged.
+
+### Documentation
+
+- Explain hosted bots' public HTTPS access separately from the private dashboard, and add symptom-based troubleshooting for connectivity, OAuth, hosts, jobs, webhooks and project/model errors ([#64](https://github.com/boundsj/t3-fleet-gateway/pull/64)).
 
 ## 0.3.0 (2026-10-31)
 
