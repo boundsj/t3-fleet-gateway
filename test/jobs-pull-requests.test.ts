@@ -60,6 +60,74 @@ for (const inline of [true, false]) {
   });
 }
 
+for (const baseline of [null, [pr(), pr('merged', 22), pr('closed', 23)]]) {
+  test(`open-only first pages keep historical PRs without replaying merges (${baseline ? 'cached' : 'unknown'} baseline)`, async (t) => {
+    const { fake, gw, agent, tick, tickAfter } = await startJobHarness(t);
+    fake.inlinePullRequests = 'open-only';
+    const job = await startJob(agent);
+    await tick();
+    const { threadId } = fake.threadForJob(job.jobId);
+    const all = [pr(), pr('merged', 22), pr('closed', 23)];
+    fake.pullRequests.set(threadId, all);
+    gw.services.jobs.store.update(job.jobId, { pullRequests: baseline, readPosition: null });
+    const merges = () => gw.services.jobs.store.recentEvents(job.jobId, 100).filter((e) => e.type === 'pull_request_merged');
+    const calls = () => fake.calls.filter((c) => c === 'list_thread_pull_requests').length;
+    await tickAfter(60_001);
+    assert.deepEqual(gw.services.jobs.store.require(job.jobId).pullRequests, all);
+    assert.equal(calls(), 1, 'a partial inline list needs the full list tool');
+    assert.equal(merges().length, 0, 'historical merges are not new events');
+    // The next read is a later page: T3 sends the count but no inline list.
+    assert.notEqual(gw.services.jobs.store.require(job.jobId).readPosition, null);
+    await tickAfter(60_001);
+    assert.equal(calls(), 2);
+    assert.deepEqual(gw.services.jobs.store.require(job.jobId).pullRequests, all);
+    assert.equal(merges().length, 0, 'history does not reappear as a new merge on a later page');
+    // A followed PR can merge between two first-page observations too.
+    fake.pullRequests.set(threadId, [pr('merged'), pr('merged', 22), pr('closed', 23)]);
+    gw.services.jobs.store.update(job.jobId, { readPosition: null });
+    await tickAfter(60_001);
+    assert.equal(calls(), 3);
+    assert.deepEqual(gw.services.jobs.store.require(job.jobId).pullRequests, [pr('merged'), pr('merged', 22), pr('closed', 23)]);
+    assert.equal(merges().length, 1);
+    gw.services.jobs.store.update(job.jobId, { readPosition: null });
+    await tickAfter(60_001);
+    assert.equal(merges().length, 1, 'the transition is reported once');
+  });
+}
+
+test('complete new inline lists avoid lookup and discard watch metadata', async (t) => {
+  const { fake, gw, agent, tick, tickAfter } = await startJobHarness(t);
+  fake.inlinePullRequests = 'open-only';
+  const job = await startJob(agent);
+  await tick();
+  const { threadId } = fake.threadForJob(job.jobId);
+  for (const all of [[], [pr()]]) {
+    fake.pullRequests.set(threadId, all);
+    gw.services.jobs.store.update(job.jobId, { readPosition: null });
+    await tickAfter(60_001);
+    assert.deepEqual(gw.services.jobs.store.require(job.jobId).pullRequests, all);
+  }
+  assert.equal(fake.calls.includes('list_thread_pull_requests'), false);
+});
+
+test('failed full-list lookup never replaces history with an open-only list', async (t) => {
+  const { fake, gw, agent, tick, tickAfter } = await startJobHarness(t);
+  fake.inlinePullRequests = 'open-only';
+  const job = await startJob(agent);
+  await tick();
+  const { threadId } = fake.threadForJob(job.jobId);
+  const all = [pr(), pr('merged', 22)];
+  fake.pullRequests.set(threadId, all);
+  gw.services.jobs.store.update(job.jobId, { pullRequests: all, readPosition: null });
+  const checkedAt = gw.services.jobs.store.require(job.jobId).pullRequestsCheckedAt;
+  fake.failures.set('list_thread_pull_requests', { code: 'not_found', message: 'Optional list unavailable' });
+  await tickAfter(60_001);
+  const stored = gw.services.jobs.store.require(job.jobId);
+  assert.deepEqual(stored.pullRequests, all);
+  assert.equal(stored.pullRequestsCheckedAt, checkedAt);
+  assert.equal(stored.state, 'running');
+});
+
 test('optional lookup errors preserve cached metadata and do not back off or fail jobs', async (t) => {
   const { fake, gw, agent, tick, tickAfter } = await startJobHarness(t);
   const job = await startJob(agent);
