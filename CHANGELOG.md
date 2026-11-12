@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Keep complete job PR snapshots with both older T3 and the open-only inline lists introduced by upstream `pingdotgg/t3code` commit `1df9c912` (PR #34895). The watcher uses the full PR list tool when inline links are absent or their count is incomplete, preserving merged/closed history and preventing missed or repeated merge events and webhooks. New watch metadata is accepted and discarded. No migration or configuration change.
+
 ## 0.3.1 (2026-11-11)
 
 **This is a security-motivated release. It requires Node >=24.22.3 on 24.x or >=26.13.1 and refuses to start on older Node. Upgrade Node first, then update the gateway.** Node 22 remains unsupported.

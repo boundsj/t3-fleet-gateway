@@ -720,7 +720,7 @@ export class FakeT3 {
   }
 
   readonly pullRequests = new Map<string, Record<string, unknown>[]>();
-  inlinePullRequests = false;
+  inlinePullRequests: boolean | 'open-only' = false;
 
   #buildServer(namespace: string): McpServer {
     const server = new McpServer({ name: 'T3 Code', version: this.serverVersion });
@@ -1088,7 +1088,7 @@ export class FakeT3 {
     return result;
   }
 
-  #summary(thread: FakeThread): Record<string, unknown> {
+  #summary(thread: FakeThread, firstPage = true): Record<string, unknown> {
     return {
       threadId: thread.threadId,
       ...(this.threadLinkFormat !== 'omitted' ? { link: thread.link } : {}),
@@ -1102,7 +1102,12 @@ export class FakeT3 {
       runtimeMode: thread.runtimeMode,
       interactionMode: 'default',
       linkedPullRequest: null,
-      ...(this.inlinePullRequests ? { pullRequests: this.pullRequests.get(thread.threadId) ?? [] } : {}),
+      ...(this.inlinePullRequests === 'open-only' ? {
+        pullRequestCount: (this.pullRequests.get(thread.threadId) ?? []).length,
+        ...(firstPage ? { pullRequests: (this.pullRequests.get(thread.threadId) ?? [])
+          .filter((pr) => pr.state !== 'merged' && pr.state !== 'closed')
+          .map((pr) => ({ ...pr, watching: true, watchStartedAt: thread.createdAt })) } : {}),
+      } : this.inlinePullRequests ? { pullRequests: this.pullRequests.get(thread.threadId) ?? [] } : {}),
       settled: thread.settled,
       settledAt: thread.settled ? thread.updatedAt : null,
       snoozed: false,
@@ -1135,7 +1140,7 @@ export class FakeT3 {
     const active = this.#activeRun(thread);
     return {
       thread: {
-        ...this.#summary(thread),
+        ...this.#summary(thread, input.afterPosition === undefined && input.itemId === undefined),
         projectId: thread.projectId,
         activeRunId: active?.runId ?? null,
         titleRegeneration: null,

@@ -808,7 +808,12 @@ export class JobEngine {
       this.#prAttempted.set(job.id, clock());
       prBudget.remaining--;
       try {
-        const value = Object.hasOwn(read.thread, 'pullRequests') ? read.thread.pullRequests
+        // Older T3 returns all links inline. Newer T3 returns only open links on the first page,
+        // with a count of all links; only an exact count proves that inline list is complete.
+        const inline = read.thread.pullRequests;
+        const complete = Array.isArray(inline) && (!Object.hasOwn(read.thread, 'pullRequestCount') ||
+          read.thread.pullRequestCount === inline.length);
+        const value = complete ? inline
           : (await client.listThreadPullRequests(threadId)).pullRequests;
         // The tracked list (bounded), or null when the answer holds nothing readable: unknown, so the last snapshot and its freshness stay.
         const prs = readPullRequests(value);
