@@ -720,7 +720,10 @@ export class FakeT3 {
   }
 
   readonly pullRequests = new Map<string, Record<string, unknown>[]>();
-  inlinePullRequests: boolean | 'open-only' = false;
+  inlinePullRequests: boolean | 'open-only' | 'preview' = false;
+  budgetThreadReads = false;
+  pagedPullRequests = false;
+  pullRequestStuckCursor: string | null = null;
 
   #buildServer(namespace: string): McpServer {
     const server = new McpServer({ name: 'T3 Code', version: this.serverVersion });
@@ -756,9 +759,15 @@ export class FakeT3 {
         preferences: { backgroundActivity: { profile: 'balanced' } },
       })),
     );
-    tool('list_thread_pull_requests', z.strictObject({ threadId: z.string() }), ({ threadId }) => ({
-      pullRequests: this.pullRequests.get(threadId) ?? [],
-    }));
+    tool('list_thread_pull_requests', z.strictObject({ threadId: z.string(), cursor: z.string().optional() }), ({ threadId, cursor }) => {
+      if (!this.pagedPullRequests && cursor !== undefined) throw new Error('Old host rejects cursor');
+      const all = this.pullRequests.get(threadId) ?? [];
+      const start = cursor ? Number(cursor) : 0;
+      return this.pagedPullRequests ? {
+        pullRequests: all.slice(start, start + 50),
+        nextCursor: this.pullRequestStuckCursor ?? (start + 50 < all.length ? String(start + 50) : null),
+      } : { pullRequests: all };
+    });
     tool('t3_project_list', projectListInput, ({ cursor, limit }) => {
       const start = cursor ?? 0;
       const size = limit ?? 50;
@@ -1102,10 +1111,12 @@ export class FakeT3 {
       runtimeMode: thread.runtimeMode,
       interactionMode: 'default',
       linkedPullRequest: null,
-      ...(this.inlinePullRequests === 'open-only' ? {
+      ...((this.inlinePullRequests === 'open-only' || this.inlinePullRequests === 'preview') ? {
         pullRequestCount: (this.pullRequests.get(thread.threadId) ?? []).length,
+        ...(this.inlinePullRequests === 'preview' ? { openPullRequestCount: (this.pullRequests.get(thread.threadId) ?? []).filter((pr) => pr.state === 'open').length } : {}),
         ...(firstPage ? { pullRequests: (this.pullRequests.get(thread.threadId) ?? [])
           .filter((pr) => pr.state !== 'merged' && pr.state !== 'closed')
+          .slice(0, this.inlinePullRequests === 'preview' ? 5 : Infinity)
           .map((pr) => ({ ...pr, watching: true, watchStartedAt: thread.createdAt })) } : {}),
       } : this.inlinePullRequests ? { pullRequests: this.pullRequests.get(thread.threadId) ?? [] } : {}),
       settled: thread.settled,
@@ -1135,10 +1146,10 @@ export class FakeT3 {
       input.itemId != null ? item.itemId === input.itemId && inView(item) : item.position > after && inView(item),
     );
     const page = remaining.slice(0, limit);
-    const maxChars = input.maxCharsPerItem ?? 4000;
+    const maxChars = Math.min(input.maxCharsPerItem ?? 4000, this.budgetThreadReads ? 20000 : 50000);
     const offset = input.itemId != null ? (input.textOffset ?? 0) : 0;
     const active = this.#activeRun(thread);
-    return {
+    const result = {
       thread: {
         ...this.#summary(thread, input.afterPosition === undefined && input.itemId === undefined),
         projectId: thread.projectId,
@@ -1164,6 +1175,13 @@ export class FakeT3 {
       nextPosition: page.at(-1)?.position ?? null,
       hasMore: remaining.length > page.length,
     };
+    if (this.budgetThreadReads) {
+      // New T3 budgets the serialized result and keeps at least one item, even when it alone is large.
+      while (result.items.length > 1 && Buffer.byteLength(JSON.stringify(result)) > 30000) result.items.pop();
+      result.nextPosition = result.items.at(-1)?.position ?? null;
+      result.hasMore = remaining.length > result.items.length;
+    }
+    return result;
   }
 }
 

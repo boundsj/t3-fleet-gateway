@@ -135,3 +135,57 @@ describe('work_messages', () => {
     assert.equal((await reader.callError('work_messages', { jobId: 'nosuchjob00' })).code, 'not_found');
   });
 });
+
+test('byte-budget pages cover every backwards window and clamp message text to 20k', async (t) => {
+  const { fake, agent, tick, tickAfter, gw } = await startJobHarness(t);
+  fake.budgetThreadReads = true;
+  const job = await startJob(agent);
+  await tick();
+  const thread = fake.threadForJob(job.jobId);
+  for (let i = 0; i < 80; i++) {
+    fake.finishTurn(thread.threadId, `reply-${i} ${'x'.repeat(21000)}`);
+    thread.items.at(-1)!.title = 'synthetic metadata '.repeat(100);
+  }
+  const raw = await gw.services.registry.client('main').readThread({
+    threadId: thread.threadId, view: 'messages', itemId: thread.items.at(-1)!.itemId, maxCharsPerItem: 50000,
+  });
+  assert.equal(raw.items[0]!.text?.length, 20000, 'the new fake clamps old-sized requests too');
+  assert.equal(raw.items[0]!.textTruncated, true);
+  await tick();
+  const before = thread.items.at(-1)!.position + 1;
+  const page = await messages(agent, job.jobId, { before, limit: 10 });
+  assert.deepEqual(page.messages.map((m) => m.text.split(' ')[0]), rangeReplies(70, 80));
+  assert.ok(page.messages.every((m) => m.text.length === 20000 && m.textTruncated && m.length === null));
+  const older = await messages(agent, job.jobId, { before: page.earlier, limit: 10 });
+  assert.deepEqual(older.messages.map((m) => m.text.split(' ')[0]), rangeReplies(60, 70));
+  const forward = await messages(agent, job.jobId, { after: thread.items[0]!.position, limit: 10 });
+  assert.deepEqual(forward.messages.map((m) => m.text.split(' ')[0]), rangeReplies(0, 10));
+  // Watcher messages and activity pages drain over ticks despite receiving fewer than their requested limit.
+  for (let i = 0; i < 8; i++) await tickAfter(60_001);
+  assert.equal(gw.services.jobs.store.require(job.jobId).latestMessageExcerpt?.startsWith('reply-79 '), true);
+  assert.ok(fake.reads.some((r) => r.maxCharsPerItem === 20000));
+});
+
+const rangeReplies = (start: number, end: number) => Array.from({ length: end - start }, (_, i) => `reply-${start + i}`);
+
+
+test('a backwards scan makes progress when each item consumes the entire byte budget', async (t) => {
+  const { fake, agent, tick } = await startJobHarness(t);
+  fake.budgetThreadReads = true;
+  const job = await startJob(agent);
+  await tick();
+  const thread = fake.threadForJob(job.jobId);
+  for (let i = 0; i < 30; i++) {
+    fake.finishTurn(thread.threadId, `reply-${i}`);
+    thread.items.at(-1)!.title = 'x'.repeat(30000);
+  }
+  const catchingUp = await messages(agent, job.jobId);
+  assert.equal(catchingUp.hasMore, true, 'an undrained forward tail is never reported complete');
+  const continued = await messages(agent, job.jobId, { after: catchingUp.later });
+  assert.ok(continued.messages[0]!.text !== catchingUp.messages[0]!.text);
+  const before = thread.items.at(-1)!.position + 1;
+  const newest = await messages(agent, job.jobId, { before });
+  assert.deepEqual(newest.messages.map((m) => m.text), ['reply-29']);
+  const older = await messages(agent, job.jobId, { before: newest.earlier });
+  assert.deepEqual(older.messages.map((m) => m.text), ['reply-28']);
+});

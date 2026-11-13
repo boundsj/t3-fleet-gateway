@@ -319,8 +319,23 @@ export class T3Client {
   }
 
   /** Optional on older T3 builds. The watcher isolates all errors from this read. */
-  listThreadPullRequests(threadId: string) {
-    return this.callTool('list_thread_pull_requests', { threadId }, pullRequestListSchema, { readOnly: true, timeoutMs: 3000 });
+  async listThreadPullRequests(threadId: string) {
+    const pullRequests: unknown[] = [];
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    // Read the whole snapshot before applying the tracking bound, so open PRs late in the list count.
+    // Old hosts return an uncapped list without nextCursor; do not send new inputs on the first call.
+    for (let page = 0; page < 32; page++) {
+      const result = await this.callTool('list_thread_pull_requests', { threadId, ...(cursor ? { cursor } : {}) },
+        pullRequestListSchema, { readOnly: true, timeoutMs: 3000 });
+      pullRequests.push(...result.pullRequests);
+      if (pullRequests.length > 10_000) throw new GatewayError('t3_invalid_response', 'Linked PR list exceeds the read bound.');
+      if (result.nextCursor == null) return { pullRequests };
+      if (seen.has(result.nextCursor)) throw new GatewayError('t3_invalid_response', 'Linked PR list cursor did not advance.');
+      seen.add(result.nextCursor);
+      cursor = result.nextCursor;
+    }
+    throw new GatewayError('t3_invalid_response', 'Linked PR list exceeds the page bound.');
   }
 
   environmentRead(options: Pick<CallOptions, 'timeoutMs' | 'retry'> = {}): Promise<T3Environment> {

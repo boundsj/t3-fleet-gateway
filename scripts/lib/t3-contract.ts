@@ -14,7 +14,7 @@ export const REQUIRED_TOOLS = [
   't3_pending_request_read', 't3_pending_request_respond', 't3_pending_request',
 ] as const;
 
-const OPTIONAL_TOOLS = ['t3_thread_organize'] as const;
+const OPTIONAL_TOOLS = ['t3_thread_organize', 'list_thread_pull_requests'] as const;
 
 /** Prefer the combined tool, otherwise require every legacy action. Check optional mutations when advertised. */
 function requiredTools(indexed: ReadonlyMap<string, AdvertisedTool>) {
@@ -224,10 +224,11 @@ const INPUT_SAMPLES: Record<(typeof REQUIRED_TOOLS)[number] | (typeof OPTIONAL_T
     // A scratch alias (`workspaceMode: "scratch"`) launches with `scratch: true` alone: no project, worktree or branch is sent.
     { title: LAUNCH.title, message: LAUNCH.message, runtimeMode, scratch: true },
   ]),
+  list_thread_pull_requests: [{ threadId: THREAD_ID }],
   t3_thread_read: ['messages', 'activity'].flatMap((view) => [
     { threadId: THREAD_ID, view },
-    { threadId: THREAD_ID, view, afterPosition: 1, limit: 100, runLimit: 50, maxCharsPerItem: 50000 },
-    { threadId: THREAD_ID, view, itemId: 'synthetic-item', textOffset: 1, limit: 1, maxCharsPerItem: 50000 },
+    { threadId: THREAD_ID, view, afterPosition: 1, limit: 100, runLimit: 50, maxCharsPerItem: 20000 },
+    { threadId: THREAD_ID, view, itemId: 'synthetic-item', textOffset: 1, limit: 1, maxCharsPerItem: 20000 },
   ]),
   t3_thread_list: [
     { projectId: PROJECT_ID, limit: 100 },

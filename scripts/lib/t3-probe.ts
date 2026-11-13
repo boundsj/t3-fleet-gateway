@@ -144,6 +144,9 @@ export async function probeHost(options: {
         threadId, view, limit: 1, runLimit: 1, maxCharsPerItem: 1,
       }));
     }
+    if (tools?.some((tool) => tool.name === 'list_thread_pull_requests')) {
+      await step('list_thread_pull_requests', 'linked_prs_read', () => smoke.listThreadPullRequests(threadId!));
+    }
     const requests = await step(pendingListTool, 'pending_requests_read', () => smoke.listPendingRequests(threadId));
     if (requests?.[0]) {
       await step(pendingReadTool, 'pending_request_read', () => smoke.readPendingRequest(threadId, requests[0]!));
