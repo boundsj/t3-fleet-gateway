@@ -8,18 +8,16 @@ import { isUnsettled, isWorkerMessage } from './derive.ts';
  * replies (isWorkerMessage), never the messages sent to it, so this returns no task text or follow-up,
  * and it reads the messages view only, so tool activity and delegated work summaries never appear.
  *
- * T3 pages a thread forward only (`afterPosition`), so messages before a position are found by a scan
- * back in windows of WINDOW positions, one read each, with one character per item: positions are
- * unique integers, so a window holds at most WINDOW items and one read of WINDOW items returns all of
- * them. The texts are then read one message at a time by `itemId` (T3 returns that item, or no item
- * when it has none).
+ * Scan backwards in position windows, following forward pages until each window is covered.
+ * An item-count limit is only a ceiling: T3 can cut any page to fit its result byte budget.
+ * Texts are then read one message at a time by itemId.
  */
 
 /** T3's largest `maxCharsPerItem`: the most text returned per message. */
-export const MAX_MESSAGE_TEXT_CHARS = 50_000;
+export const MAX_MESSAGE_TEXT_CHARS = 20_000;
 /** Messages returned per call, at most. */
 export const MAX_MESSAGES = 10;
-/** Positions per scan read: T3's largest page, so one read covers its window. */
+/** Positions per backwards window. A window may need multiple reads. */
 const WINDOW = 100;
 /** Scan reads per call in each direction (2,000 positions back, 2,000 messages forward). */
 const MAX_SCAN_READS = 20;
@@ -52,7 +50,7 @@ export interface MessagePage {
   earlier: number | null;
   /** `after` for the messages newer than these: never past a message still being written. */
   later: number | null;
-  /** More messages wait in the direction read: older ones (before, latest) or newer ones (after). */
+  /** More messages wait in the direction read, or the latest-message forward tail has not drained. */
   hasMore: boolean;
 }
 
@@ -69,7 +67,8 @@ async function scanForward(client: T3Client, threadId: string, after: number | n
   for (let reads = 0; reads < MAX_SCAN_READS; reads++) {
     const read = await scanRead(client, threadId, position);
     items.push(...read.items);
-    if (!read.hasMore || read.nextPosition === null || read.nextPosition === position) return { items, complete: true };
+    if (!read.hasMore) return { items, complete: true };
+    if (read.nextPosition === null || (position !== null && read.nextPosition <= position)) return { items, complete: false };
     if (workerCount(items) > want) return { items, complete: false };
     position = read.nextPosition;
   }
@@ -83,10 +82,34 @@ async function scanForward(client: T3Client, threadId: string, after: number | n
 async function scanBack(client: T3Client, threadId: string, before: number, want: number): Promise<{ items: ThreadItem[]; lowest: number }> {
   const items: ThreadItem[] = [];
   let upper = before;
-  for (let reads = 0; reads < MAX_SCAN_READS && upper > 0 && workerCount(items) <= want; reads++) {
-    const lower = Math.max(0, upper - WINDOW);
-    const read = await scanRead(client, threadId, lower > 0 ? lower - 1 : null);
-    items.unshift(...read.items.filter((item) => item.position >= lower && item.position < upper));
+  let reads = 0;
+  while (reads < MAX_SCAN_READS && upper > 0 && workerCount(items) <= want) {
+    let lower = Math.max(0, upper - WINDOW);
+    let after = lower > 0 ? lower - 1 : null;
+    const window: ThreadItem[] = [];
+    let covered = false;
+    while (reads < MAX_SCAN_READS - 1) {
+      reads++;
+      const read = await scanRead(client, threadId, after);
+      window.push(...read.items.filter((item) => item.position >= lower && item.position < upper));
+      const last = read.items.at(-1)?.position;
+      if (!read.hasMore || (last !== undefined && last >= upper - 1)) { covered = true; break; }
+      if (last === undefined || (after !== null && last <= after)) break;
+      after = last;
+    }
+    // Reserve a read for a single-position window so even huge metadata cannot stall pagination.
+    // Discard the partial wider window: returning it would skip its unread newer messages.
+    if (!covered && reads < MAX_SCAN_READS) {
+      lower = upper - 1;
+      const read = await scanRead(client, threadId, lower > 0 ? lower - 1 : null);
+      reads++;
+      window.length = 0;
+      window.push(...read.items.filter((item) => item.position === lower));
+      const last = read.items.at(-1)?.position;
+      covered = !read.hasMore || (last !== undefined && last >= lower);
+    }
+    if (!covered) break;
+    items.unshift(...window);
     upper = lower;
   }
   return { items, lowest: upper };
@@ -143,11 +166,14 @@ export async function readWorkerMessages(client: T3Client, threadId: string, rea
     };
   }
   let tail: ThreadItem[] = [];
+  let tailComplete = true;
   let before: number;
   if (query.before !== undefined) {
     before = query.before;
   } else {
-    tail = (await scanForward(client, threadId, readPosition, Infinity)).items;
+    const forward = await scanForward(client, threadId, readPosition, Infinity);
+    tail = forward.items;
+    tailComplete = forward.complete;
     before = readPosition === null ? 0 : readPosition + 1;
   }
   const back = await scanBack(client, threadId, before, limit - workerCount(tail));
@@ -159,6 +185,6 @@ export async function readWorkerMessages(client: T3Client, threadId: string, rea
     messages: await withText(client, threadId, chosen, maxChars),
     earlier: older ? (chosen[0]?.position ?? back.lowest) : null,
     later: laterThan(chosen, items.at(-1)?.position ?? null),
-    hasMore: older,
+    hasMore: older || !tailComplete,
   };
 }

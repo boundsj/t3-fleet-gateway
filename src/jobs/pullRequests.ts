@@ -46,7 +46,7 @@ export const pullRequestsSchema = z.array(pullRequestSchema).max(MAX_PULL_REQUES
   (prs) => new Set(prs.map(prKey)).size === prs.length,
 );
 /** T3's answer as it comes. Entries are judged one by one in `readPullRequests`, so an odd entry or a long list never fails the call. */
-export const pullRequestListSchema = z.looseObject({ pullRequests: z.array(z.unknown()) });
+export const pullRequestListSchema = z.looseObject({ pullRequests: z.array(z.unknown()), nextCursor: z.string().min(1).max(4096).nullable().optional() });
 
 /**
  * The tracked list a T3 answer or the stored column yields, or null when it holds nothing readable: unknown, never a misleading empty

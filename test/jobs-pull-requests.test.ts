@@ -632,3 +632,39 @@ test('job PR metadata remains hidden behind the stored host grant', async (t) =>
   assert.deepEqual(list.jobs, []);
   assert.equal(h.fake.calls.length, before, 'denied reads never reach T3');
 });
+
+test('five-PR inline previews fall back to every page, including open links past fifty', async (t) => {
+  const { fake, gw, agent, tick, tickAfter } = await startJobHarness(t);
+  fake.inlinePullRequests = 'preview';
+  fake.pagedPullRequests = true;
+  const job = await startJob(agent);
+  await tick();
+  const { threadId } = fake.threadForJob(job.jobId);
+  const all = [...linked(55), ...opened(56, 65)];
+  fake.pullRequests.set(threadId, all);
+  await tickAfter(60_001);
+  assert.deepEqual(numbers(gw.services.jobs.store.require(job.jobId).pullRequests), range(1, 65));
+  fake.pullRequests.set(threadId, [...linked(55), cased('merged', 56), ...opened(57, 65)]);
+  await tickAfter(60_001);
+  assert.equal(gw.services.jobs.store.require(job.jobId).pullRequests?.find((p) => p.number === 56)?.state, 'merged');
+  assert.ok(types(gw.services.jobs.store.recentEvents(job.jobId, 100)).includes('pull_request_merged'));
+});
+
+test('a repeating PR cursor preserves the last snapshot and freshness', async (t) => {
+  const { fake, gw, agent, tick, tickAfter } = await startJobHarness(t);
+  const job = await startJob(agent);
+  await tick();
+  const { threadId } = fake.threadForJob(job.jobId);
+  fake.pullRequests.set(threadId, [pr()]);
+  await tickAfter(60_001);
+  const known = gw.services.jobs.store.require(job.jobId);
+  fake.pagedPullRequests = true;
+  fake.pullRequestStuckCursor = '50';
+  fake.pullRequests.set(threadId, linked(110));
+  const before = fake.calls.length;
+  await tickAfter(60_001);
+  const next = gw.services.jobs.store.require(job.jobId);
+  assert.deepEqual(next.pullRequests, known.pullRequests);
+  assert.equal(next.pullRequestsCheckedAt, known.pullRequestsCheckedAt);
+  assert.equal(fake.calls.slice(before).filter((c) => c === 'list_thread_pull_requests').length, 2);
+});

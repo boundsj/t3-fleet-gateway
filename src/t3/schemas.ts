@@ -187,6 +187,7 @@ export const threadReadSchema = z.looseObject({
   items: z.array(threadItemSchema),
   nextPosition: z.number().int().nullable(),
   hasMore: z.boolean(),
+  earlierPosition: z.number().int().nullable().optional(),
 });
 export type ThreadRead = z.infer<typeof threadReadSchema>;
 

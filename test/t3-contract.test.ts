@@ -127,7 +127,7 @@ describe('T3 advertised input checks', () => {
     await client.connect(new StreamableHTTPClientTransport(new URL('/mcp', fake.url), { authProvider: { token: async () => token } }));
     const tools = (await client.listTools()).tools;
     const checks = checkInputs(tools);
-    assert.equal(checks.length, pendingRequestTools === 'legacy' ? 13 : 11);
+    assert.equal(checks.length, pendingRequestTools === 'legacy' ? 14 : 12);
     assert.ok(checks.every((check) => check.status === 'pass'), JSON.stringify(checks));
     assert.deepEqual(fake.calls, [], 'discovery and schema validation must not call mutation or read tools');
   });

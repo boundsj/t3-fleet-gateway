@@ -482,7 +482,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'work_status shows excerptTruncated true, after work_feed reports a finished turn, or to read earlier replies. Without ' +
       `before or after it returns the latest messages (limit, default 1, at most ${MAX_MESSAGES}), oldest first. Page back with ` +
       'before set to the returned earlier; read newer messages with after set to the returned later (hasMore: more wait in the ' +
-      `direction you read). Each message has textTruncated and length: text is cut at maxChars (default and at most ` +
+      `direction you read; an undrained latest-message scan also sets hasMore, so follow later to catch up). Each message has textTruncated and length: text is cut at maxChars (default and at most ` +
       `${MAX_MESSAGE_TEXT_CHARS}); length is the full length, null when cut. A message with status pending or running is still ` +
       'being written: later stops before it, so reading on with after returns it again once finished. Read-only.',
     scope: READ_SCOPE,
@@ -504,7 +504,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       messages: z.array(messageSchema).describe('Oldest first'),
       earlier: z.int().nullable().describe('Pass as before for older messages; null when there are none'),
       later: z.int().nullable().describe('Pass as after for newer messages'),
-      hasMore: z.boolean().describe('More messages wait in the direction you read: older ones, or newer ones with after'),
+      hasMore: z.boolean().describe('More messages wait in the direction read, or the latest-message scan still needs to catch up with after/later'),
     }),
     async run(input, context) {
       const { job, page } = await jobs.messages(context, input.jobId, {

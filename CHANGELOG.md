@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Tolerate budget-limited thread reads and paged linked PRs in newer T3 while retaining older response shapes. Backward worker-message scans drain each position window before advancing; message text uses the shared 20,000-character ceiling. PR tracking follows bounded cursor pages beyond the five-open-PR preview and fifty-link list page, retaining the last complete snapshot on pagination failure. Contract probes and synthetic regressions cover both generations. No migration or configuration change.
+
 - Keep complete job PR snapshots with both older T3 and the open-only inline lists introduced by upstream `pingdotgg/t3code` commit `1df9c912` (PR #34895). The watcher uses the full PR list tool when inline links are absent or their count is incomplete, preserving merged/closed history and preventing missed or repeated merge events and webhooks. New watch metadata is accepted and discarded. No migration or configuration change.
 
 ## 0.3.1 (2026-11-11)
