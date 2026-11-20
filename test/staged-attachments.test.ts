@@ -257,6 +257,10 @@ test('request hashes cover staged ids and name overrides, and keep inline-only h
   assert.notEqual(startInputHash({ ...input, attachments: [{ attachmentId: `att_${'b'.repeat(24)}` }] }), staged);
   assert.notEqual(startInputHash({ ...input, attachments: [{ attachmentId: id, name: 'x.png' }] }), staged);
   assert.notEqual(startInputHash({ ...input, attachments: [{ attachmentId: id }, INLINE] }), staged);
+  // Inline-only hashes pinned to the values the build before staged files produced, so earlier request ids still replay.
+  const png = { mimeType: 'image/png', data: PNG_BYTES.toString('base64') };
+  assert.equal(startInputHash({ ...input, attachments: [INLINE, png] }), 'bf6c015a3c0639a1ed9ca12e024ceb0a37a7bf08d7af543a131e16097b99a3e1');
+  assert.equal(startInputHash({ ...input, target: { host: 'main' }, attachments: [INLINE] }), 'd7092c82c9a058566e004b8156332796cd1066bfe5dcfd2e61fd181c67f77f67');
 });
 
 test('the upload route lives on the MCP listener only, never the dashboard', async (t) => {
