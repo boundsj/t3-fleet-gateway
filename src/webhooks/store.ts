@@ -33,8 +33,8 @@ export interface WebhookHealth {
   replayFloorCursor: string;
   oldestReplayAt: string | null;
   /**
-   * The receiver refused this connection's credential (HTTP 401 or 403) on its latest attempt that got an answer, and
-   * nothing has been delivered since: replace the key. Null once a delivery succeeds or the key or URL is replaced.
+   * The most recent time the receiver refused this connection's credential (HTTP 401 or 403) since its last successful
+   * delivery or route replacement; null when there was none. Other failures after it leave it set.
    */
   authRejectedAt: string | null;
   authRejectedStatus: number | null;

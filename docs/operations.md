@@ -488,7 +488,9 @@ only captures gateway-started jobs owned by that client, not standing or importe
 
 Dashboard Webhooks, `doctor`, `webhooks list` and `work_notifications` show last delivery success/failure,
 failure streak, pending events, cumulative dead-lettered events and cumulative omitted events. A dead
-letter is an event whose one-hour delivery window expired, including one that expired before any POST.
+letter is an event whose one-hour delivery window expired, including one that expired before any POST, or
+one the receiver answered with HTTP 401 or 403 (dead-lettered at once, without retries; the connection then
+shows **Key rejected** until a delivery succeeds or its key is replaced).
 Successful delivery resets the streak; synthetic pings do not hide a failed delivery stream. Health
 survives attempt-history pruning; older attempts remain subject to the existing 100-per-connection /
 1,000-global metadata limits. Health starts unknown at upgrade, and route replacement resets it.

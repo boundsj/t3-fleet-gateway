@@ -4,7 +4,7 @@
 
 ### Changed
 
-- **Webhook auth rejections are not retried.** An HTTP 401 or 403 from a receiver now dead-letters that delivery at once (attempt outcome `auth_rejected`) instead of retrying for an hour, and flags the connection: **Key rejected** on the dashboard card, a `doctor` warning and `authRejectedAt`/`authRejectedStatus` in connection health. Later events still get one attempt each; a successful delivery or a replaced key clears the flag. **Migration 25, forward only:** two nullable `webhook_health` columns; older builds refuse the upgraded ledger.
+- **Webhook auth rejections are not retried.** An HTTP 401 or 403 from a receiver now dead-letters that delivery at once (attempt outcome `auth_rejected`) instead of retrying for an hour, and flags the connection: **Key rejected** on the dashboard card, a `doctor` warning and `authRejectedAt`/`authRejectedStatus` in connection health. Later events follow the usual delivery rules; a successful delivery or a replaced key clears the flag. **Migration 25, forward only:** two nullable `webhook_health` columns; older builds refuse the upgraded ledger.
 
 ### Added
 
