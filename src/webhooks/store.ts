@@ -32,10 +32,16 @@ export interface WebhookHealth {
   overflowCount: number;
   replayFloorCursor: string;
   oldestReplayAt: string | null;
+  /**
+   * The receiver refused this connection's credential (HTTP 401 or 403) on its latest attempt that got an answer, and
+   * nothing has been delivered since: replace the key. Null once a delivery succeeds or the key or URL is replaced.
+   */
+  authRejectedAt: string | null;
+  authRejectedStatus: number | null;
 }
 function notFound(): never { throw new GatewayError('not_found', 'Notification connection or job was not found.'); }
 
-export type AttemptOutcome = 'in_progress' | 'delivered' | 'http_error' | 'redirect' | 'network_error' | 'tls_error' |
+export type AttemptOutcome = 'in_progress' | 'delivered' | 'http_error' | 'auth_rejected' | 'redirect' | 'network_error' | 'tls_error' |
   'timeout' | 'response_too_large' | 'stopped' | 'abandoned' | 'expired' | 'cancelled';
 export interface AttemptResult { outcome: AttemptOutcome; statusCode: number | null }
 export interface DashboardTest { eventId: string; at: number; result: AttemptResult }
@@ -219,6 +225,8 @@ export class WebhookStore {
         overflow_count = 0, overflow_sequence = NULL, overflow_at = NULL, overflow_reason = NULL,
         last_test_at = NULL, last_test_outcome = NULL, last_test_status_code = NULL WHERE id = ?`)
         .run(randomUUID(), identityFor(settings, route), JSON.stringify(route), JSON.stringify(settings), id);
+      // A new key or URL answers for itself: the old rejection no longer describes this connection.
+      this.#db.prepare('UPDATE webhook_health SET auth_rejected_at = NULL, auth_rejected_status = NULL WHERE subscription_id = ?').run(id);
       this.#recordTest(id, test);
       return connection(this.#row(id)!);
     });
@@ -431,11 +439,18 @@ export class WebhookStore {
     transaction(this.#db, () => {
       if (!this.active(claim)) return;
       const now = this.#clock();
-      const state = result.outcome === 'delivered' ? 'delivered' : now >= claim.expiresAt ? 'expired' : 'pending';
+      // An auth rejection is permanent for this delivery: dead-letter it now (no backoff), and flag the connection.
+      const rejected = result.outcome === 'auth_rejected';
+      const state = result.outcome === 'delivered' ? 'delivered' : rejected || now >= claim.expiresAt ? 'expired' : 'pending';
       if (result.outcome === 'delivered') {
         this.#ensureHealth(claim.subscriptionId);
-        this.#db.prepare('UPDATE webhook_health SET last_success_at = ?, failure_streak = 0 WHERE subscription_id = ?').run(now, claim.subscriptionId);
+        this.#db.prepare(`UPDATE webhook_health SET last_success_at = ?, failure_streak = 0, auth_rejected_at = NULL, auth_rejected_status = NULL
+          WHERE subscription_id = ?`).run(now, claim.subscriptionId);
       } else if (result.outcome !== 'stopped') this.#failure(claim.subscriptionId, now);
+      if (rejected) {
+        this.#db.prepare('UPDATE webhook_health SET auth_rejected_at = ?, auth_rejected_status = ? WHERE subscription_id = ?')
+          .run(now, result.statusCode, claim.subscriptionId);
+      }
       if (state === 'expired') this.#deadLetters(claim.subscriptionId, 1);
       const delay = result.outcome === 'stopped' ? 0 : Math.min(300_000, 5000 * 2 ** Math.min(claim.attempt - 1, 10));
       this.#db.prepare('UPDATE webhook_attempts SET status_code = ?, outcome = ?, lease = NULL WHERE lease = ?')
@@ -478,7 +493,8 @@ export class WebhookStore {
       const iso = (value: unknown) => typeof value === 'number' ? new Date(value).toISOString() : null;
       return { id: row.id, health: { lastSuccessAt: iso(h.last_success_at), lastFailureAt: iso(h.last_failure_at),
         failureStreak: Number(h.failure_streak ?? 0), deadLettered: Number(h.dead_lettered ?? 0), pending: Number(h.pending),
-        overflowCount: Number(h.overflow_count), replayFloorCursor: String(h.archive_floor ?? 0), oldestReplayAt: iso(h.oldest) } };
+        overflowCount: Number(h.overflow_count), replayFloorCursor: String(h.archive_floor ?? 0), oldestReplayAt: iso(h.oldest),
+        authRejectedAt: iso(h.auth_rejected_at), authRejectedStatus: typeof h.auth_rejected_status === 'number' ? h.auth_rejected_status : null } };
     });
   }
 
@@ -491,7 +507,8 @@ export class WebhookStore {
       jobs: row.jobs.filter((id) => this.#allowedJob(caller.clientId, id)),
       healthAvailable: this.#access(caller.clientId) === undefined,
       health: this.#access(caller.clientId) === undefined ? this.health(row.id)[0]!.health :
-        { lastSuccessAt: null, lastFailureAt: null, failureStreak: 0, deadLettered: 0, pending: 0, overflowCount: 0, replayFloorCursor: '0', oldestReplayAt: null },
+        { lastSuccessAt: null, lastFailureAt: null, failureStreak: 0, deadLettered: 0, pending: 0, overflowCount: 0, replayFloorCursor: '0', oldestReplayAt: null,
+          authRejectedAt: null, authRejectedStatus: null },
       subscriptions: this.#db.prepare('SELECT job_id AS jobId, events FROM webhook_job_bindings WHERE subscription_id = ? AND revision = ? ORDER BY job_id LIMIT ?')
         .all(row.id, row.revision, MAX_JOB_BINDINGS).filter((b) => this.#allowedJob(caller.clientId, String(b.jobId))).map((b) => ({ jobId: String(b.jobId), events: JSON.parse(String(b.events)) as WebhookEventType[] })),
     }));

@@ -32,7 +32,7 @@ async function receiver(t: TestContext) {
     }
     if (receipt.path.startsWith('/hold')) return;
     if (receipt.path === '/redirect') res.writeHead(307, { location: '/unexpected' }).end();
-    else res.writeHead(receipt.path === '/reject' ? 401 : 202).end('synthetic-private-response');
+    else res.writeHead(receipt.path === '/reject' ? 401 : receipt.path === '/fail' ? 500 : 202).end('synthetic-private-response');
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); });
@@ -115,7 +115,7 @@ describe('private webhook connection management', () => {
     }
   });
 
-  for (const [path, outcome] of [['/reject', 'http_error'], ['/redirect', 'redirect'], ['/hold-timeout', 'timeout']]) {
+  for (const [path, outcome] of [['/reject', 'auth_rejected'], ['/fail', 'http_error'], ['/redirect', 'redirect'], ['/hold-timeout', 'timeout']]) {
     test(`setup ${outcome} never activates a destination`, async (t) => {
       const f = await fixture(t, false, 80);
       const result = await f.api.post('connect', { session: f.session, requestId: randomUUID(), project: 'pilot',

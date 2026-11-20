@@ -29,7 +29,7 @@ const WEBHOOK_ERRORS = {
 };
 const WEBHOOK_TESTS = {
   delivered: 'Accepted', timeout: 'Timed out', network_error: 'Could not reach the receiver',
-  http_error: 'Receiver refused the test', redirect: 'Receiver redirected the test',
+  http_error: 'Receiver refused the test', auth_rejected: 'Receiver rejected the key', redirect: 'Receiver redirected the test',
   tls_error: 'Could not verify the receiver’s secure connection', response_too_large: 'Receiver response exceeded the limit',
   stopped: 'Test stopped', cancelled: 'Test stopped', abandoned: 'Test interrupted', expired: 'Test expired',
 };
@@ -278,7 +278,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
       const hosts = [...row.hosts, ...(row.targets ?? []).map((t) => t.host)].join(', ');
       return h('article', { class: 'panel webhook-connection', 'aria-label': `Connection for ${projects} on ${hosts || 'all hosts'}` },
         h('div', { class: 'panel__head' }, h('h3', { class: 'panel__title' }, projects),
-          pill(row.enabled === false ? 'unknown' : 'good', row.enabled === false ? 'Disabled' : 'Connected')),
+          row.enabled === false ? pill('unknown', 'Disabled') : row.health?.authRejectedAt ? pill('bad', 'Key rejected') : pill('good', 'Connected')),
         h('div', { class: 'panel__body' },
           kv([
             ['Host', hosts || 'All hosts'],
@@ -291,6 +291,7 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
             ['Last delivery', row.health?.lastSuccessAt ? time(row.health.lastSuccessAt) : 'No success recorded'],
             ['Last failure', row.health?.lastFailureAt ? time(row.health.lastFailureAt) : 'No failure recorded'],
             ['Failure streak', String(row.health?.failureStreak ?? 0)],
+            ...(row.health?.authRejectedAt ? [['Key rejected', `${time(row.health.authRejectedAt)}${Number.isInteger(row.health.authRejectedStatus) ? ` (HTTP ${row.health.authRejectedStatus})` : ''}. Events are not retried until the key is replaced.`]] : []),
             ['Pending events', String(row.health?.pending ?? 0)],
             ['Dead-lettered events', String(row.health?.deadLettered ?? 0)],
             ['Omitted events', String(row.health?.overflowCount ?? 0)],

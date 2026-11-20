@@ -13,6 +13,14 @@ const TLS_ERRORS = new Set(['CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'DEPTH_ZER
   'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'ERR_TLS_CERT_ALTNAME_INVALID',
   'CERT_REVOKED']);
 
+/**
+ * 401 and 403: the receiver refused the configured credential. Retrying the same bytes with the same key cannot succeed,
+ * so the store dead-letters the delivery at once instead of backing off (see WebhookStore.finish).
+ */
+export function isAuthRejection(statusCode: number | null): boolean {
+  return statusCode === 401 || statusCode === 403;
+}
+
 /** A real HTTP(S) POST: no redirects, no body retention, one deadline covering DNS/TLS/headers/body. */
 export function postWebhook(route: WebhookRoute, payload: string, timeoutMs = ATTEMPT_TIMEOUT_MS, signal?: AbortSignal): Promise<AttemptResult> {
   return new Promise((resolve) => {
@@ -44,7 +52,8 @@ export function postWebhook(route: WebhookRoute, payload: string, timeoutMs = AT
           bytes += chunk.length;
           if (bytes > MAX_RESPONSE_BYTES) finish('response_too_large');
         });
-        response.on('end', () => finish(statusCode !== null && statusCode >= 200 && statusCode < 300 ? 'delivered' : 'http_error'));
+        response.on('end', () => finish(statusCode !== null && statusCode >= 200 && statusCode < 300 ? 'delivered'
+          : isAuthRejection(statusCode) ? 'auth_rejected' : 'http_error'));
         response.on('error', () => finish('network_error'));
         response.on('aborted', () => finish('network_error'));
       });
