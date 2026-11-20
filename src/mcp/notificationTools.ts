@@ -9,6 +9,8 @@ const events = z.array(z.enum(WEBHOOK_EVENTS)).min(1).max(WEBHOOK_EVENTS.length)
 const health = z.object({
   lastSuccessAt: z.string().nullable(), lastFailureAt: z.string().nullable(), failureStreak: z.number(),
   deadLettered: z.number(), pending: z.number(), overflowCount: z.number(), replayFloorCursor: z.string(), oldestReplayAt: z.string().nullable(),
+  authRejectedAt: z.string().nullable().describe('When the receiver last refused the connection credential (HTTP 401/403), if nothing was delivered since. Each delivery refused that way is dead-lettered without retries; later events follow the usual delivery rules. Cleared by a successful delivery or a replaced key'),
+  authRejectedStatus: z.number().nullable(),
 });
 
 /** Bot operations use only operator-provisioned destinations, never caller-supplied URLs or credentials. */

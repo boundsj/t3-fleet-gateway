@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- **Webhook auth rejections are not retried.** An HTTP 401 or 403 from a receiver now dead-letters that delivery at once (attempt outcome `auth_rejected`) instead of retrying for an hour, and flags the connection: **Key rejected** on the dashboard card, a `doctor` warning and `authRejectedAt`/`authRejectedStatus` in connection health. Later events follow the usual delivery rules; a successful delivery or a replaced key clears the flag. **Migration 25, forward only:** two nullable `webhook_health` columns; older builds refuse the upgraded ledger.
+
 ### Added
 
 - **Staged attachment uploads.** `work_attachment_prepare` (Operate on any machine) returns an `attachmentId` and a single-use `uploadUrl`; agents `POST` the raw bytes to `/attachments` on the MCP listener (exact size and Content-Type, image signature checked, 10-minute token, one use) and pass `{ attachmentId, name? }` in `work_start` or `work_continue` attachments, mixed freely with inline base64 under the same 8-file / 10 MiB totals. Ids are owned by the preparing client and claimed once; at most 8 unclaimed files / 10 MiB per client; expired rows are swept. Ids, tokens, URLs, names and bytes never reach logs, events, dashboards or webhooks. **Migration 24, forward only:** adds the private `staged_attachments` table; older builds refuse the upgraded ledger.

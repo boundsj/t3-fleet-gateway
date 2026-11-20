@@ -129,7 +129,7 @@ describe('dashboard demo fleet', () => {
       assert.deepEqual(connection.projects, ['atlas-web']);
       assert.deepEqual(connection.hosts, ['studio']);
       const target = { id: connection.id, revision: connection.revision };
-      for (const [url, outcome, statusCode] of [[receiver.rejectUrl, 'http_error', 401], [receiver.timeoutUrl, 'timeout', null]] as const) {
+      for (const [url, outcome, statusCode] of [[receiver.rejectUrl, 'auth_rejected', 401], [receiver.timeoutUrl, 'timeout', null]] as const) {
         const rejected = await mutate('replace', { ...target, url, authHeader: receiver.authHeader });
         assert.equal(rejected.status, 502);
         assert.deepEqual(rejected.body.test, { outcome, statusCode });

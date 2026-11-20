@@ -565,6 +565,88 @@ describe('durable webhook delivery and polling fallback', () => {
     assert.equal(attempts.out.includes(sink.url), false);
   });
 
+  for (const status of [401, 403]) test(`HTTP ${status} dead-letters the delivery at once, flags the connection, and a later success clears it`, async (t) => {
+    const sink = await receiver(t);
+    sink.respond((_entry, response) => response.writeHead(status).end('Synthetic private response'));
+    const h = await harness(t, [subscription(sink.url)]);
+    const job = await startJob(h.agent);
+    await h.agent.call('work_cancel', { jobId: job.jobId });
+    await h.deliver();
+    assert.equal(sink.received.length, 1);
+    for (const ms of [5000, 10 * MINUTE, HOUR]) {
+      h.gw.clock.advance(ms);
+      await h.deliver();
+    }
+    assert.equal(sink.received.length, 1, 'an auth rejection is never retried');
+    const db = h.gw.services.db;
+    assert.deepEqual(db.prepare("SELECT state, payload FROM webhook_deliveries WHERE subscription_id = 'routine'").all().map((row) => ({ ...row })),
+      [{ state: 'expired', payload: null }]);
+    assert.deepEqual(db.prepare("SELECT outcome, status_code FROM webhook_attempts WHERE subscription_id = 'routine'").all().map((row) => ({ ...row })),
+      [{ outcome: 'auth_rejected', status_code: status }]);
+    const health = h.gw.services.webhooks.health('routine')[0]!.health;
+    assert.equal(health.authRejectedStatus, status);
+    assert.equal(health.authRejectedAt !== null, true);
+    assert.deepEqual([health.deadLettered, health.failureStreak, health.pending], [1, 1, 0]);
+    const doctor = (await runDoctor(h.gw.services, h.gw.dataDir)).find((check) => check.name === 'webhook routine')!;
+    assert.equal(doctor.level, 'warn');
+    assert.match(doctor.detail, new RegExp(`rejected the credential \\(HTTP ${status}\\).*without retries; replace the key`));
+    for (const leak of ['Synthetic private response', HEADER_VALUE, sink.url]) assert.equal(doctor.detail.includes(leak), false);
+
+    // The receiver accepts the key again: the next event gets its one attempt, delivers, and clears the flag.
+    sink.respond((_entry, response) => response.writeHead(204).end());
+    const next = await startJob(h.agent);
+    await h.agent.call('work_cancel', { jobId: next.jobId });
+    await h.deliver();
+    assert.equal(sink.received.length, 2);
+    const healed = h.gw.services.webhooks.health('routine')[0]!.health;
+    assert.deepEqual([healed.authRejectedAt, healed.authRejectedStatus, healed.failureStreak], [null, null, 0]);
+    assertNotLogged(h.gw, ['Synthetic private response', HEADER_VALUE]);
+  });
+
+  test('a 401 or 403 is decided by its status line: a stalled or oversized rejection body is still not retried', async (t) => {
+    const sink = await receiver(t);
+    const h = await harness(t, [subscription(sink.url)], { attemptTimeoutMs: 200 });
+    const cases: [number, (response: ServerResponse) => void][] = [
+      [403, (response) => { response.writeHead(403); response.write('Synthetic private stalled body'); }],
+      [401, (response) => { response.writeHead(401); response.end(Buffer.alloc(64 * 1024, 120)); }],
+    ];
+    for (const [index, [status, answer]] of cases.entries()) {
+      sink.respond((_entry, response) => answer(response));
+      const job = await startJob(h.agent);
+      await h.agent.call('work_cancel', { jobId: job.jobId });
+      await h.deliver();
+      h.gw.clock.advance(10 * MINUTE);
+      await h.deliver();
+      assert.equal(sink.received.length, index + 1, `HTTP ${status} is attempted once`);
+      const last = h.gw.services.db.prepare("SELECT outcome, status_code FROM webhook_attempts WHERE subscription_id = 'routine' ORDER BY id DESC LIMIT 1").get()!;
+      assert.deepEqual({ ...last }, { outcome: 'auth_rejected', status_code: status });
+      assert.equal(h.gw.services.webhooks.health('routine')[0]!.health.authRejectedStatus, status);
+    }
+  });
+
+  test('other non-2xx answers still retry; replacing a dashboard key clears only its own rejection', async (t) => {
+    const sink = await receiver(t);
+    sink.respond((entry, response) => response.writeHead(entry.headers.authorization === undefined ? 500 : 401).end());
+    const h = await harness(t, [subscription(sink.url)]);
+    const route = { url: sink.url, header: 'authorization', value: 'Bearer synthetic-dashboard-key' };
+    const ping = { eventId: crypto.randomUUID(), at: h.gw.clock(), result: { outcome: 'delivered' as const, statusCode: 200 } };
+    const bot = h.gw.services.webhooks.connectDashboard('bot', 'pilot', 'main', route, ping);
+    const job = await startJob(h.agent);
+    await h.agent.call('work_cancel', { jobId: job.jobId });
+    await h.deliver();
+    h.gw.clock.advance(5000);
+    await h.deliver();
+    const attempts = (id: string) => h.gw.services.db.prepare('SELECT outcome FROM webhook_attempts WHERE subscription_id = ? AND delivery_id IS NOT NULL ORDER BY id')
+      .all(id).map((row) => row.outcome);
+    assert.deepEqual(attempts('routine'), ['http_error', 'http_error'], 'a 500 keeps backing off and retrying');
+    assert.deepEqual(attempts(bot.id), ['auth_rejected']);
+    assert.equal(h.gw.services.webhooks.health('routine')[0]!.health.authRejectedAt, null);
+    assert.notEqual(h.gw.services.webhooks.health(bot.id)[0]!.health.authRejectedAt, null);
+    const current = h.gw.services.webhooks.listConnections().find((row) => row.id === bot.id)!;
+    h.gw.services.webhooks.replaceDashboard(bot.id, current.revision, { ...route, value: 'Bearer synthetic-new-key' }, ping);
+    assert.deepEqual([h.gw.services.webhooks.health(bot.id)[0]!.health.authRejectedAt, h.gw.services.webhooks.health(bot.id)[0]!.health.authRejectedStatus], [null, null]);
+  });
+
   test('pending committed events and authoritative run attribution survive gateway restart', async (t) => {
     const sink = await receiver(t);
     const subscriptions = [subscription(sink.url)];

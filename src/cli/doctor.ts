@@ -73,9 +73,10 @@ export async function runDoctor(services: GatewayServices, dataDir: string): Pro
 
   for (const connection of services.webhooks.health()) {
     const h = connection.health;
-    results.push({ level: h.failureStreak || h.deadLettered || h.overflowCount ? 'warn' : 'ok', name: `webhook ${connection.id}`,
+    results.push({ level: h.failureStreak || h.deadLettered || h.overflowCount || h.authRejectedAt ? 'warn' : 'ok', name: `webhook ${connection.id}`,
       detail: `last success ${h.lastSuccessAt ?? 'unknown'}; last failure ${h.lastFailureAt ?? 'unknown'}; ` +
-        `failure streak ${h.failureStreak}; pending ${h.pending}; dead-lettered ${h.deadLettered}; omitted ${h.overflowCount}` });
+        `failure streak ${h.failureStreak}; pending ${h.pending}; dead-lettered ${h.deadLettered}; omitted ${h.overflowCount}` +
+        (h.authRejectedAt ? `; receiver rejected the credential (HTTP ${h.authRejectedStatus ?? '401/403'}) at ${h.authRejectedAt}; deliveries rejected this way are dead-lettered without retries; replace the key` : '') });
   }
   const reachable = new Set<string>();
   for (const host of config.hosts) {

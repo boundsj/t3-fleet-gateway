@@ -570,6 +570,14 @@ CREATE INDEX jobs_monitoring ON jobs(host_id, monitoring_settled_at, monitoring_
 CREATE INDEX staged_attachments_client ON staged_attachments(client_id, claimed_at);
 CREATE INDEX staged_attachments_expiry ON staged_attachments(expires_at);`,
   },
+  {
+    version: 25,
+    name: 'webhook auth rejections',
+    // Additive and nullable: the time and status (401 or 403) of a receiver refusing a connection's credential. Unknown for
+    // existing rows; set by the sender, cleared by a successful delivery or a replaced key or URL.
+    sql: `ALTER TABLE webhook_health ADD COLUMN auth_rejected_at INTEGER;
+ALTER TABLE webhook_health ADD COLUMN auth_rejected_status INTEGER;`,
+  },
 ];
 
 /**
