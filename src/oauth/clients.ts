@@ -196,6 +196,8 @@ export class ClientStore {
     return transaction(this.#db, () => {
       if (!this.get(id)) return undefined;
       this.#db.prepare('UPDATE oauth_clients SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ?').run(now, id);
+      // Its staged uploads: outstanding upload URLs stop working and unclaimed bytes go (claimed rows hold none).
+      this.#db.prepare('DELETE FROM staged_attachments WHERE client_id = ? AND claimed_at IS NULL').run(id);
       const result = this.#db
         .prepare('UPDATE token_families SET revoked_at = ?, revoked_reason = ? WHERE client_id = ? AND revoked_at IS NULL')
         .run(now, reason, id);

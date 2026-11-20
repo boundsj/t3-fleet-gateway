@@ -16,6 +16,8 @@ import { createRouter, listen, type RunningServer } from './http/server.ts';
 import { JobEngine } from './jobs/engine.ts';
 import { JobService } from './jobs/service.ts';
 import { JobStore } from './jobs/store.ts';
+import { StagedAttachments } from './jobs/stagedAttachments.ts';
+import { attachmentUploadRoute } from './http/attachmentUpload.ts';
 import type { Logger } from './log.ts';
 import { catalogTools } from './mcp/catalogTools.ts';
 import { createMcpEndpoint } from './mcp/endpoint.ts';
@@ -106,7 +108,7 @@ export function openServices(options: ServiceOptions): GatewayServices {
     catalog,
     threads: new ThreadCatalog(registry, clock, logger),
     webhooks,
-    jobs: new JobService({ config, store: new JobStore(db, clock, logger, webhooks), registry, catalog, clock, logger }),
+    jobs: new JobService({ config, store: new JobStore(db, clock, logger, webhooks), staged: new StagedAttachments(db, clock), registry, catalog, clock, logger }),
     async close() {
       await registry.close();
       db.close();
@@ -175,7 +177,12 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
     owner: services.owner,
     hosts: config.hosts,
   });
-  const router = createRouter([...oauthRoutes({ ...services, publicUrl: config.publicUrl, hosts: config.hosts, browser }), mcp.route], logger);
+  const router = createRouter([
+    ...oauthRoutes({ ...services, publicUrl: config.publicUrl, hosts: config.hosts, browser }),
+    mcp.route,
+    // Staged attachment bytes: authorized by the single-use token from work_attachment_prepare. Never on the dashboard listener.
+    attachmentUploadRoute({ staged: services.jobs.staged, publicUrl: config.publicUrl, allowedOrigins: config.allowedOrigins, logger }),
+  ], logger);
   const engine = new JobEngine({
     config,
     store: services.jobs.store,
@@ -258,6 +265,11 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   });
   if (services.webhooks.listConnections().length && options.webhookSender?.autoStart !== false) webhooks.start();
   if (options.jobEngine?.autoStart !== false) engine.start();
+  // Expired staged uploads are deleted (also opportunistically on each prepare). Codes only in the log.
+  const stagedSweep = setInterval(() => {
+    try { services.jobs.staged.sweep(); } catch { logger.warn('attachment.sweep_failed'); }
+  }, 5 * MINUTE);
+  stagedSweep.unref();
   // Checked in the background: an unreachable host must not delay startup or shutdown. Logged as warnings.
   const modelCheck = new AbortController();
   void warnProjectsWithoutModel(config, services.registry, logger, modelCheck.signal);
@@ -268,6 +280,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
   const shutdown = async (): Promise<void> => {
     logger.info('gateway.stopping');
     ready = false;
+    clearInterval(stagedSweep);
     const stoppedManagement = management.stop();
     const stoppedReachability = reachability?.stop();
     // Not awaited: a startup model call still in flight ends when the T3 clients close below.

@@ -1,6 +1,7 @@
 import { projectAccess, projectFilter, type ProjectAccess } from '../oauth/projectAccess.ts';
 import { randomUUID } from 'node:crypto';
 import { validateAttachments, type AttachmentInput } from './attachments.ts';
+import { claimStaged } from './stagedAttachments.ts';
 import { sha256Hex } from '../crypto.ts';
 import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
@@ -476,7 +477,11 @@ export interface NewJob {
   /** Known at creation for jobs with a launch spec; alias-only jobs learn it at dispatch. */
   t3ProjectId?: string | null;
   launchSpec?: LaunchSpec | null;
-  attachments?: AttachmentInput[];
+  /**
+   * Inline files, or a loader called inside the create transaction only for a new job (after the replay check), returning
+   * the files and the staged ids to claim in that same transaction.
+   */
+  attachments?: AttachmentInput[] | (() => { attachments: AttachmentInput[]; stagedIds: readonly string[] });
 }
 
 /** An existing T3 thread the operator adopts as a standing job, with its state from a first read. */
@@ -716,8 +721,12 @@ export class JobStore {
           job.id, job.clientId, job.requestId, job.projectAlias, job.hostId, job.task, job.title, job.branch, job.runtimeMode, now, now, now,
           job.t3ProjectId ?? null, job.launchSpec ? JSON.stringify(job.launchSpec) : null,
         );
-      if (job.attachments?.length) this.#db.prepare('INSERT INTO job_launch_attachments (job_id, payload) VALUES (?, ?)')
-        .run(job.id, JSON.stringify(job.attachments));
+      const files = typeof job.attachments === 'function' ? job.attachments() : { attachments: job.attachments ?? [], stagedIds: [] };
+      if (files.attachments.length) this.#db.prepare('INSERT INTO job_launch_attachments (job_id, payload) VALUES (?, ?)')
+        .run(job.id, JSON.stringify(files.attachments));
+      if (files.stagedIds.length) {
+        claimStaged(this.#db, { clientId: job.clientId, ids: files.stagedIds, jobId: job.id, tool: 'work_start', requestId: job.requestId }, now);
+      }
       this.#insertEvent(job.id, 'created', null, 'queued', {}, now);
       this.#db
         .prepare('INSERT INTO idempotency_keys (client_id, request_id, tool, input_hash, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
@@ -1140,10 +1149,16 @@ export class JobStore {
   }
 
   /** No downstream retry key exists for attachment sends. Write the uncertainty before touching that API. */
-  beginAttachmentSend(clientId: string, requestId: string): boolean {
-    return this.#db.prepare(`UPDATE idempotency_keys SET response = ?
-      WHERE client_id = ? AND tool = 'work_continue' AND request_id = ? AND response IS NULL`)
-      .run(JSON.stringify({ attachmentOutcome: 'unknown', sendAttemptedAt: this.#clock() }), clientId, requestId).changes === 1;
+  beginAttachmentSend(clientId: string, requestId: string, staged?: { jobId: string; ids: readonly string[] }): boolean {
+    // Staged files are claimed at this same boundary: once, and only by the send that may have used them.
+    return transaction(this.#db, () => {
+      const now = this.#clock();
+      const marked = this.#db.prepare(`UPDATE idempotency_keys SET response = ?
+        WHERE client_id = ? AND tool = 'work_continue' AND request_id = ? AND response IS NULL`)
+        .run(JSON.stringify({ attachmentOutcome: 'unknown', sendAttemptedAt: now }), clientId, requestId).changes === 1;
+      if (marked && staged?.ids.length) claimStaged(this.#db, { clientId, ids: staged.ids, jobId: staged.jobId, tool: 'work_continue', requestId }, now);
+      return marked;
+    });
   }
 
   /** Bind an uncertain plain send to its original authorization identity before touching T3. No credential is stored here. */

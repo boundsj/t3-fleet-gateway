@@ -13,7 +13,8 @@ import { T3ToolError } from '../t3/results.ts';
 import type { ThreadItem, ThreadRead } from '../t3/schemas.ts';
 import { cleanThreadTitle, ThreadCatalog } from '../hosts/threads.ts';
 import { HOUR, SECOND, type Clock } from '../time.ts';
-import { attachmentHashes, validateAttachments, type AttachmentInput } from './attachments.ts';
+import { attachmentHashes, isStagedRef, validateAttachmentItems, validateAttachments, type AttachmentInput, type AttachmentItem } from './attachments.ts';
+import type { PrepareInput, StagedAttachments } from './stagedAttachments.ts';
 import { scanActivity } from './activity.ts';
 import { EXCERPT_CHARS, holdsReadPosition, isActiveStatus, isDelegatedWorkActive, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { newJobId } from './ids.ts';
@@ -40,6 +41,8 @@ export const MAX_QUESTION_CHARS = 64_000;
 const QUESTION_READ_TIMEOUT_MS = 5 * SECOND;
 export const MAX_TITLE_CHARS = 80;
 export const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+/** Staged attachment bytes all follow-ups of this process may hold in memory at once (four full requests). */
+export const MAX_STAGED_IN_FLIGHT_BYTES = 40 * 1024 * 1024;
 
 const TITLE_FROM_TASK_CHARS = 60;
 /** Pages of 100 messages read to find the end of a thread being adopted (messages view). */
@@ -70,7 +73,7 @@ export interface StartInput {
    */
   workspace?: WorkspaceSelection | undefined;
   task: string;
-  attachments?: AttachmentInput[] | undefined;
+  attachments?: AttachmentItem[] | undefined;
   requestId: string;
   title?: string | undefined;
 }
@@ -78,7 +81,7 @@ export interface StartInput {
 export interface ContinueInput {
   jobId: string;
   message: string;
-  attachments?: AttachmentInput[] | undefined;
+  attachments?: AttachmentItem[] | undefined;
   requestId: string;
 }
 
@@ -135,6 +138,19 @@ export interface JobServiceOptions {
   catalog: CatalogService;
   clock: Clock;
   logger: Logger;
+  /** Staged uploads (work_attachment_prepare), on the job ledger's database. */
+  staged: StagedAttachments;
+}
+
+/** What work_attachment_prepare returns: the upload URL carries the single-use token and is shown only to its caller. */
+export interface PreparedAttachment {
+  attachmentId: string;
+  uploadUrl: string;
+  name: string | null;
+  mimeType: string;
+  sizeBytes: number;
+  expiresAt: number;
+  claimExpiresAt: number;
 }
 
 export interface PendingQuestion {
@@ -197,7 +213,7 @@ export function inputHash(tool: string, input: Record<string, unknown>): string 
  * changed target or selection under the same request id conflicts.
  */
 export function startInputHash(input: StartInput): string {
-  const attachments = validateAttachments(input.attachments);
+  const attachments = validateAttachmentItems(input.attachments);
   if (input.target === undefined && input.modelSelection === undefined && input.workspace === undefined && attachments.length === 0) {
     return inputHash('work_start', { project: input.project, task: input.task, title: input.title });
   }
@@ -266,6 +282,7 @@ export class JobService {
   readonly #threadCatalog: ThreadCatalog;
   readonly #clock: Clock;
   readonly #logger: Logger;
+  readonly staged: StagedAttachments;
   /** Set by the running gateway so new work is dispatched without waiting for the next poll. */
   wake: () => void = () => {};
 
@@ -277,6 +294,36 @@ export class JobService {
     this.#threadCatalog = new ThreadCatalog(options.registry, options.clock, options.logger);
     this.#clock = options.clock;
     this.#logger = options.logger;
+    this.staged = options.staged;
+  }
+
+  /**
+   * Reserve a staged upload for work_start or work_continue. Needs Operate on at least one host (the tool registry checks);
+   * where the file may go is checked when it is used, like an inline attachment.
+   */
+  prepareAttachment(caller: Caller, input: PrepareInput): PreparedAttachment {
+    const prepared = this.staged.prepare(caller.clientId, input);
+    return {
+      attachmentId: prepared.attachmentId,
+      uploadUrl: `${this.#config.publicUrl}/attachments?token=${prepared.token}`,
+      name: prepared.name,
+      mimeType: prepared.mimeType,
+      sizeBytes: prepared.sizeBytes,
+      expiresAt: prepared.uploadExpiresAt,
+      claimExpiresAt: prepared.expiresAt,
+    };
+  }
+
+  /**
+   * A tool call's attachments as inline files, in order: staged references become the caller's own uploaded bytes. Every
+   * file is then checked again as a whole (bounds, totals, signatures, default names). Nothing is claimed here.
+   */
+  #resolveAttachments(caller: Caller, items: readonly AttachmentItem[]): { attachments: AttachmentInput[]; stagedIds: string[] } {
+    const refs = items.flatMap((item, index) => isStagedRef(item) ? [{ index, ref: item }] : []);
+    if (!refs.length) return { attachments: validateAttachments(items as AttachmentInput[]), stagedIds: [] };
+    const resolved = this.staged.resolve(caller.clientId, refs);
+    const attachments = validateAttachments(items.map((item, index) => isStagedRef(item) ? resolved.get(index)! : item));
+    return { attachments, stagedIds: refs.map(({ ref }) => ref.attachmentId) };
   }
 
   projectAccess(caller: Pick<Caller, 'clientId'>): ProjectAccess { return expandProjectAccess(this.store.projectAccess(caller.clientId), this.#config); }
@@ -467,6 +514,7 @@ export class JobService {
     let project = input.project === undefined ? undefined : this.#projectFor(caller, input.project, 'operate');
     const host = project ? this.#hostFor(caller, project.host, 'operate') : this.#hostFor(caller, input.target!.host, 'operate');
     if (input.target?.projectId !== undefined) await this.authorizeProject(caller, host.id, input.target.projectId, 'operate');
+    const items = validateAttachmentItems(input.attachments);
     const hostOnly = input.target !== undefined && input.target.projectId === undefined;
     if (!host.discovery.enabled && (input.target?.projectId !== undefined || input.modelSelection !== undefined)) {
       throw new GatewayError(
@@ -509,7 +557,7 @@ export class JobService {
         projectAlias: project.alias,
         hostId: project.host,
         task: input.task,
-        attachments: validateAttachments(input.attachments),
+        attachments: () => this.#startAttachments(caller, items),
         title: threadTitle(id, input.task, input.title),
         branch: aliasOnly?.workspace.type === 'root' ? '' : `${project.branchPrefix}${id}`,
         runtimeMode: project.runtimeMode,
@@ -540,7 +588,7 @@ export class JobService {
       projectAlias: spec.alias ?? projectRef(host.id, spec.projectId!),
       hostId: host.id,
       task: input.task,
-      attachments: validateAttachments(input.attachments),
+      attachments: () => this.#startAttachments(caller, items),
       title: threadTitle(id, input.task, input.title),
       // A root job runs in the project's own folder, on whatever branch is checked out there: it has none of its own.
       branch: spec.v === 2 || (spec.v === 3 && spec.workspace.type === 'root') ? '' : `${branchPrefix}${id}`,
@@ -1078,6 +1126,9 @@ export class JobService {
    * T3 clientRequestId under the same durably bound authorization identity. Attachment sends instead keep a durable uncertainty marker and never resend.
    */
   readonly #attachmentContinues = new Set<string>();
+  /** Staged ids a follow-up has loaded and not yet claimed or let go, and the bytes they hold in memory (this process). */
+  readonly #stagedInFlight = new Set<string>();
+  #stagedInFlightBytes = 0;
 
   async continue(caller: Caller, input: ContinueInput): Promise<ContinueResult> {
     if (!input.attachments?.length) return this.#continue(caller, input);
@@ -1095,9 +1146,9 @@ export class JobService {
     // Before the request id is looked up, so a replay never returns a stored result for a job the agent may not operate.
     let job = this.#jobFor(caller, input.jobId, 'operate');
     if (!audited) this.#auditThread(caller, job, 'continue');
-    const attachments = validateAttachments(input.attachments);
+    const items = validateAttachmentItems(input.attachments);
     const hash = inputHash('work_continue', { jobId: input.jobId, message: input.message,
-      ...(attachments.length ? { attachments: attachmentHashes(attachments) } : {}),
+      ...(items.length ? { attachments: attachmentHashes(items) } : {}),
     });
     const key = this.store.idempotencyKey(caller.clientId, 'work_continue', input.requestId);
     if (key) {
@@ -1117,12 +1168,75 @@ export class JobService {
     }
     const threadId = job.threadId;
     if (threadId === null) throw new GatewayError('job_state_conflict', `Job ${job.id} has no thread.`);
+    let attachments: AttachmentInput[];
+    let stagedIds: string[] = [];
+    let releaseStaged = () => {};
     try {
+      // Replays returned above. Staged files are reserved before their bytes are loaded, so concurrent requests cannot each
+      // hold a copy, and claimed only at the durable send boundary.
+      releaseStaged = this.#reserveStaged(caller, items);
+      ({ attachments, stagedIds } = this.#resolveAttachments(caller, items));
       await this.#validateAdoptedResume(job);
     } catch (error) {
+      releaseStaged();
       if (!key) this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
       throw error;
     }
+    try {
+      return await this.#sendContinue(caller, input, job, key, threadId, attachments, stagedIds);
+    } finally {
+      releaseStaged();
+    }
+  }
+
+  /**
+   * A new job's files, loaded inside the transaction that records it, after the ledger's own replay and conflict checks: a
+   * concurrent identical request replays instead of finding its file claimed, and no copy is held across an await. Files a
+   * follow-up of the same client is sending are refused like there.
+   */
+  #startAttachments(caller: Caller, items: readonly AttachmentItem[]): { attachments: AttachmentInput[]; stagedIds: string[] } {
+    this.#checkStagedFree(caller, items);
+    return this.#resolveAttachments(caller, items);
+  }
+
+  #stagedKey(caller: Caller, id: string): string {
+    return `${caller.clientId}\n${id}`;
+  }
+
+  #checkStagedFree(caller: Caller, items: readonly AttachmentItem[]): void {
+    // Keyed by owner: another client's id is never reported as busy; it reads as unknown when resolved.
+    if (items.some((item) => isStagedRef(item) && this.#stagedInFlight.has(this.#stagedKey(caller, item.attachmentId)))) {
+      throw new GatewayError('job_state_conflict', 'A staged attachment in this request is being sent by another request. Retry the same requestId later.');
+    }
+  }
+
+  /**
+   * Hold the staged ids of one follow-up while its bytes are in memory. An id another follow-up holds, or a load beyond the
+   * gateway-wide budget, is refused with job_state_conflict before anything is read; the same requestId may be retried.
+   */
+  #reserveStaged(caller: Caller, items: readonly AttachmentItem[]): () => void {
+    const ids = items.flatMap((item) => isStagedRef(item) ? [item.attachmentId] : []);
+    if (!ids.length) return () => {};
+    this.#checkStagedFree(caller, items);
+    const bytes = this.staged.sizes(caller.clientId, ids);
+    if (this.#stagedInFlightBytes + bytes > MAX_STAGED_IN_FLIGHT_BYTES) {
+      throw new GatewayError('job_state_conflict', 'The gateway is busy sending other attachments. Retry the same requestId shortly.');
+    }
+    for (const id of ids) this.#stagedInFlight.add(this.#stagedKey(caller, id));
+    this.#stagedInFlightBytes += bytes;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      for (const id of ids) this.#stagedInFlight.delete(this.#stagedKey(caller, id));
+      this.#stagedInFlightBytes -= bytes;
+    };
+  }
+
+  async #sendContinue(
+    caller: Caller, input: ContinueInput, job: Job, key: ReturnType<JobStore['idempotencyKey']>, threadId: string,
+    attachments: AttachmentInput[], stagedIds: string[],
+  ): Promise<ContinueResult> {
     // Resuming an idle job that works in the project's own folder takes the folder back first, before anything is sent: while
     // another job holds it the follow-up waits, and the same requestId may be sent again later.
     let attempt = job.state === 'idle' ? this.store.reserveRoot(job.id, `continue:${caller.clientId}:${input.requestId}`) : ({ kind: 'not_needed' } as const);
@@ -1150,7 +1264,7 @@ export class JobService {
             if (attempt.kind === 'busy') throw rootBusy(current);
           }
           // CAS is durable across processes. After this boundary, never resend without a downstream retry key.
-          if (!this.store.beginAttachmentSend(caller.clientId, input.requestId)) throw attachmentOutcomeUnknown();
+          if (!this.store.beginAttachmentSend(caller.clientId, input.requestId, { jobId: job.id, ids: stagedIds })) throw attachmentOutcomeUnknown();
           endResume = this.store.beginMonitoringResume(job.id);
           const result = await client.sendAttachments(threadId, input.message, uploaded);
           sent = { ...result, delivery: 'accepted' };
@@ -1185,7 +1299,11 @@ export class JobService {
           }
           // This attempt was refused or definitely undelivered; only its own reservation token ends here.
           if (attempt.kind === 'held') this.store.abandonResume(job.id, attempt.token);
-          if (!released) {
+          // A retry of a recorded request whose send boundary was never crossed (no marker yet) failed definitely: keep the
+          // request open under its hash and report the real error, so the same requestId retries.
+          const unsent = attachments.length && key !== undefined &&
+            this.store.idempotencyKey(caller.clientId, 'work_continue', input.requestId)?.response === null;
+          if (!released && !unsent) {
             throw new GatewayError('t3_response_lost', 'A previous send attempt still has an uncertain outcome. Retry with the same requestId and T3 authorization, or inspect the thread.');
           }
           throw error;

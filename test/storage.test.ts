@@ -85,6 +85,7 @@ describe('database', () => {
       'owner_passkeys',
       'owner_sessions',
       'refresh_tokens',
+      'staged_attachments',
       'thread_action_events',
       'token_families',
       'webhook_archive',
@@ -135,7 +136,7 @@ describe('database', () => {
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 23);
+    assert.equal(SCHEMA_VERSION, 24);
     const after = db.prepare('SELECT * FROM jobs ORDER BY rowid').all() as Record<string, unknown>[];
     assert.deepEqual(
       after.map(
@@ -564,7 +565,7 @@ CREATE TABLE jobs (
     const db = openDatabase(path);
     t.after(() => db.close());
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 23);
+    assert.equal(SCHEMA_VERSION, 24);
     assert.deepEqual(['jobs', 'job_events', 'idempotency_keys'].map((table) => rowsWithoutV12(db, table)), before, 'no existing column changes');
     const added = db.prepare('SELECT workspace_kind, workspace_root_key, workspace_root_held_at, workspace_resume_tokens, probe_attempts, probe_retry_at FROM jobs ORDER BY rowid').all().map((row) => ({ ...row }));
     assert.deepEqual(added, Array(2).fill({ workspace_kind: null, workspace_root_key: null, workspace_root_held_at: null, workspace_resume_tokens: '[]', probe_attempts: 0, probe_retry_at: null }));
@@ -579,7 +580,7 @@ CREATE TABLE jobs (
     db.prepare("UPDATE jobs SET host_id = 'other' WHERE id = 'legacy0002'").run();
     hold('legacy0002', 'folder-a');
     assert.throws(() => db.prepare("UPDATE jobs SET workspace_kind = 'checkout' WHERE id = 'legacy0001'").run(), /CHECK/);
-    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 11)), /schema version 23 is newer than this build supports \(11\)/);
+    assert.throws(() => migrate(db, MIGRATIONS.slice(0, 11)), /schema version 24 is newer than this build supports \(11\)/);
     assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
     const fresh = openDatabase(join(tempDir(t), 'fresh.db'));
     t.after(() => fresh.close());
@@ -850,6 +851,23 @@ test('migration 23 preserves populated version 22 jobs and requires fresh eviden
   assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table}`).all()), history);
   assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
   assert.throws(() => migrate(db, MIGRATIONS.slice(0, 22)), /newer than this build supports/);
+});
+
+test('migration 24 adds an empty private staged attachment table to a populated version 23 ledger', (t) => {
+  const db = new DatabaseSync(join(tempDir(t), 'staged.db'));
+  t.after(() => db.close());
+  migrate(db, MIGRATIONS.slice(0, 23));
+  db.exec(`INSERT INTO jobs (id, client_id, request_id, project_alias, host_id, state, task, title, branch, runtime_mode,
+    created_at, updated_at, state_changed_at) VALUES ('staged0001', 'c', 'r', 'pilot', 'main', 'queued', 'Synthetic', 'Synthetic', 'b', 'auto', 1, 1, 1);
+    INSERT INTO job_launch_attachments (job_id, payload) VALUES ('staged0001', '[]');
+    INSERT INTO idempotency_keys (client_id, request_id, tool, input_hash, job_id, created_at) VALUES ('c', 'r', 'work_start', 'synthetic', 'staged0001', 1);`);
+  const tables = ['jobs', 'job_launch_attachments', 'idempotency_keys'];
+  const before = tables.map((table) => db.prepare(`SELECT * FROM ${table}`).all());
+  migrate(db);
+  assert.deepEqual(tables.map((table) => db.prepare(`SELECT * FROM ${table}`).all()), before);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM staged_attachments').get()!.n, 0);
+  assert.equal(db.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
+  assert.throws(() => migrate(db, MIGRATIONS.slice(0, 23)), /newer than this build supports/);
 });
 
 test('migration 20 gives existing bearer tokens safe IDs without changing their grants or values', (t) => {
