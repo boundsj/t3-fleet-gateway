@@ -326,7 +326,7 @@ Start from [config.example.json](config.example.json). The default location is `
 | [Workspace selection](docs/configuration.md#workspace-probe) | Work in the project's own folder or a worktree. Folder work edits the existing checkout directly; one gateway job per folder. |
 | [Standing jobs](docs/operations.md#standing-jobs) | Register a coordinator thread you already use and keep talking to it through one job ID. |
 | [Thread adoption](docs/design.md#external-thread-discovery-and-adoption) | Let selected bots find and adopt threads started in T3 (`threads:read`, `threads:control`). |
-| [Attachments](docs/attachments.md) | Send base64 images and files with `work_start` or `work_continue`. File URLs are not supported. |
+| [Attachments](docs/attachments.md) | Send images and files with `work_start` or `work_continue`: inline base64, or staged with `work_attachment_prepare` and an HTTP upload. File URLs are not supported. |
 | [Renewal](docs/configuration.md#renewal) | Credential renewal timing and alert thresholds. |
 
 ### Standing instructions for workers

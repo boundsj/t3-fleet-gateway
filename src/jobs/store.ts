@@ -1,6 +1,7 @@
 import { projectAccess, projectFilter, type ProjectAccess } from '../oauth/projectAccess.ts';
 import { randomUUID } from 'node:crypto';
 import { validateAttachments, type AttachmentInput } from './attachments.ts';
+import { claimStaged } from './stagedAttachments.ts';
 import { sha256Hex } from '../crypto.ts';
 import { transaction, type Database } from '../db/database.ts';
 import { GatewayError } from '../errors.ts';
@@ -477,6 +478,8 @@ export interface NewJob {
   t3ProjectId?: string | null;
   launchSpec?: LaunchSpec | null;
   attachments?: AttachmentInput[];
+  /** Staged attachment ids (already resolved into `attachments`) to claim in the same transaction as the job. */
+  stagedAttachmentIds?: readonly string[];
 }
 
 /** An existing T3 thread the operator adopts as a standing job, with its state from a first read. */
@@ -718,6 +721,9 @@ export class JobStore {
         );
       if (job.attachments?.length) this.#db.prepare('INSERT INTO job_launch_attachments (job_id, payload) VALUES (?, ?)')
         .run(job.id, JSON.stringify(job.attachments));
+      if (job.stagedAttachmentIds?.length) {
+        claimStaged(this.#db, { clientId: job.clientId, ids: job.stagedAttachmentIds, jobId: job.id, tool: 'work_start', requestId: job.requestId }, now);
+      }
       this.#insertEvent(job.id, 'created', null, 'queued', {}, now);
       this.#db
         .prepare('INSERT INTO idempotency_keys (client_id, request_id, tool, input_hash, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
@@ -1140,10 +1146,16 @@ export class JobStore {
   }
 
   /** No downstream retry key exists for attachment sends. Write the uncertainty before touching that API. */
-  beginAttachmentSend(clientId: string, requestId: string): boolean {
-    return this.#db.prepare(`UPDATE idempotency_keys SET response = ?
-      WHERE client_id = ? AND tool = 'work_continue' AND request_id = ? AND response IS NULL`)
-      .run(JSON.stringify({ attachmentOutcome: 'unknown', sendAttemptedAt: this.#clock() }), clientId, requestId).changes === 1;
+  beginAttachmentSend(clientId: string, requestId: string, staged?: { jobId: string; ids: readonly string[] }): boolean {
+    // Staged files are claimed at this same boundary: once, and only by the send that may have used them.
+    return transaction(this.#db, () => {
+      const now = this.#clock();
+      const marked = this.#db.prepare(`UPDATE idempotency_keys SET response = ?
+        WHERE client_id = ? AND tool = 'work_continue' AND request_id = ? AND response IS NULL`)
+        .run(JSON.stringify({ attachmentOutcome: 'unknown', sendAttemptedAt: now }), clientId, requestId).changes === 1;
+      if (marked && staged?.ids.length) claimStaged(this.#db, { clientId, ids: staged.ids, jobId: staged.jobId, tool: 'work_continue', requestId }, now);
+      return marked;
+    });
   }
 
   /** Bind an uncertain plain send to its original authorization identity before touching T3. No credential is stored here. */

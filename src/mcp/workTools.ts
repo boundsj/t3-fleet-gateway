@@ -1,4 +1,4 @@
-import { attachmentsSchema } from '../jobs/attachments.ts';
+import { ATTACHMENT_MIME_TYPES, attachmentsSchema, MAX_ATTACHMENT_BYTES } from '../jobs/attachments.ts';
 import * as z from 'zod';
 import { responseThreadIdSchema, threadIdSchema } from '../t3/threadId.ts';
 import { displayPullRequests, MAX_PULL_REQUESTS, MAX_TRACKED_PULL_REQUESTS, pullRequestsSchema } from '../jobs/pullRequests.ts';
@@ -343,7 +343,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'Start work on a machine. When the user names no project, pass target { host } to use that machine’s configured T3 internal scratch workspace. ' +
       'When the user names a project, use its configured alias or explicit target { host, projectId }; project work creates a fresh git worktree and branch, unless the project\'s host chooses workspaces (see workspace below). ' +
       'An unknown named project must be resolved or reported, never treated as scratch. The gateway opens a T3 Code ' +
-      'thread there and gives the worker your task and optional base64 image/file attachments. Returns at once with a jobId in state "queued"; the job moves to "running" ' +
+      'thread there and gives the worker your task and optional image/file attachments (inline base64, or staged with work_attachment_prepare for anything large). Returns at once with a jobId in state "queued"; the job moves to "running" ' +
       'when its host has a free slot. Follow it with work_feed (recommended: poll with the last cursor) or work_status. ' +
       'Idempotent: always pass a unique requestId per new piece of work; retrying with the same requestId and the same input ' +
       'returns the same job (created=false) instead of starting another, and reusing a requestId with different input is ' +
@@ -601,7 +601,7 @@ export function workTools(jobs: JobService): GatewayTool[] {
       'is false, nothing it delegated is still running: send follow-ups when its reply asks for input or the work is done, or ' +
       'when work_feed reports delegated_work_ended (its delegated work ended but it did not resume: ask it to check on that work). ' +
       'On a settled idle job, sending resumes the thread and T3 clears settlement. Terminal jobs cannot be continued. ' +
-      'Optional attachments send base64 images or files through T3 host storage, outside the repository. ' +
+      'Optional attachments send images or files (inline base64, or { attachmentId } staged with work_attachment_prepare) through T3 host storage, outside the repository. ' +
       'Idempotent: pass a unique requestId per message; ' +
       'repeating a requestId returns the first result without sending again, and if a call fails with an uncertain outcome, ' +
       'repeating it with the same requestId is safe. Attachment sends have no downstream retry key: an uncertain send stays blocked, ' +
@@ -729,7 +729,48 @@ export function workTools(jobs: JobService): GatewayTool[] {
     },
   });
 
-  return [workStart, workAdopt, workContinue, workRespond, workCancel, workSettle, workStatus, workMessages, workList, workFeed];
+  const workAttachmentPrepare = defineTool({
+    name: 'work_attachment_prepare',
+    title: 'Prepare an attachment upload',
+    description:
+      'Stage one image or file for work_start or work_continue without putting its bytes in a tool call (use this for screenshots ' +
+      'and anything bigger than a few KB). Three steps: (1) call this with the file\'s mimeType and exact sizeBytes (and an optional ' +
+      'name); (2) POST the raw bytes to the returned uploadUrl with Content-Type set to that mimeType, for example ' +
+      '`curl --fail -X POST -H "Content-Type: image/png" --data-binary @screenshot.png "<uploadUrl>"` (201 means uploaded); ' +
+      '(3) pass { attachmentId } in the attachments of work_start or work_continue. The uploadUrl works once and expires at ' +
+      'expiresAt (about 10 minutes); a failed upload spends it, so prepare again. An uploaded file can be used once, by this agent ' +
+      'only, until claimExpiresAt (about an hour). Keep the uploadUrl private: it is the upload credential. Limits match inline ' +
+      'attachments: 5 MiB per file, the same MIME types and names, image bytes must match their type; at most 8 unclaimed files ' +
+      'and 10 MiB per agent at a time. Nothing is sent to a machine until work_start or work_continue uses it.',
+    scope: OPERATE_SCOPE,
+    readOnly: false,
+    inputSchema: z.object({
+      name: z.string().min(1).max(128).optional().describe('Optional display filename: ASCII letters, digits, spaces, dot, underscore or hyphen; starts with a letter or digit. No paths.'),
+      mimeType: z.string().min(1).max(100).describe(`One of ${ATTACHMENT_MIME_TYPES.join(', ')}`),
+      sizeBytes: z.int().min(1).max(MAX_ATTACHMENT_BYTES).describe('The exact size of the file in bytes; the upload must match it'),
+    }),
+    outputSchema: z.object({
+      attachmentId: z.string().describe('Pass { attachmentId } in work_start or work_continue attachments after uploading'),
+      uploadUrl: z.string().describe('POST the raw bytes here once, with Content-Type equal to mimeType. Contains a single-use secret'),
+      name: z.string().nullable(),
+      mimeType: z.string(),
+      sizeBytes: z.number(),
+      expiresAt: time.describe('The upload must finish before this'),
+      claimExpiresAt: time.describe('Use the uploaded file in work_start or work_continue before this'),
+    }),
+    async run(input, context) {
+      const prepared = jobs.prepareAttachment(context, input);
+      const structured = { ...prepared, expiresAt: isoTime(prepared.expiresAt), claimExpiresAt: isoTime(prepared.claimExpiresAt) };
+      return {
+        structured,
+        summary: `Prepared attachment ${prepared.attachmentId} (${prepared.mimeType}, ${prepared.sizeBytes} bytes). ` +
+          `Upload once before ${structured.expiresAt}: POST the raw bytes with Content-Type: ${prepared.mimeType} to ${prepared.uploadUrl} ` +
+          `Then pass { "attachmentId": "${prepared.attachmentId}" } in work_start or work_continue attachments before ${structured.claimExpiresAt}.`,
+      };
+    },
+  });
+
+  return [workStart, workAdopt, workContinue, workRespond, workCancel, workSettle, workStatus, workMessages, workList, workFeed, workAttachmentPrepare];
 }
 
 const DELEGATED_ENDED =

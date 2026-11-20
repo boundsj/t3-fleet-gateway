@@ -544,6 +544,32 @@ ALTER TABLE jobs ADD COLUMN monitoring_checked_at INTEGER;
 ALTER TABLE jobs ADD COLUMN monitoring_generation INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX jobs_monitoring ON jobs(host_id, monitoring_settled_at, monitoring_checked_at);`,
   },
+  {
+    version: 24,
+    name: 'staged attachment uploads',
+    // Private and additive: bytes an agent uploads before naming them in work_start or work_continue. Only a hash of the
+    // single-use upload token is stored; claimed rows keep no bytes. Expired rows are swept.
+    sql: `CREATE TABLE staged_attachments (
+  id TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL,
+  token_hash TEXT UNIQUE,
+  name TEXT,
+  mime_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+  data BLOB,
+  created_at INTEGER NOT NULL,
+  upload_expires_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  upload_started_at INTEGER,
+  uploaded_at INTEGER,
+  claimed_at INTEGER,
+  claimed_job_id TEXT,
+  claimed_tool TEXT,
+  claimed_request_id TEXT
+) STRICT;
+CREATE INDEX staged_attachments_client ON staged_attachments(client_id, claimed_at);
+CREATE INDEX staged_attachments_expiry ON staged_attachments(expires_at);`,
+  },
 ];
 
 /**

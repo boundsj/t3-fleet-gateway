@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- **Staged attachment uploads.** `work_attachment_prepare` (Operate on any machine) returns an `attachmentId` and a single-use `uploadUrl`; agents `POST` the raw bytes to `/attachments` on the MCP listener (exact size and Content-Type, image signature checked, 10-minute token, one use) and pass `{ attachmentId, name? }` in `work_start` or `work_continue` attachments, mixed freely with inline base64 under the same 8-file / 10 MiB totals. Ids are owned by the preparing client and claimed once; at most 8 unclaimed files / 10 MiB per client; expired rows are swept. Ids, tokens, URLs, names and bytes never reach logs, events, dashboards or webhooks. **Migration 24, forward only:** adds the private `staged_attachments` table; older builds refuse the upgraded ledger.
+
 ### Fixed
 
 - Tolerate budget-limited thread reads and paged linked PRs in newer T3 while retaining older response shapes. Backward worker-message scans drain each position window before advancing; message text uses the shared 20,000-character ceiling. PR tracking follows bounded cursor pages beyond the five-open-PR preview and fifty-link list page, retaining the last complete snapshot on pagination failure. Contract probes and synthetic regressions cover both generations. No migration or configuration change.
