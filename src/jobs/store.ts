@@ -477,9 +477,11 @@ export interface NewJob {
   /** Known at creation for jobs with a launch spec; alias-only jobs learn it at dispatch. */
   t3ProjectId?: string | null;
   launchSpec?: LaunchSpec | null;
-  attachments?: AttachmentInput[];
-  /** Staged attachment ids (already resolved into `attachments`) to claim in the same transaction as the job. */
-  stagedAttachmentIds?: readonly string[];
+  /**
+   * Inline files, or a loader called inside the create transaction only for a new job (after the replay check), returning
+   * the files and the staged ids to claim in that same transaction.
+   */
+  attachments?: AttachmentInput[] | (() => { attachments: AttachmentInput[]; stagedIds: readonly string[] });
 }
 
 /** An existing T3 thread the operator adopts as a standing job, with its state from a first read. */
@@ -719,10 +721,11 @@ export class JobStore {
           job.id, job.clientId, job.requestId, job.projectAlias, job.hostId, job.task, job.title, job.branch, job.runtimeMode, now, now, now,
           job.t3ProjectId ?? null, job.launchSpec ? JSON.stringify(job.launchSpec) : null,
         );
-      if (job.attachments?.length) this.#db.prepare('INSERT INTO job_launch_attachments (job_id, payload) VALUES (?, ?)')
-        .run(job.id, JSON.stringify(job.attachments));
-      if (job.stagedAttachmentIds?.length) {
-        claimStaged(this.#db, { clientId: job.clientId, ids: job.stagedAttachmentIds, jobId: job.id, tool: 'work_start', requestId: job.requestId }, now);
+      const files = typeof job.attachments === 'function' ? job.attachments() : { attachments: job.attachments ?? [], stagedIds: [] };
+      if (files.attachments.length) this.#db.prepare('INSERT INTO job_launch_attachments (job_id, payload) VALUES (?, ?)')
+        .run(job.id, JSON.stringify(files.attachments));
+      if (files.stagedIds.length) {
+        claimStaged(this.#db, { clientId: job.clientId, ids: files.stagedIds, jobId: job.id, tool: 'work_start', requestId: job.requestId }, now);
       }
       this.#insertEvent(job.id, 'created', null, 'queued', {}, now);
       this.#db

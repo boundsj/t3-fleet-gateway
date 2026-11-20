@@ -358,3 +358,57 @@ test('image signatures compare bytes, not a lossy text decode', async () => {
   assert.equal(signatureMatches('image/webp', webp), true);
   assert.equal(signatureMatches('image/webp', Buffer.from(webp.map((byte, i) => i < 4 ? byte | 0x80 : byte))), false);
 });
+
+test('concurrent identical discovery starts with a staged file replay instead of failing on the claimed file', async (t) => {
+  const h = await startJobHarness(t, { host: { discovery: { enabled: true } } });
+  const file = await staged(h.agent, TEXT_BYTES, 'text/plain');
+  const args = { target: { host: 'main', projectId: 'project-1' }, task: 'Inspect', requestId: 'same-start', attachments: [{ attachmentId: file.attachmentId }] };
+  h.fake.holdResponses.add('t3_project_list');
+  const first = h.agent.call<{ job: { jobId: string }; created: boolean }>('work_start', args);
+  const second = h.agent.call<{ job: { jobId: string }; created: boolean }>('work_start', args);
+  // Fresh catalog reads may be shared; both requests have passed the request id lookup once either is waiting on it.
+  await h.fake.whenHeld('t3_project_list');
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  h.fake.holdResponses.clear();
+  h.fake.releaseHeld();
+  const results = await Promise.all([first, second]);
+  assert.equal(results[0].job.jobId, results[1].job.jobId);
+  assert.deepEqual(results.map((r) => r.created).sort(), [false, true]);
+});
+
+test('reservations are per owner: a start honors a follow-up\'s hold, and a foreign id never reads as busy', async (t) => {
+  const h = await startJobHarness(t);
+  const job = await startJob(h.agent);
+  await h.tick();
+  const file = await staged(h.agent, TEXT_BYTES, 'text/plain');
+  const attachments = [{ attachmentId: file.attachmentId }];
+  h.fake.holdResponses.add('t3_attachment_prepare_upload');
+  const follow = h.agent.call('work_continue', { jobId: job.jobId, message: 'A', requestId: 'held', attachments });
+  await h.fake.whenHeld('t3_attachment_prepare_upload');
+  assert.equal((await h.agent.callError('work_start', { project: 'pilot', task: 'x', requestId: 'start-held', attachments })).code, 'job_state_conflict');
+  const other = await connectAgent(t, h.gw);
+  const foreign = await other.callError('work_start', { project: 'pilot', task: 'x', requestId: 'foreign', attachments });
+  assert.equal(foreign.code, 'invalid_argument');
+  assert.match(foreign.text, /unknown attachmentId/);
+  h.fake.holdResponses.clear();
+  h.fake.releaseHeld();
+  await follow;
+  assert.equal(h.fake.attachmentSends.length, 1);
+});
+
+test('a body sent in many small chunks is read into one buffer of the prepared size', async (t) => {
+  const h = await startJobHarness(t);
+  const { request } = await import('node:http');
+  const bytes = Buffer.alloc(64 * 1024, 66);
+  const prepared = await prepare(h.agent, 'text/plain', bytes.length);
+  const url = new URL(prepared.uploadUrl);
+  const status = await new Promise<number>((resolve, reject) => {
+    const req = request({ host: url.hostname, port: url.port, path: url.pathname + url.search, method: 'POST',
+      headers: { 'content-type': 'text/plain', 'transfer-encoding': 'chunked' } }, (res) => { res.resume(); resolve(res.statusCode!); });
+    req.on('error', reject);
+    for (let offset = 0; offset < bytes.length; offset += 7) req.write(bytes.subarray(offset, offset + 7));
+    req.end();
+  });
+  assert.equal(status, 201);
+  assert.deepEqual(Buffer.from(row(h, prepared.attachmentId)!.data as Uint8Array), bytes);
+});

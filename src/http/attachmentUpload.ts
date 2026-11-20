@@ -22,7 +22,8 @@ type BodyResult = { kind: 'ok'; body: Buffer } | { kind: 'too_large' } | { kind:
  */
 function readBounded(req: IncomingMessage, limit: number, deadlineMs: number): Promise<BodyResult> {
   return new Promise((resolve) => {
-    const chunks: Buffer[] = [];
+    // One buffer of the prepared size: a body split into many small chunks costs no more than the file itself.
+    const body = Buffer.alloc(limit);
     let size = 0;
     let done = false;
     const finish = (result: BodyResult): void => {
@@ -34,11 +35,14 @@ function readBounded(req: IncomingMessage, limit: number, deadlineMs: number): P
       resolve(result);
     };
     const onData = (chunk: Buffer): void => {
+      if (size + chunk.length > limit) {
+        finish({ kind: 'too_large' });
+        return;
+      }
+      chunk.copy(body, size);
       size += chunk.length;
-      if (size > limit) finish({ kind: 'too_large' });
-      else chunks.push(chunk);
     };
-    const onEnd = (): void => finish({ kind: 'ok', body: Buffer.concat(chunks) });
+    const onEnd = (): void => finish({ kind: 'ok', body: body.subarray(0, size) });
     const onAbort = (): void => finish({ kind: 'aborted' });
     const onClose = (): void => { if (!req.complete) finish({ kind: 'aborted' }); };
     const timer = setTimeout(() => finish({ kind: 'expired' }), deadlineMs);

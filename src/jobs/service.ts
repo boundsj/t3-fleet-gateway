@@ -549,8 +549,6 @@ export class JobService {
       // A host without a probe keeps the plain record: no launch spec, resolved from the configuration at dispatch. A host with one
       // records only what was asked for (nothing is read from T3 or the host now); the dispatcher resolves the folder and the workspace.
       const aliasOnly = host.workspaceProbeCommand === undefined ? undefined : this.#aliasLaunch(project, input);
-      // Staged bytes are loaded only now, with no await before the insert that claims them, so no copy is held across T3 reads.
-      const { attachments, stagedIds } = this.#resolveAttachments(caller, items);
       const result = this.store.create({
         id,
         clientId: caller.clientId,
@@ -559,8 +557,7 @@ export class JobService {
         projectAlias: project.alias,
         hostId: project.host,
         task: input.task,
-        attachments,
-        stagedAttachmentIds: stagedIds,
+        attachments: () => this.#startAttachments(caller, items),
         title: threadTitle(id, input.task, input.title),
         branch: aliasOnly?.workspace.type === 'root' ? '' : `${project.branchPrefix}${id}`,
         runtimeMode: project.runtimeMode,
@@ -583,7 +580,6 @@ export class JobService {
     })();
     if (!this.allowsProject(caller, host.id, spec.alias, spec.projectId)) projectDenied();
     const id = newJobId();
-    const { attachments, stagedIds } = this.#resolveAttachments(caller, items);
     const result = this.store.create({
       id,
       clientId: caller.clientId,
@@ -592,8 +588,7 @@ export class JobService {
       projectAlias: spec.alias ?? projectRef(host.id, spec.projectId!),
       hostId: host.id,
       task: input.task,
-      attachments,
-      stagedAttachmentIds: stagedIds,
+      attachments: () => this.#startAttachments(caller, items),
       title: threadTitle(id, input.task, input.title),
       // A root job runs in the project's own folder, on whatever branch is checked out there: it has none of its own.
       branch: spec.v === 2 || (spec.v === 3 && spec.workspace.type === 'root') ? '' : `${branchPrefix}${id}`,
@@ -1195,26 +1190,45 @@ export class JobService {
   }
 
   /**
+   * A new job's files, loaded inside the transaction that records it, after the ledger's own replay and conflict checks: a
+   * concurrent identical request replays instead of finding its file claimed, and no copy is held across an await. Files a
+   * follow-up of the same client is sending are refused like there.
+   */
+  #startAttachments(caller: Caller, items: readonly AttachmentItem[]): { attachments: AttachmentInput[]; stagedIds: string[] } {
+    this.#checkStagedFree(caller, items);
+    return this.#resolveAttachments(caller, items);
+  }
+
+  #stagedKey(caller: Caller, id: string): string {
+    return `${caller.clientId}\n${id}`;
+  }
+
+  #checkStagedFree(caller: Caller, items: readonly AttachmentItem[]): void {
+    // Keyed by owner: another client's id is never reported as busy; it reads as unknown when resolved.
+    if (items.some((item) => isStagedRef(item) && this.#stagedInFlight.has(this.#stagedKey(caller, item.attachmentId)))) {
+      throw new GatewayError('job_state_conflict', 'A staged attachment in this request is being sent by another request. Retry the same requestId later.');
+    }
+  }
+
+  /**
    * Hold the staged ids of one follow-up while its bytes are in memory. An id another follow-up holds, or a load beyond the
    * gateway-wide budget, is refused with job_state_conflict before anything is read; the same requestId may be retried.
    */
   #reserveStaged(caller: Caller, items: readonly AttachmentItem[]): () => void {
     const ids = items.flatMap((item) => isStagedRef(item) ? [item.attachmentId] : []);
     if (!ids.length) return () => {};
-    if (ids.some((id) => this.#stagedInFlight.has(id))) {
-      throw new GatewayError('job_state_conflict', 'A staged attachment in this request is being sent by another request. Retry the same requestId later.');
-    }
+    this.#checkStagedFree(caller, items);
     const bytes = this.staged.sizes(caller.clientId, ids);
     if (this.#stagedInFlightBytes + bytes > MAX_STAGED_IN_FLIGHT_BYTES) {
       throw new GatewayError('job_state_conflict', 'The gateway is busy sending other attachments. Retry the same requestId shortly.');
     }
-    for (const id of ids) this.#stagedInFlight.add(id);
+    for (const id of ids) this.#stagedInFlight.add(this.#stagedKey(caller, id));
     this.#stagedInFlightBytes += bytes;
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      for (const id of ids) this.#stagedInFlight.delete(id);
+      for (const id of ids) this.#stagedInFlight.delete(this.#stagedKey(caller, id));
       this.#stagedInFlightBytes -= bytes;
     };
   }
