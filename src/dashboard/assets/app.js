@@ -291,7 +291,9 @@ export function render(doc, root, model, actions, nowMs = Date.now()) {
             ['Last delivery', row.health?.lastSuccessAt ? time(row.health.lastSuccessAt) : 'No success recorded'],
             ['Last failure', row.health?.lastFailureAt ? time(row.health.lastFailureAt) : 'No failure recorded'],
             ['Failure streak', String(row.health?.failureStreak ?? 0)],
-            ...(row.health?.authRejectedAt ? [['Key rejected', `${time(row.health.authRejectedAt)}${Number.isInteger(row.health.authRejectedStatus) ? ` (HTTP ${row.health.authRejectedStatus})` : ''}. Events are not retried until the key is replaced.`]] : []),
+            ...(row.health?.authRejectedAt ? [['Key rejected', [time(row.health.authRejectedAt),
+              `${Number.isInteger(row.health.authRejectedStatus) ? ` (HTTP ${row.health.authRejectedStatus})` : ''}. ` +
+              'Events the receiver rejects this way are dead-lettered without retries; replace the key.']]] : []),
             ['Pending events', String(row.health?.pending ?? 0)],
             ['Dead-lettered events', String(row.health?.deadLettered ?? 0)],
             ['Omitted events', String(row.health?.overflowCount ?? 0)],

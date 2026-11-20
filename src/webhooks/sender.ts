@@ -47,13 +47,15 @@ export function postWebhook(route: WebhookRoute, payload: string, timeoutMs = AT
       }, (response) => {
         statusCode = response.statusCode ?? null;
         if (statusCode !== null && statusCode >= 300 && statusCode < 400) { finish('redirect'); return; }
+        // Decided by the status line alone: a slow or oversized rejection body must not turn it into a retryable failure.
+        if (isAuthRejection(statusCode)) { finish('auth_rejected'); return; }
         let bytes = 0;
         response.on('data', (chunk: Buffer) => {
           bytes += chunk.length;
           if (bytes > MAX_RESPONSE_BYTES) finish('response_too_large');
         });
         response.on('end', () => finish(statusCode !== null && statusCode >= 200 && statusCode < 300 ? 'delivered'
-          : isAuthRejection(statusCode) ? 'auth_rejected' : 'http_error'));
+          : 'http_error'));
         response.on('error', () => finish('network_error'));
         response.on('aborted', () => finish('network_error'));
       });

@@ -251,6 +251,20 @@ describe('dashboard webhook connections: running browser handlers', () => {
     assert.equal(card.getAttribute('aria-label'), 'Connection for Gateway supplied name on h1');
   });
 
+  test('a connection whose key was rejected shows Key rejected with a real time element and its status', async () => {
+    const rejectedAt = '2026-01-15T11:00:00.000Z';
+    const health = { lastSuccessAt: null, lastFailureAt: rejectedAt, failureStreak: 1, deadLettered: 1, pending: 0, overflowCount: 0,
+      replayFloorCursor: '0', oldestReplayAt: null, authRejectedAt: rejectedAt, authRejectedStatus: 403 };
+    const page = await webhookPage({ connections: [{ ...webhookRow(), health } as WebhookRow] });
+    const card = page.root.elements('article')[0]!;
+    const text = [...card.walk()].map((node) => node.textContent).join(' ');
+    assert.ok(text.includes('Key rejected'));
+    assert.ok(text.includes('(HTTP 403)'));
+    assert.equal(text.includes('[object Object]'), false);
+    assert.ok(card.elements('time').some((node) => node.getAttribute('datetime') === rejectedAt), 'the rejection time is a <time> element');
+    page.assertNoSecrets();
+  });
+
   test('overview entry and setup use two accessible paste fields, configured projects and a safe private-panel prompt', async () => {
     const page = await webhookPage();
     assert.equal(page.root.elements('input').filter((node) => ['webhook-url', 'webhook-auth'].includes(node.getAttribute('id') ?? '')).length, 2, 'two receiver fields');

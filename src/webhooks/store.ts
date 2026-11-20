@@ -225,8 +225,6 @@ export class WebhookStore {
         overflow_count = 0, overflow_sequence = NULL, overflow_at = NULL, overflow_reason = NULL,
         last_test_at = NULL, last_test_outcome = NULL, last_test_status_code = NULL WHERE id = ?`)
         .run(randomUUID(), identityFor(settings, route), JSON.stringify(route), JSON.stringify(settings), id);
-      // A new key or URL answers for itself: the old rejection no longer describes this connection.
-      this.#db.prepare('UPDATE webhook_health SET auth_rejected_at = NULL, auth_rejected_status = NULL WHERE subscription_id = ?').run(id);
       this.#recordTest(id, test);
       return connection(this.#row(id)!);
     });
