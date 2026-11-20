@@ -50,7 +50,12 @@ export interface UploadSlot {
   clientId: string;
   mimeType: string;
   sizeBytes: number;
+  /** The upload must complete before this; the route stops reading then. */
+  uploadExpiresAt: number;
 }
+
+/** Only a client that is not revoked may upload; revocation also deletes its unclaimed files (ClientStore.revoke). */
+const ACTIVE_OWNER = 'EXISTS (SELECT 1 FROM oauth_clients WHERE oauth_clients.id = staged_attachments.client_id AND oauth_clients.revoked_at IS NULL)';
 
 /** Which request a staged file was claimed for. */
 export interface StagedClaim {
@@ -128,18 +133,24 @@ export class StagedAttachments {
     if (!UPLOAD_TOKEN_PATTERN.test(token)) return undefined;
     const now = this.#clock();
     const row = this.#db.prepare(`UPDATE staged_attachments SET token_hash = NULL, upload_started_at = ?
-      WHERE token_hash = ? AND uploaded_at IS NULL AND upload_started_at IS NULL AND upload_expires_at > ?
-      RETURNING id, client_id, mime_type, size_bytes`)
-      .get(now, sha256Hex(token), now) as { id: string; client_id: string; mime_type: string; size_bytes: number } | undefined;
-    return row && { attachmentId: row.id, clientId: row.client_id, mimeType: row.mime_type, sizeBytes: row.size_bytes };
+      WHERE token_hash = ? AND uploaded_at IS NULL AND upload_started_at IS NULL AND upload_expires_at > ? AND ${ACTIVE_OWNER}
+      RETURNING id, client_id, mime_type, size_bytes, upload_expires_at`)
+      .get(now, sha256Hex(token), now) as { id: string; client_id: string; mime_type: string; size_bytes: number; upload_expires_at: number } | undefined;
+    return row && { attachmentId: row.id, clientId: row.client_id, mimeType: row.mime_type, sizeBytes: row.size_bytes, uploadExpiresAt: row.upload_expires_at };
   }
 
-  /** Store an upload's bytes after the route checked them against the slot. */
+  /** Store an upload's bytes after the route checked them against the slot: only before the deadline, for an active owner. */
   completeUpload(slot: UploadSlot, bytes: Buffer): boolean {
     if (bytes.length !== slot.sizeBytes || !signatureMatches(slot.mimeType, bytes)) return false;
+    const now = this.#clock();
     return this.#db.prepare(`UPDATE staged_attachments SET data = ?, uploaded_at = ?
-      WHERE id = ? AND client_id = ? AND uploaded_at IS NULL AND claimed_at IS NULL`)
-      .run(bytes, this.#clock(), slot.attachmentId, slot.clientId).changes === 1;
+      WHERE id = ? AND client_id = ? AND uploaded_at IS NULL AND claimed_at IS NULL AND upload_expires_at > ? AND ${ACTIVE_OWNER}`)
+      .run(bytes, now, slot.attachmentId, slot.clientId, now).changes === 1;
+  }
+
+  /** Milliseconds left before the slot's upload deadline, by the store's clock. */
+  remainingMs(slot: UploadSlot): number {
+    return Math.max(0, slot.uploadExpiresAt - this.#clock());
   }
 
   /** A failed upload frees its slot (and the pending cap) at once; the agent prepares again. */
@@ -173,6 +184,12 @@ export class StagedAttachments {
       resolved.set(index, { ...(name === undefined ? {} : { name }), mimeType: row.mime_type, data: Buffer.from(row.data).toString('base64') });
     }
     return resolved;
+  }
+
+  /** The stored sizes of the caller's own staged files that exist (unknown ids are left out), without loading bytes. */
+  sizes(clientId: string, ids: readonly string[]): number {
+    const get = this.#db.prepare('SELECT size_bytes FROM staged_attachments WHERE id = ? AND client_id = ? AND data IS NOT NULL');
+    return ids.reduce((total, id) => total + ((get.get(id, clientId) as { size_bytes: number } | undefined)?.size_bytes ?? 0), 0);
   }
 
   /** Delete prepared files whose upload window closed and every file past its claim window. Returns the rows removed. */

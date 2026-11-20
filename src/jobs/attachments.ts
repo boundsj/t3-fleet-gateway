@@ -66,12 +66,17 @@ export function isStagedRef(item: AttachmentItem): item is StagedAttachmentRef {
 }
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+// Compared as bytes: an ASCII decode would drop high bits and accept altered headers.
+const GIF87A = Buffer.from('GIF87a', 'latin1');
+const GIF89A = Buffer.from('GIF89a', 'latin1');
+const RIFF = Buffer.from('RIFF', 'latin1');
+const WEBP = Buffer.from('WEBP', 'latin1');
 /** Check image signatures, without claiming to decode or fully validate image contents. Other types always match. */
 export function signatureMatches(mimeType: string, bytes: Buffer): boolean {
   return mimeType === 'image/png' ? bytes.subarray(0, 8).equals(PNG_SIGNATURE)
     : mimeType === 'image/jpeg' ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
-    : mimeType === 'image/gif' ? ['GIF87a', 'GIF89a'].includes(bytes.subarray(0, 6).toString('ascii'))
-    : mimeType === 'image/webp' ? bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP'
+    : mimeType === 'image/gif' ? bytes.subarray(0, 6).equals(GIF87A) || bytes.subarray(0, 6).equals(GIF89A)
+    : mimeType === 'image/webp' ? bytes.subarray(0, 4).equals(RIFF) && bytes.subarray(8, 12).equals(WEBP)
     : true;
 }
 

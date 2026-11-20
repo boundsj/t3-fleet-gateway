@@ -41,6 +41,8 @@ export const MAX_QUESTION_CHARS = 64_000;
 const QUESTION_READ_TIMEOUT_MS = 5 * SECOND;
 export const MAX_TITLE_CHARS = 80;
 export const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+/** Staged attachment bytes all follow-ups of this process may hold in memory at once (four full requests). */
+export const MAX_STAGED_IN_FLIGHT_BYTES = 40 * 1024 * 1024;
 
 const TITLE_FROM_TASK_CHARS = 60;
 /** Pages of 100 messages read to find the end of a thread being adopted (messages view). */
@@ -512,8 +514,7 @@ export class JobService {
     let project = input.project === undefined ? undefined : this.#projectFor(caller, input.project, 'operate');
     const host = project ? this.#hostFor(caller, project.host, 'operate') : this.#hostFor(caller, input.target!.host, 'operate');
     if (input.target?.projectId !== undefined) await this.authorizeProject(caller, host.id, input.target.projectId, 'operate');
-    // Staged files are read (never claimed) only for a new request on an authorized host; the job insert claims them.
-    const { attachments, stagedIds } = this.#resolveAttachments(caller, validateAttachmentItems(input.attachments));
+    const items = validateAttachmentItems(input.attachments);
     const hostOnly = input.target !== undefined && input.target.projectId === undefined;
     if (!host.discovery.enabled && (input.target?.projectId !== undefined || input.modelSelection !== undefined)) {
       throw new GatewayError(
@@ -548,6 +549,8 @@ export class JobService {
       // A host without a probe keeps the plain record: no launch spec, resolved from the configuration at dispatch. A host with one
       // records only what was asked for (nothing is read from T3 or the host now); the dispatcher resolves the folder and the workspace.
       const aliasOnly = host.workspaceProbeCommand === undefined ? undefined : this.#aliasLaunch(project, input);
+      // Staged bytes are loaded only now, with no await before the insert that claims them, so no copy is held across T3 reads.
+      const { attachments, stagedIds } = this.#resolveAttachments(caller, items);
       const result = this.store.create({
         id,
         clientId: caller.clientId,
@@ -580,6 +583,7 @@ export class JobService {
     })();
     if (!this.allowsProject(caller, host.id, spec.alias, spec.projectId)) projectDenied();
     const id = newJobId();
+    const { attachments, stagedIds } = this.#resolveAttachments(caller, items);
     const result = this.store.create({
       id,
       clientId: caller.clientId,
@@ -1127,6 +1131,9 @@ export class JobService {
    * T3 clientRequestId under the same durably bound authorization identity. Attachment sends instead keep a durable uncertainty marker and never resend.
    */
   readonly #attachmentContinues = new Set<string>();
+  /** Staged ids a follow-up has loaded and not yet claimed or let go, and the bytes they hold in memory (this process). */
+  readonly #stagedInFlight = new Set<string>();
+  #stagedInFlightBytes = 0;
 
   async continue(caller: Caller, input: ContinueInput): Promise<ContinueResult> {
     if (!input.attachments?.length) return this.#continue(caller, input);
@@ -1167,15 +1174,55 @@ export class JobService {
     const threadId = job.threadId;
     if (threadId === null) throw new GatewayError('job_state_conflict', `Job ${job.id} has no thread.`);
     let attachments: AttachmentInput[];
-    let stagedIds: string[];
+    let stagedIds: string[] = [];
+    let releaseStaged = () => {};
     try {
-      // Replays returned above; staged files are read now and claimed only at the durable send boundary.
+      // Replays returned above. Staged files are reserved before their bytes are loaded, so concurrent requests cannot each
+      // hold a copy, and claimed only at the durable send boundary.
+      releaseStaged = this.#reserveStaged(caller, items);
       ({ attachments, stagedIds } = this.#resolveAttachments(caller, items));
       await this.#validateAdoptedResume(job);
     } catch (error) {
+      releaseStaged();
       if (!key) this.store.releaseIdempotencyKey(caller.clientId, 'work_continue', input.requestId);
       throw error;
     }
+    try {
+      return await this.#sendContinue(caller, input, job, key, threadId, attachments, stagedIds);
+    } finally {
+      releaseStaged();
+    }
+  }
+
+  /**
+   * Hold the staged ids of one follow-up while its bytes are in memory. An id another follow-up holds, or a load beyond the
+   * gateway-wide budget, is refused with job_state_conflict before anything is read; the same requestId may be retried.
+   */
+  #reserveStaged(caller: Caller, items: readonly AttachmentItem[]): () => void {
+    const ids = items.flatMap((item) => isStagedRef(item) ? [item.attachmentId] : []);
+    if (!ids.length) return () => {};
+    if (ids.some((id) => this.#stagedInFlight.has(id))) {
+      throw new GatewayError('job_state_conflict', 'A staged attachment in this request is being sent by another request. Retry the same requestId later.');
+    }
+    const bytes = this.staged.sizes(caller.clientId, ids);
+    if (this.#stagedInFlightBytes + bytes > MAX_STAGED_IN_FLIGHT_BYTES) {
+      throw new GatewayError('job_state_conflict', 'The gateway is busy sending other attachments. Retry the same requestId shortly.');
+    }
+    for (const id of ids) this.#stagedInFlight.add(id);
+    this.#stagedInFlightBytes += bytes;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      for (const id of ids) this.#stagedInFlight.delete(id);
+      this.#stagedInFlightBytes -= bytes;
+    };
+  }
+
+  async #sendContinue(
+    caller: Caller, input: ContinueInput, job: Job, key: ReturnType<JobStore['idempotencyKey']>, threadId: string,
+    attachments: AttachmentInput[], stagedIds: string[],
+  ): Promise<ContinueResult> {
     // Resuming an idle job that works in the project's own folder takes the folder back first, before anything is sent: while
     // another job holds it the follow-up waits, and the same requestId may be sent again later.
     let attempt = job.state === 'idle' ? this.store.reserveRoot(job.id, `continue:${caller.clientId}:${input.requestId}`) : ({ kind: 'not_needed' } as const);
@@ -1238,7 +1285,11 @@ export class JobService {
           }
           // This attempt was refused or definitely undelivered; only its own reservation token ends here.
           if (attempt.kind === 'held') this.store.abandonResume(job.id, attempt.token);
-          if (!released) {
+          // A retry of a recorded request whose send boundary was never crossed (no marker yet) failed definitely: keep the
+          // request open under its hash and report the real error, so the same requestId retries.
+          const unsent = attachments.length && key !== undefined &&
+            this.store.idempotencyKey(caller.clientId, 'work_continue', input.requestId)?.response === null;
+          if (!released && !unsent) {
             throw new GatewayError('t3_response_lost', 'A previous send attempt still has an uncertain outcome. Retry with the same requestId and T3 authorization, or inspect the thread.');
           }
           throw error;

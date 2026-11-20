@@ -269,3 +269,92 @@ test('the upload route lives on the MCP listener only, never the dashboard', asy
   assert.equal(row(h, prepared.attachmentId)?.upload_started_at, null);
   assert.equal((await upload(prepared.uploadUrl, TEXT_BYTES, 'text/plain')).status, 201);
 });
+
+test('one staged file is held by one follow-up at a time; a concurrent request using it is refused before loading bytes', async (t) => {
+  const h = await startJobHarness(t);
+  const job = await startJob(h.agent);
+  await h.tick();
+  const file = await staged(h.agent, TEXT_BYTES, 'text/plain');
+  const attachments = [{ attachmentId: file.attachmentId }];
+  h.fake.holdResponses.add('t3_attachment_prepare_upload');
+  const first = h.agent.call('work_continue', { jobId: job.jobId, message: 'A', requestId: 'hold-a', attachments });
+  await h.fake.whenHeld('t3_attachment_prepare_upload');
+  const second = await h.agent.callError('work_continue', { jobId: job.jobId, message: 'B', requestId: 'hold-b', attachments });
+  assert.equal(second.code, 'job_state_conflict');
+  h.fake.holdResponses.clear();
+  h.fake.releaseHeld();
+  await first;
+  assert.equal(h.fake.attachmentSends.length, 1);
+  // The refused request held nothing: its requestId is free, and the id is now claimed.
+  assert.match((await h.agent.callError('work_continue', { jobId: job.jobId, message: 'B', requestId: 'hold-b', attachments })).text, /already used/);
+});
+
+test('a retried follow-up whose staged file expires before the send boundary reports the real error and stays retryable', async (t) => {
+  const h = await startJobHarness(t);
+  const job = await startJob(h.agent);
+  await h.tick();
+  const file = await staged(h.agent, TEXT_BYTES, 'text/plain');
+  const args = { jobId: job.jobId, message: 'Review', requestId: 'crash-retry', attachments: [{ attachmentId: file.attachmentId }] };
+  // As if an earlier process recorded the request id and stopped before marking the send.
+  h.gw.services.jobs.store.claimIdempotencyKey(h.agent.clientId, 'work_continue', 'crash-retry', {
+    inputHash: (await import('../src/jobs/service.ts')).inputHash('work_continue', { jobId: job.jobId, message: 'Review', attachments: [{ attachmentId: file.attachmentId, name: null }] }),
+    jobId: job.jobId,
+  });
+  h.fake.uploadStatus = 500;
+  assert.equal((await h.agent.callError('work_continue', args)).code, 'host_unreachable');
+  h.fake.uploadStatus = 200;
+  await h.agent.call('work_continue', args);
+  assert.equal(h.fake.attachmentSends.length, 1);
+});
+
+test('revoking a client stops its outstanding upload URLs and deletes its unclaimed files', async (t) => {
+  const h = await startJobHarness(t);
+  const pending = await prepare(h.agent, 'text/plain', TEXT_BYTES.length);
+  const uploaded = await staged(h.agent, TEXT_BYTES, 'text/plain');
+  h.gw.services.clients.revoke(h.agent.clientId);
+  assert.equal((await upload(pending.uploadUrl, TEXT_BYTES, 'text/plain')).status, 401);
+  assert.equal(row(h, pending.attachmentId), undefined);
+  assert.equal(row(h, uploaded.attachmentId), undefined);
+});
+
+test('an upload must complete before its deadline', async (t) => {
+  const h = await startJobHarness(t);
+  const prepared = await prepare(h.agent, 'text/plain', TEXT_BYTES.length);
+  const slot = h.gw.services.jobs.staged.beginUpload(tokenOf(prepared.uploadUrl))!;
+  assert.ok(slot);
+  h.gw.clock.advance(UPLOAD_WINDOW_MS);
+  assert.equal(h.gw.services.jobs.staged.remainingMs(slot), 0);
+  assert.equal(h.gw.services.jobs.staged.completeUpload(slot, TEXT_BYTES), false);
+});
+
+test('refusals close the connection, and an oversized chunked body still gets its 413', async (t) => {
+  const h = await startJobHarness(t);
+  const { request } = await import('node:http');
+  const send = (path: string, headers: Record<string, string>, chunks: Buffer[]) => new Promise<{ status: number; connection: string | undefined }>((resolve, reject) => {
+    const url = new URL(path, h.gw.baseUrl);
+    const req = request({ host: url.hostname, port: url.port, path: url.pathname + url.search, method: 'POST', headers }, (res) => {
+      res.resume();
+      resolve({ status: res.statusCode!, connection: res.headers.connection });
+    });
+    req.on('error', reject);
+    for (const chunk of chunks) req.write(chunk);
+    req.end();
+  });
+  const refused = await send('/attachments?token=nope', { 'content-type': 'text/plain', 'content-length': String(TEXT_BYTES.length) }, [TEXT_BYTES]);
+  assert.deepEqual(refused, { status: 401, connection: 'close' });
+  const prepared = await prepare(h.agent, 'text/plain', 8);
+  const chunked = await send(new URL(prepared.uploadUrl).pathname + new URL(prepared.uploadUrl).search,
+    { 'content-type': 'text/plain', 'transfer-encoding': 'chunked' }, [Buffer.alloc(6, 65), Buffer.alloc(6, 65)]);
+  assert.deepEqual(chunked, { status: 413, connection: 'close' });
+  assert.equal(row(h, prepared.attachmentId), undefined);
+});
+
+test('image signatures compare bytes, not a lossy text decode', async () => {
+  const { signatureMatches } = await import('../src/jobs/attachments.ts');
+  const gif = Buffer.from('GIF89a', 'latin1');
+  assert.equal(signatureMatches('image/gif', gif), true);
+  assert.equal(signatureMatches('image/gif', Buffer.from(gif.map((byte) => byte | 0x80))), false);
+  const webp = Buffer.concat([Buffer.from('RIFF', 'latin1'), Buffer.alloc(4), Buffer.from('WEBP', 'latin1')]);
+  assert.equal(signatureMatches('image/webp', webp), true);
+  assert.equal(signatureMatches('image/webp', Buffer.from(webp.map((byte, i) => i < 4 ? byte | 0x80 : byte))), false);
+});
