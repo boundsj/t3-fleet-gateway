@@ -178,8 +178,8 @@ const legacyReadInput = z.strictObject({
   itemId: nullable(z.string()),
   textOffset: nullable(z.int().min(0)),
   view: nullable(z.enum(['messages', 'activity'])),
-  // v0.1.9 renders NonNegativeInt as a plain `{ type: 'integer', minimum: 0 }`, and takes no null.
-  afterPosition: z.int().min(0).optional(),
+  // Renders as T3 v0.1.2 to v0.1.9 advertise it: { anyOf: [{ type: 'integer', minimum: 0, maximum: 2^53 - 1 }, { type: 'null' }] }.
+  afterPosition: nullable(z.int().min(0)),
   limit: nullable(z.int().min(1).max(100)),
   runLimit: nullable(z.int().min(1).max(50)),
   maxCharsPerItem: nullable(z.int().min(1).max(50000)),

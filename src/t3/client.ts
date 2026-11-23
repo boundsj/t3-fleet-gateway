@@ -596,23 +596,36 @@ export class T3Client {
  */
 const FROM_START = -1;
 
-/** `afterPosition` keys of T3 v0.1.9 and older (`NonNegativeInt`, rendered `{ "type": "integer", "minimum": 0 }`). */
+/** Keys a legacy `afterPosition` schema may carry; any other keyword could widen what it accepts. */
 const LEGACY_CURSOR_KEYS = new Set(['type', 'minimum', 'maximum', 'description', 'title']);
 
 /**
- * True only for the known legacy shape: no `beforePosition` (added in v0.1.10, with the -1 cursor) and an
- * `afterPosition` that is one plain integer schema with a non-negative minimum. Any other shape (a union,
- * a `const`, an unknown keyword or no schema at all) gets -1: a host that refuses it fails the read, and
- * a host that takes it reads from the start, so neither skips older items.
+ * True only for the known legacy forms: no `beforePosition` (added in v0.1.10, with the -1 cursor) and an
+ * `afterPosition` T3 v0.1.2 to v0.1.9 advertise for `Schema.optional(NonNegativeInt)`. Through Effect's JSON
+ * codec that is `{ anyOf: [{ type: 'integer', minimum: 0, maximum: 2^53 - 1 }, { type: 'null' }] }`; the plain
+ * integer branch alone is accepted too. Any other shape (a branch that may take -1, an unknown keyword, another
+ * combinator, no schema) gets -1: a host that refuses it fails the read, one that takes it reads from the start.
  */
 export function legacyReadCursor(inputSchema: unknown): boolean {
   const properties = field(inputSchema, 'properties');
   if (field(properties, 'beforePosition') !== undefined) return false;
   const cursor = field(properties, 'afterPosition');
-  if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) return false;
-  if (!Object.keys(cursor).every((key) => LEGACY_CURSOR_KEYS.has(key))) return false;
-  const minimum = field(cursor, 'minimum');
-  return field(cursor, 'type') === 'integer' && typeof minimum === 'number' && minimum >= 0;
+  if (nonNegativeInteger(cursor)) return true;
+  if (!plainObject(cursor) || !Object.keys(cursor).every((key) => key === 'anyOf' || key === 'description' || key === 'title')) return false;
+  const branches = field(cursor, 'anyOf');
+  if (!Array.isArray(branches) || branches.length !== 2) return false;
+  const isNull = (branch: unknown) => plainObject(branch) && Object.keys(branch).length === 1 && field(branch, 'type') === 'null';
+  return (nonNegativeInteger(branches[0]) && isNull(branches[1])) || (isNull(branches[0]) && nonNegativeInteger(branches[1]));
+}
+
+function nonNegativeInteger(schema: unknown): boolean {
+  if (!plainObject(schema) || !Object.keys(schema).every((key) => LEGACY_CURSOR_KEYS.has(key))) return false;
+  const minimum = field(schema, 'minimum');
+  return field(schema, 'type') === 'integer' && typeof minimum === 'number' && minimum >= 0;
+}
+
+function plainObject(value: unknown): value is object {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function field(value: unknown, key: string): unknown {

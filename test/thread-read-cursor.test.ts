@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { legacyReadCursor } from '../src/t3/client.ts';
 import { startFakeT3 } from './helpers/fakeT3.ts';
 import { startJob, startJobHarness } from './helpers/jobs.ts';
@@ -99,34 +100,94 @@ for (const mode of MODES) {
   });
 }
 
-test('only the exact legacy schema omits the cursor; every other shape gets -1', () => {
-  const schema = (afterPosition: unknown, extra: Record<string, unknown> = {}) =>
-    ({ type: 'object', properties: { threadId: { type: 'string' }, afterPosition, ...extra }, required: ['threadId'] });
-  // T3 v0.1.9 and older, as Effect renders NonNegativeInt (the same rendering current T3 gives textOffset).
-  assert.equal(legacyReadCursor(schema({ minimum: 0, type: 'integer' })), true);
-  assert.equal(legacyReadCursor(schema({ type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER })), true);
-  // T3 v0.1.10 and later.
-  assert.equal(legacyReadCursor(schema({ minimum: -1, type: 'integer' }, { beforePosition: { minimum: 0, type: 'integer' } })), false);
-  assert.equal(legacyReadCursor(schema({ minimum: 0, type: 'integer' }, { beforePosition: { minimum: 0, type: 'integer' } })), false);
-  // Shapes that may accept -1, or that cannot be read, are never legacy.
+// t3_thread_read's position fields exactly as T3 advertises them: Schema.toCodecJson of the contract struct through
+// McpServer's toolJsonSchema, rendered with each release's Effect (4.0.5 for v0.1.2 to v0.1.6, 4.1.2 for v0.1.7 to
+// v0.1.9, 4.1.3 for v0.1.10 and v0.1.11, 4.1.5 on main): every version gives the same JSON.
+const MAX = Number.MAX_SAFE_INTEGER;
+const LEGACY_WIRE = { anyOf: [{ type: 'integer', minimum: 0, maximum: MAX }, { type: 'null' }] };
+const CURRENT_WIRE = {
+  afterPosition: { anyOf: [{ type: 'integer', minimum: -1, maximum: MAX }, { type: 'null' }] },
+  beforePosition: { anyOf: [{ type: 'integer', minimum: 0, maximum: MAX }, { type: 'null' }] },
+};
+const readSchema = (positions: Record<string, unknown>) =>
+  ({ type: 'object', properties: { threadId: { type: 'string' }, ...positions }, required: ['threadId'] });
+
+test('only the known legacy forms omit the cursor; ambiguous and current schemas get -1', () => {
+  // T3 v0.1.2 to v0.1.9 on the wire, and the bare integer branch of the same schema.
+  assert.equal(legacyReadCursor(readSchema({ afterPosition: LEGACY_WIRE })), true);
+  assert.equal(legacyReadCursor(readSchema({ afterPosition: { anyOf: [{ type: 'null' }, LEGACY_WIRE.anyOf[0]] } })), true);
+  assert.equal(legacyReadCursor(readSchema({ afterPosition: { minimum: 0, type: 'integer' } })), true);
+  // T3 v0.1.10 and later, and a legacy cursor beside a beforePosition.
+  assert.equal(legacyReadCursor(readSchema(CURRENT_WIRE)), false);
+  assert.equal(legacyReadCursor(readSchema({ afterPosition: LEGACY_WIRE, beforePosition: CURRENT_WIRE.beforePosition })), false);
+  // Ambiguous: a branch that may take -1, a wider combinator or keyword, or nothing readable.
+  const integer = LEGACY_WIRE.anyOf[0];
   for (const afterPosition of [
     { anyOf: [{ type: 'integer', minimum: 0 }, { const: -1 }] },
-    { oneOf: [{ type: 'integer', minimum: 0 }, { type: 'integer', minimum: -1 }] },
-    { anyOf: [{ type: 'integer', minimum: 0 }, { type: 'null' }] },
+    { anyOf: [integer, { type: 'null' }, { const: -1 }] },
+    { anyOf: [integer, { type: 'integer' }] },
+    { anyOf: [integer, { type: 'integer', minimum: -1 }] },
+    { anyOf: [integer, integer] },
+    { anyOf: [integer, { type: 'null', const: -1 }] },
+    { anyOf: [integer, { type: ['null', 'integer'] }] },
+    { anyOf: [{ ...integer, exclusiveMinimum: -2 }, { type: 'null' }] },
+    { anyOf: [{ ...integer, minimum: -1 }, { type: 'null' }] },
+    { anyOf: [integer, { type: 'null' }], not: { const: 0 } },
+    { anyOf: [integer] },
+    { oneOf: [integer, { type: 'null' }] },
+    { allOf: [integer, { type: 'null' }] },
     { type: 'integer', minimum: 0, enum: [-1, 0] },
-    { type: 'integer', minimum: 0, exclusiveMinimum: -2 },
+    { type: ['integer', 'null'], minimum: 0 },
     { type: 'integer' },
     { type: 'number', minimum: 0 },
     { type: 'integer', minimum: -1 },
-    [{ type: 'integer', minimum: 0 }],
+    [integer],
     true,
     undefined,
   ]) {
-    assert.equal(legacyReadCursor(schema(afterPosition)), false, JSON.stringify(afterPosition));
+    assert.equal(legacyReadCursor(readSchema({ afterPosition })), false, JSON.stringify(afterPosition));
   }
   assert.equal(legacyReadCursor(undefined), false);
   assert.equal(legacyReadCursor({ type: 'object' }), false);
 });
+
+test('the fake advertises t3_thread_read positions exactly as T3 releases do', async (t) => {
+  for (const [mode, expected] of [['legacy', { afterPosition: LEGACY_WIRE }], ['newest', CURRENT_WIRE], ['forward', CURRENT_WIRE]] as const) {
+    const fake = await startFakeT3();
+    fake.threadReadCursor = mode;
+    fake.validTokens.add('synthetic-wire-token');
+    const client = new Client({ name: 'wire-test', version: '0.0.0' });
+    t.after(async () => { await client.close(); await fake.close(); });
+    await client.connect(new StreamableHTTPClientTransport(new URL('/mcp', fake.url), { authProvider: { token: async () => 'synthetic-wire-token' } }));
+    const read = (await client.listTools()).tools.find((tool) => tool.name === 't3_thread_read')!;
+    const properties = read.inputSchema.properties as Record<string, unknown>;
+    assert.deepEqual({ afterPosition: properties.afterPosition, beforePosition: properties.beforePosition },
+      { beforePosition: undefined, ...expected }, mode);
+  }
+});
+
+for (const [name, positions, legacy] of [
+  ['T3 v0.1.2 to v0.1.9 (nullable legacy cursor)', { afterPosition: LEGACY_WIRE }, true],
+  ['a cursor union that takes -1', { afterPosition: { anyOf: [LEGACY_WIRE.anyOf[0], { type: 'null' }, { const: -1 }] } }, false],
+] as const) {
+  test(`wire-level discovery of ${name}: ${legacy ? 'the cursor is omitted' : '-1 is sent'} and the read starts at the first item`, async (t) => {
+    const fake = await startFakeT3();
+    t.after(() => fake.close());
+    // A legacy host refuses -1 and reads a cursorless request from the start; the union host takes -1 and
+    // answers a cursorless read with the newest page, so omitting the cursor there would skip items.
+    fake.threadReadCursor = legacy ? 'legacy' : 'union';
+    const gw = (await startJobHarness(t, { fake })).gw;
+    const { threadId } = fake.launchDirect({ projectId: 'project-1', title: 'Synthetic wire thread', message: 'Synthetic first message' });
+    exchanges(fake, threadId, 3);
+    fake.toolsListPages.set('', { tools: [{ name: 't3_thread_read', inputSchema: readSchema(positions) }] });
+    const before = fake.reads.length;
+    const listed = fake.toolsListCalls;
+    const read = await gw.services.registry.client('main').readThread({ threadId, view: 'messages', afterPosition: null, limit: 100, maxCharsPerItem: 1 });
+    assert.equal(fake.toolsListCalls, listed + 1, 'the injected tools/list page is what the client classified');
+    assert.equal(read.items[0]?.position, 0);
+    assert.deepEqual(fake.reads.slice(before).map((input) => input.afterPosition), [legacy ? undefined : -1]);
+  });
+}
 
 test('a read from the start fails closed when T3 answers with a later page; work_settle sends nothing', async (t) => {
   const { fake, gw, agent, tick } = await harness(t, 'impostor');
