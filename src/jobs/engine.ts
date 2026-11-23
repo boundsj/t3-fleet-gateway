@@ -9,7 +9,7 @@ import { T3TransportError } from '../t3/client.ts';
 import { T3ToolError } from '../t3/results.ts';
 import type { LaunchResult, LaunchWorkspaceStrategy, ThreadRead } from '../t3/schemas.ts';
 import { MINUTE, SECOND, type Clock } from '../time.ts';
-import { readPullRequests, pullRequestEvents } from './pullRequests.ts';
+import { completeInlinePullRequests, readPullRequests, pullRequestEvents } from './pullRequests.ts';
 import { readActivity, refreshDelegated, scanActivity } from './activity.ts';
 import { EXCERPT_CHARS, isActiveStatus, observe, threadLinkTarget, type ActivityRead } from './derive.ts';
 import { deliverInterrupt } from './interrupt.ts';
@@ -808,13 +808,7 @@ export class JobEngine {
       this.#prAttempted.set(job.id, clock());
       prBudget.remaining--;
       try {
-        // Older T3 returns all links inline. Newer T3 returns only open links on the first page,
-        // with a count of all links; only an exact count proves that inline list is complete.
-        const inline = read.thread.pullRequests;
-        const complete = Array.isArray(inline) && (!Object.hasOwn(read.thread, 'pullRequestCount') ||
-          read.thread.pullRequestCount === inline.length);
-        const value = complete ? inline
-          : (await client.listThreadPullRequests(threadId)).pullRequests;
+        const value = completeInlinePullRequests(read.thread) ?? (await client.listThreadPullRequests(threadId)).pullRequests;
         // The tracked list (bounded), or null when the answer holds nothing readable: unknown, so the last snapshot and its freshness stay.
         const prs = readPullRequests(value);
         if (prs !== null) {

@@ -442,7 +442,7 @@ export class T3Client {
    * `activity` every timeline item (delegated work, reasoning, tools, checkpoints); positions are shared.
    * With `itemId`, T3 returns that one item (none if it has no such item), its text from `textOffset`.
    */
-  readThread(input: {
+  async readThread(input: {
     threadId: string;
     view: 'messages' | 'activity';
     afterPosition?: number | null;
@@ -453,8 +453,15 @@ export class T3Client {
     maxCharsPerItem?: number;
   }): Promise<ThreadRead> {
     const args = withoutNulls(input);
-    if (input.afterPosition === null) args.afterPosition = FROM_START;
-    return this.callTool('t3_thread_read', args, threadReadSchema, { readOnly: true });
+    if (input.afterPosition !== null) return this.callTool('t3_thread_read', args, threadReadSchema, { readOnly: true });
+    args.afterPosition = FROM_START;
+    const read = await this.callTool('t3_thread_read', args, threadReadSchema, { readOnly: true });
+    // A read from the first item has nothing earlier (T3 renumbers positions over visible items, and a forward
+    // budget trims the end). An earlier position means T3 answered with a later page: never treat it as the start.
+    if (typeof read.earlierPosition === 'number') {
+      throw new GatewayError('t3_invalid_response', 't3_thread_read answered a read from the start with a later page.');
+    }
+    return read;
   }
 
   /** Threads in a project, newest first; omitted settled includes both shelves on current T3. Archived/deleted threads are excluded. */
@@ -589,16 +596,23 @@ export class T3Client {
  */
 const FROM_START = -1;
 
-/** True when T3 advertises a non-negative `afterPosition` minimum (v0.1.9 and older): -1 would be refused. */
-function legacyReadCursor(inputSchema: unknown): boolean {
-  const property = field(field(inputSchema, 'properties'), 'afterPosition');
-  const branches = ['anyOf', 'oneOf', 'allOf'].flatMap((key) => {
-    const value = field(property, key);
-    return Array.isArray(value) ? value : [];
-  });
-  const minimums = [property, ...branches].map((schema) => field(schema, 'minimum')).filter((value) => typeof value === 'number');
-  // Unknown or absent: send -1, so a host that refuses it fails the read rather than skipping older items.
-  return minimums.length > 0 && minimums.every((minimum) => minimum >= 0);
+/** `afterPosition` keys of T3 v0.1.9 and older (`NonNegativeInt`, rendered `{ "type": "integer", "minimum": 0 }`). */
+const LEGACY_CURSOR_KEYS = new Set(['type', 'minimum', 'maximum', 'description', 'title']);
+
+/**
+ * True only for the known legacy shape: no `beforePosition` (added in v0.1.10, with the -1 cursor) and an
+ * `afterPosition` that is one plain integer schema with a non-negative minimum. Any other shape (a union,
+ * a `const`, an unknown keyword or no schema at all) gets -1: a host that refuses it fails the read, and
+ * a host that takes it reads from the start, so neither skips older items.
+ */
+export function legacyReadCursor(inputSchema: unknown): boolean {
+  const properties = field(inputSchema, 'properties');
+  if (field(properties, 'beforePosition') !== undefined) return false;
+  const cursor = field(properties, 'afterPosition');
+  if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) return false;
+  if (!Object.keys(cursor).every((key) => LEGACY_CURSOR_KEYS.has(key))) return false;
+  const minimum = field(cursor, 'minimum');
+  return field(cursor, 'type') === 'integer' && typeof minimum === 'number' && minimum >= 0;
 }
 
 function field(value: unknown, key: string): unknown {

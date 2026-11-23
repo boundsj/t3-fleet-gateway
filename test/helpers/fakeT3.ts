@@ -178,11 +178,14 @@ const legacyReadInput = z.strictObject({
   itemId: nullable(z.string()),
   textOffset: nullable(z.int().min(0)),
   view: nullable(z.enum(['messages', 'activity'])),
-  afterPosition: nullable(z.int().min(0)),
+  // v0.1.9 renders NonNegativeInt as a plain `{ type: 'integer', minimum: 0 }`, and takes no null.
+  afterPosition: z.int().min(0).optional(),
   limit: nullable(z.int().min(1).max(100)),
   runLimit: nullable(z.int().min(1).max(50)),
   maxCharsPerItem: nullable(z.int().min(1).max(50000)),
 });
+/** A schema with no `beforePosition` whose `afterPosition` union still accepts -1: not the legacy shape. */
+const unionReadInput = legacyReadInput.extend({ afterPosition: z.union([z.int().min(0), z.literal(-1)]).optional() });
 /** T3 v0.1.10 and later: `afterPosition: -1` reads from the first item, `beforePosition` pages back from the newest. */
 const readInput = legacyReadInput.extend({
   afterPosition: nullable(z.int().min(-1)),
@@ -732,9 +735,11 @@ export class FakeT3 {
    * How t3_thread_read pages a read without a cursor, by T3 release: `newest` (the default; T3 after PR #41378)
    * returns the newest page to every caller; `forward` (v0.1.10 and v0.1.11, for an MCP client that is not a
    * thread) reads from the first item; `legacy` (v0.1.9 and older) reads from the first item too, and its schema
-   * has no `beforePosition` and refuses `afterPosition: -1`. Read when a session starts.
+   * has no `beforePosition` and refuses `afterPosition: -1`. Two hosts that must not be read as legacy answer
+   * a cursorless read with the newest page: `union` advertises an `afterPosition` union that accepts -1, and
+   * `impostor` advertises exactly the legacy schema (a contradictory host). Read when a session starts.
    */
-  threadReadCursor: 'newest' | 'forward' | 'legacy' = 'newest';
+  threadReadCursor: 'newest' | 'forward' | 'legacy' | 'union' | 'impostor' = 'newest';
   pagedPullRequests = false;
   pullRequestStuckCursor: string | null = null;
 
@@ -838,7 +843,8 @@ export class FakeT3 {
       if (key) this.#launchResults.set(key, result);
       return result;
     });
-    tool('t3_thread_read', this.threadReadCursor === 'legacy' ? legacyReadInput : readInput, (input: ReadInput) => {
+    const readSchema = { legacy: legacyReadInput, impostor: legacyReadInput, union: unionReadInput }[this.threadReadCursor as string] ?? readInput;
+    tool('t3_thread_read', readSchema, (input: ReadInput) => {
       this.reads.push(input);
       const failure = this.readFailures.get(input.threadId);
       if (failure) throw new FakeFailure(failure.code, failure.message);
@@ -1158,7 +1164,7 @@ export class FakeT3 {
     const before = input.beforePosition ?? Infinity;
     const limit = input.limit ?? 50;
     const newestFirst = input.itemId == null &&
-      (input.beforePosition != null || (input.afterPosition == null && this.threadReadCursor === 'newest'));
+      (input.beforePosition != null || (input.afterPosition == null && ['newest', 'union', 'impostor'].includes(this.threadReadCursor)));
     const inView = (input.view ?? 'messages') === 'activity' ? () => true : (item: FakeItem) => MESSAGE_VIEW_TYPES.has(item.type);
     const remaining = thread.items.filter((item) =>
       input.itemId != null ? item.itemId === input.itemId && inView(item) : item.position > after && item.position < before && inView(item),
