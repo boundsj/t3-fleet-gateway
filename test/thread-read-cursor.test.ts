@@ -7,7 +7,7 @@ import { startFakeT3 } from './helpers/fakeT3.ts';
 import { startJob, startJobHarness } from './helpers/jobs.ts';
 
 // T3 PR #41378: a t3_thread_read with neither cursor returns the newest page to every caller. Forward scans
-// must say "from the start" (afterPosition -1, accepted since T3 v0.1.10); v0.1.9 and older refuse -1 and
+// must say "from the start" (afterPosition -1, accepted since T3 v0.1.10); v0.1.2 to v0.1.9 refuse -1 and
 // read a cursorless request from the start. The fake models all three (`threadReadCursor`), plus a host whose
 // afterPosition union accepts -1 (`union`) and a contradictory one with the legacy schema (`impostor`).
 const MODES = ['newest', 'forward', 'legacy', 'union'] as const;
@@ -100,12 +100,20 @@ for (const mode of MODES) {
   });
 }
 
-// t3_thread_read's position fields exactly as T3 advertises them: Schema.toCodecJson of the contract struct through
-// McpServer's toolJsonSchema, rendered with each release's Effect (4.0.5 for v0.1.2 to v0.1.6, 4.1.2 for v0.1.7 to
-// v0.1.9, 4.1.3 for v0.1.10 and v0.1.11, 4.1.5 on main): every version gives the same JSON.
+// t3_thread_read's position fields as T3 advertises them over HTTP, rendered from upstream source with each
+// release's Effect (4.0.5 to v0.1.6, 4.1.2 to v0.1.9, 4.1.3 to v0.1.11, 4.1.5 on main). v0.1.2 and v0.1.3 register
+// toolkits with the full codec schema (Schema.toCodecJson through McpServer's toolJsonSchema): nullable branches.
+// From v0.1.4, withAdvertisedSchemas advertises advertisedJsonSchema(tool) (McpHttpServer.ts, v0.1.4 lines
+// 1010-1054), which drops safe-integer bounds and the null branch of optional properties: a compact schema.
 const MAX = Number.MAX_SAFE_INTEGER;
-const LEGACY_WIRE = { anyOf: [{ type: 'integer', minimum: 0, maximum: MAX }, { type: 'null' }] };
-const CURRENT_WIRE = {
+/** v0.1.2 and v0.1.3. */
+const NULLABLE_LEGACY = { anyOf: [{ type: 'integer', minimum: 0, maximum: MAX }, { type: 'null' }] };
+/** v0.1.4 to v0.1.9. */
+const COMPACT_LEGACY = { type: 'integer', minimum: 0 };
+/** v0.1.10 and later. */
+const COMPACT_CURRENT = { afterPosition: { type: 'integer', minimum: -1 }, beforePosition: { type: 'integer', minimum: 0 } };
+/** The current contract in the full codec form, which no release advertises over HTTP (the fake's current modes do). */
+const NULLABLE_CURRENT = {
   afterPosition: { anyOf: [{ type: 'integer', minimum: -1, maximum: MAX }, { type: 'null' }] },
   beforePosition: { anyOf: [{ type: 'integer', minimum: 0, maximum: MAX }, { type: 'null' }] },
 };
@@ -113,15 +121,17 @@ const readSchema = (positions: Record<string, unknown>) =>
   ({ type: 'object', properties: { threadId: { type: 'string' }, ...positions }, required: ['threadId'] });
 
 test('only the known legacy forms omit the cursor; ambiguous and current schemas get -1', () => {
-  // T3 v0.1.2 to v0.1.9 on the wire, and the bare integer branch of the same schema.
-  assert.equal(legacyReadCursor(readSchema({ afterPosition: LEGACY_WIRE })), true);
-  assert.equal(legacyReadCursor(readSchema({ afterPosition: { anyOf: [{ type: 'null' }, LEGACY_WIRE.anyOf[0]] } })), true);
-  assert.equal(legacyReadCursor(readSchema({ afterPosition: { minimum: 0, type: 'integer' } })), true);
-  // T3 v0.1.10 and later, and a legacy cursor beside a beforePosition.
-  assert.equal(legacyReadCursor(readSchema(CURRENT_WIRE)), false);
-  assert.equal(legacyReadCursor(readSchema({ afterPosition: LEGACY_WIRE, beforePosition: CURRENT_WIRE.beforePosition })), false);
+  // T3 v0.1.2 and v0.1.3 (nullable, either branch order), and v0.1.4 to v0.1.9 (compact).
+  assert.equal(legacyReadCursor(readSchema({ afterPosition: NULLABLE_LEGACY })), true);
+  assert.equal(legacyReadCursor(readSchema({ afterPosition: { anyOf: [{ type: 'null' }, NULLABLE_LEGACY.anyOf[0]] } })), true);
+  assert.equal(legacyReadCursor(readSchema({ afterPosition: COMPACT_LEGACY })), true);
+  // T3 v0.1.10 and later (compact, and the codec form), and either legacy cursor beside a beforePosition.
+  assert.equal(legacyReadCursor(readSchema(COMPACT_CURRENT)), false);
+  assert.equal(legacyReadCursor(readSchema(NULLABLE_CURRENT)), false);
+  assert.equal(legacyReadCursor(readSchema({ afterPosition: NULLABLE_LEGACY, beforePosition: NULLABLE_CURRENT.beforePosition })), false);
+  assert.equal(legacyReadCursor(readSchema({ afterPosition: COMPACT_LEGACY, beforePosition: COMPACT_CURRENT.beforePosition })), false);
   // Ambiguous: a branch that may take -1, a wider combinator or keyword, or nothing readable.
-  const integer = LEGACY_WIRE.anyOf[0];
+  const integer = NULLABLE_LEGACY.anyOf[0];
   for (const afterPosition of [
     { anyOf: [{ type: 'integer', minimum: 0 }, { const: -1 }] },
     { anyOf: [integer, { type: 'null' }, { const: -1 }] },
@@ -151,8 +161,8 @@ test('only the known legacy forms omit the cursor; ambiguous and current schemas
   assert.equal(legacyReadCursor({ type: 'object' }), false);
 });
 
-test('the fake advertises t3_thread_read positions exactly as T3 releases do', async (t) => {
-  for (const [mode, expected] of [['legacy', { afterPosition: LEGACY_WIRE }], ['newest', CURRENT_WIRE], ['forward', CURRENT_WIRE]] as const) {
+test('the fake advertises positions in the full codec form: v0.1.2 and v0.1.3 for legacy, the uncompacted contract otherwise', async (t) => {
+  for (const [mode, expected] of [['legacy', { afterPosition: NULLABLE_LEGACY }], ['newest', NULLABLE_CURRENT], ['forward', NULLABLE_CURRENT]] as const) {
     const fake = await startFakeT3();
     fake.threadReadCursor = mode;
     fake.validTokens.add('synthetic-wire-token');
@@ -166,15 +176,19 @@ test('the fake advertises t3_thread_read positions exactly as T3 releases do', a
   }
 });
 
+// Exact tools/list pages: the two legacy forms against a host that refuses -1, the others against hosts that take
+// -1 and answer a cursorless read with the newest page.
 for (const [name, positions, legacy] of [
-  ['T3 v0.1.2 to v0.1.9 (nullable legacy cursor)', { afterPosition: LEGACY_WIRE }, true],
-  ['a cursor union that takes -1', { afterPosition: { anyOf: [LEGACY_WIRE.anyOf[0], { type: 'null' }, { const: -1 }] } }, false],
+  ['T3 v0.1.2 and v0.1.3 (nullable legacy cursor)', { afterPosition: NULLABLE_LEGACY }, true],
+  ['T3 v0.1.4 to v0.1.9 (compact legacy cursor)', { afterPosition: COMPACT_LEGACY }, true],
+  ['T3 v0.1.10 and later (compact cursors)', COMPACT_CURRENT, false],
+  ['a cursor union that takes -1', { afterPosition: { anyOf: [NULLABLE_LEGACY.anyOf[0], { type: 'null' }, { const: -1 }] } }, false],
 ] as const) {
   test(`wire-level discovery of ${name}: ${legacy ? 'the cursor is omitted' : '-1 is sent'} and the read starts at the first item`, async (t) => {
     const fake = await startFakeT3();
     t.after(() => fake.close());
-    // A legacy host refuses -1 and reads a cursorless request from the start; the union host takes -1 and
-    // answers a cursorless read with the newest page, so omitting the cursor there would skip items.
+    // A legacy host refuses -1 and reads a cursorless request from the start; the others would skip items
+    // if the cursor were omitted.
     fake.threadReadCursor = legacy ? 'legacy' : 'union';
     const gw = (await startJobHarness(t, { fake })).gw;
     const { threadId } = fake.launchDirect({ projectId: 'project-1', title: 'Synthetic wire thread', message: 'Synthetic first message' });
@@ -189,7 +203,7 @@ for (const [name, positions, legacy] of [
   });
 }
 
-test('a read from the start fails closed when T3 answers with a later page; work_settle sends nothing', async (t) => {
+test('a read from the start fails closed when T3 answers with a later page: a failed Thread read signal, and work_settle sends nothing', async (t) => {
   const { fake, gw, agent, tick } = await harness(t, 'impostor');
   const job = await startJob(agent);
   await tick();
@@ -200,8 +214,10 @@ test('a read from the start fails closed when T3 answers with a later page; work
   fake.delegate(threadId, 'Synthetic early task');
   fake.addActivity(threadId, 'reasoning', 150);
   const before = fake.reads.length;
+  const signal = () => gw.services.registry.signals('main').snapshot().find((entry) => entry.kind === 't3_thread_read');
   const error = await agent.callError('work_settle', { jobId: job.jobId, requestId: 'settle-impostor' });
   assert.equal(error.code, 't3_invalid_response');
+  assert.equal(signal()?.code, 't3_invalid_response', 'the host Thread read signal records the refused answer, not a success');
   assert.deepEqual(fake.reads.slice(before).filter((read) => read.view === 'activity').map((read) => read.afterPosition), [undefined],
     'the exact legacy schema omits the cursor, and the newest page it got is refused');
   assert.equal(fake.calls.includes('t3_thread_organize'), false);
@@ -216,6 +232,8 @@ test('a read from the start fails closed when T3 answers with a later page; work
   await tick();
   const stored = gw.services.jobs.store.require(other.jobId);
   assert.deepEqual([stored.readPosition, stored.activityPosition, stored.lastErrorCode], [null, null, 't3_invalid_response']);
+  assert.equal(signal()?.code, 't3_invalid_response');
+  assert.equal(fake.calls.includes('t3_thread_organize'), false);
 });
 
 test('a read from the start of a thread whose first items are gone is not taken for a later page', async (t) => {

@@ -178,7 +178,8 @@ const legacyReadInput = z.strictObject({
   itemId: nullable(z.string()),
   textOffset: nullable(z.int().min(0)),
   view: nullable(z.enum(['messages', 'activity'])),
-  // Renders as T3 v0.1.2 to v0.1.9 advertise it: { anyOf: [{ type: 'integer', minimum: 0, maximum: 2^53 - 1 }, { type: 'null' }] }.
+  // Renders as T3 v0.1.2 and v0.1.3 advertise it: { anyOf: [{ type: 'integer', minimum: 0, maximum: 2^53 - 1 }, { type: 'null' }] }.
+  // v0.1.4 to v0.1.9 send the compact { type: 'integer', minimum: 0 }; tests serve that form with toolsListPages.
   afterPosition: nullable(z.int().min(0)),
   limit: nullable(z.int().min(1).max(100)),
   runLimit: nullable(z.int().min(1).max(50)),
@@ -734,7 +735,7 @@ export class FakeT3 {
   /**
    * How t3_thread_read pages a read without a cursor, by T3 release: `newest` (the default; T3 after PR #41378)
    * returns the newest page to every caller; `forward` (v0.1.10 and v0.1.11, for an MCP client that is not a
-   * thread) reads from the first item; `legacy` (v0.1.9 and older) reads from the first item too, and its schema
+   * thread) reads from the first item; `legacy` (v0.1.2 to v0.1.9) reads from the first item too, and its schema
    * has no `beforePosition` and refuses `afterPosition: -1`. Two hosts that must not be read as legacy answer
    * a cursorless read with the newest page: `union` advertises an `afterPosition` union that accepts -1, and
    * `impostor` advertises exactly the legacy schema (a contradictory host). Read when a session starts.
