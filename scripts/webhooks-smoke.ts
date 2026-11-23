@@ -55,7 +55,7 @@ interface Payload {
 }
 interface Delivery { path: string; body: string; payload: Payload; auth: string | undefined; at: number; action: string }
 interface FeedEvent { cursor: string; jobId: string; type: string; fromState: string | null; toState: string | null }
-interface Job { jobId: string; threadId: string | null; state: string; waitingOnDelegatedWork: boolean }
+interface Job { jobId: string; threadId: string | null; state: string; waitingOnDelegatedWork: boolean; lastError?: { code: string } | null }
 interface CliResult { stdout: string; stderr: string }
 
 function check(condition: unknown, label: string): asserts condition {
@@ -336,7 +336,10 @@ async function main() {
     const healthySubscriptionLatencyMs = parallelEvent.at - parallelStartedAt;
     check(healthySubscriptionLatencyMs < 5000 && parallelEvent.at - held.at < 10_000,
       'healthy_subscription_delivers_within_five_seconds_while_another_response_is_still_held');
-    check(needed.payload.state === 'needs_input' && failure.payload.state === 'failed' && cancellation.payload.state === 'cancelled',
+    // A failed worker turn emits type 'failed' but leaves the job idle and recoverable.
+    const failedStatus = await status(failed.jobId);
+    check(needed.payload.state === 'needs_input' && failure.payload.state === 'idle' && cancellation.payload.state === 'cancelled' &&
+      failedStatus.state === 'idle' && failedStatus.lastError?.code === 't3_run_failed',
       'required_action_states_deliver_while_another_subscription_is_retrying');
     await stop(true);
     await start();
