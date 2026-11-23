@@ -95,7 +95,7 @@ for (const baseline of [null, [pr(), pr('merged', 22), pr('closed', 23)]]) {
   });
 }
 
-test('complete new inline lists avoid lookup and discard watch metadata', async (t) => {
+test('a read from the start is not a first page: only the count comes inline, and the full list is looked up', async (t) => {
   const { fake, gw, agent, tick, tickAfter } = await startJobHarness(t);
   fake.inlinePullRequests = 'open-only';
   const job = await startJob(agent);
@@ -104,10 +104,13 @@ test('complete new inline lists avoid lookup and discard watch metadata', async 
   for (const all of [[], [pr()]]) {
     fake.pullRequests.set(threadId, all);
     gw.services.jobs.store.update(job.jobId, { readPosition: null });
+    const lookups = fake.calls.filter((name) => name === 'list_thread_pull_requests').length;
     await tickAfter(60_001);
+    // T3 inlines links only on a read with no cursor; the watcher's first read sends afterPosition -1.
+    assert.equal(fake.reads.filter((read) => read.view === 'messages').at(-1)?.afterPosition, -1);
+    assert.equal(fake.calls.filter((name) => name === 'list_thread_pull_requests').length, lookups + 1);
     assert.deepEqual(gw.services.jobs.store.require(job.jobId).pullRequests, all);
   }
-  assert.equal(fake.calls.includes('list_thread_pull_requests'), false);
 });
 
 test('failed full-list lookup never replaces history with an open-only list', async (t) => {

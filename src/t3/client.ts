@@ -218,7 +218,8 @@ export class T3Client {
         // A failed response never switches tool names: answers have no downstream retry key.
         const action = PENDING_ACTIONS[name];
         const monitor = name === 't3_thread_list' && args.allProjects === true;
-        const discover = monitor || action !== undefined || name === 't3_thread_launch' || name === 'orchestrator_capabilities';
+        const fromStart = name === 't3_thread_read' && args.afterPosition === FROM_START;
+        const discover = monitor || fromStart || action !== undefined || name === 't3_thread_launch' || name === 'orchestrator_capabilities';
         const tools = discover ? await this.#tools(connection, client, timeout) : undefined;
         if (monitor && !this.#hasInput(tools!, name, 'allProjects')) {
           throw new GatewayError('t3_tool_failed', 'This host does not support shared thread monitoring.');
@@ -240,6 +241,8 @@ export class T3Client {
           if (keyedLaunch && !retryingKeyedLaunch) launchCredential = connection.token;
         }
         if (name === 'orchestrator_capabilities' && !this.#hasInput(tools!, name, 'search')) delete input.search;
+        // T3 v0.1.9 and older refuse -1 (afterPosition minimum 0), and read a cursorless request from the start.
+        if (fromStart && legacyReadCursor(tools!.get(name))) delete input.afterPosition;
         options.beforeSend?.(sha256Hex(JSON.stringify([this.hostId, connection.token])));
         sent = true;
         const result = await client.callTool({ name: toolName, arguments: input }, { timeout, signal: this.#signal });
@@ -432,7 +435,9 @@ export class T3Client {
   }
 
   /**
-   * One page of a thread's state and timeline. `afterPosition` continues from a previous `nextPosition`.
+   * One page of a thread's state and timeline. `afterPosition` continues from a previous `nextPosition`;
+   * `null` pages forward from the first item. Omitted (state-only and `itemId` reads), T3 chooses the page:
+   * the newest on current T3, so never omit it to mean "from the start".
    * Callers name the view: `messages` returns user and assistant messages and proposed plans only,
    * `activity` every timeline item (delegated work, reasoning, tools, checkpoints); positions are shared.
    * With `itemId`, T3 returns that one item (none if it has no such item), its text from `textOffset`.
@@ -447,7 +452,9 @@ export class T3Client {
     runLimit?: number;
     maxCharsPerItem?: number;
   }): Promise<ThreadRead> {
-    return this.callTool('t3_thread_read', withoutNulls(input), threadReadSchema, { readOnly: true });
+    const args = withoutNulls(input);
+    if (input.afterPosition === null) args.afterPosition = FROM_START;
+    return this.callTool('t3_thread_read', args, threadReadSchema, { readOnly: true });
   }
 
   /** Threads in a project, newest first; omitted settled includes both shelves on current T3. Archived/deleted threads are excluded. */
@@ -574,6 +581,28 @@ export class T3Client {
     }
     return new T3TransportError('host_unreachable', `Cannot reach T3 on host ${this.hostId}${detail}`, delivery, { cause: error });
   }
+}
+
+/**
+ * `t3_thread_read`'s explicit "from the first item" cursor (T3 v0.1.10 and later). Since T3 PR #41378 a read
+ * with neither cursor returns the newest page to every caller, so a forward scan must send it.
+ */
+const FROM_START = -1;
+
+/** True when T3 advertises a non-negative `afterPosition` minimum (v0.1.9 and older): -1 would be refused. */
+function legacyReadCursor(inputSchema: unknown): boolean {
+  const property = field(field(inputSchema, 'properties'), 'afterPosition');
+  const branches = ['anyOf', 'oneOf', 'allOf'].flatMap((key) => {
+    const value = field(property, key);
+    return Array.isArray(value) ? value : [];
+  });
+  const minimums = [property, ...branches].map((schema) => field(schema, 'minimum')).filter((value) => typeof value === 'number');
+  // Unknown or absent: send -1, so a host that refuses it fails the read rather than skipping older items.
+  return minimums.length > 0 && minimums.every((minimum) => minimum >= 0);
+}
+
+function field(value: unknown, key: string): unknown {
+  return value && typeof value === 'object' && Object.hasOwn(value, key) ? Reflect.get(value, key) : undefined;
 }
 
 /** Drop null and undefined fields so optional T3 inputs are omitted rather than sent as null. */

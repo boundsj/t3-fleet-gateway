@@ -173,7 +173,7 @@ const launchInput = z.strictObject({
   message: nullable(z.string().max(120000)),
   attachments: nullable(z.array(attachmentMetadata).max(8)),
 });
-const readInput = z.strictObject({
+const legacyReadInput = z.strictObject({
   threadId: z.string(),
   itemId: nullable(z.string()),
   textOffset: nullable(z.int().min(0)),
@@ -183,6 +183,12 @@ const readInput = z.strictObject({
   runLimit: nullable(z.int().min(1).max(50)),
   maxCharsPerItem: nullable(z.int().min(1).max(50000)),
 });
+/** T3 v0.1.10 and later: `afterPosition: -1` reads from the first item, `beforePosition` pages back from the newest. */
+const readInput = legacyReadInput.extend({
+  afterPosition: nullable(z.int().min(-1)),
+  beforePosition: nullable(z.int().min(0)),
+});
+type ReadInput = z.output<typeof readInput>;
 const listInput = z.strictObject({
   allProjects: nullable(z.boolean()),
   projectId: nullable(z.string()),
@@ -722,6 +728,13 @@ export class FakeT3 {
   readonly pullRequests = new Map<string, Record<string, unknown>[]>();
   inlinePullRequests: boolean | 'open-only' | 'preview' = false;
   budgetThreadReads = false;
+  /**
+   * How t3_thread_read pages a read without a cursor, by T3 release: `newest` (the default; T3 after PR #41378)
+   * returns the newest page to every caller; `forward` (v0.1.10 and v0.1.11, for an MCP client that is not a
+   * thread) reads from the first item; `legacy` (v0.1.9 and older) reads from the first item too, and its schema
+   * has no `beforePosition` and refuses `afterPosition: -1`. Read when a session starts.
+   */
+  threadReadCursor: 'newest' | 'forward' | 'legacy' = 'newest';
   pagedPullRequests = false;
   pullRequestStuckCursor: string | null = null;
 
@@ -825,7 +838,7 @@ export class FakeT3 {
       if (key) this.#launchResults.set(key, result);
       return result;
     });
-    tool('t3_thread_read', readInput, (input) => {
+    tool('t3_thread_read', this.threadReadCursor === 'legacy' ? legacyReadInput : readInput, (input: ReadInput) => {
       this.reads.push(input);
       const failure = this.readFailures.get(input.threadId);
       if (failure) throw new FakeFailure(failure.code, failure.message);
@@ -1136,22 +1149,27 @@ export class FakeT3 {
    * assistant messages and proposed plans, skipping everything else; `activity` returns every item.
    * `nextPosition` is the last returned item's position either way. With `itemId`, as a live T3 does,
    * the page is that one item (none when the thread has no such item), its text from `textOffset`.
+   * A newest-first read (`beforePosition`, or no cursor under `threadReadCursor: 'newest'`) returns the newest
+   * `limit` items before it with `hasMore: false` and `earlierPosition` when older items exist.
    */
-  #read(input: z.output<typeof readInput>): Record<string, unknown> {
+  #read(input: ReadInput): Record<string, unknown> {
     const thread = this.#thread(input.threadId);
     const after = input.afterPosition ?? -1;
+    const before = input.beforePosition ?? Infinity;
     const limit = input.limit ?? 50;
+    const newestFirst = input.itemId == null &&
+      (input.beforePosition != null || (input.afterPosition == null && this.threadReadCursor === 'newest'));
     const inView = (input.view ?? 'messages') === 'activity' ? () => true : (item: FakeItem) => MESSAGE_VIEW_TYPES.has(item.type);
     const remaining = thread.items.filter((item) =>
-      input.itemId != null ? item.itemId === input.itemId && inView(item) : item.position > after && inView(item),
+      input.itemId != null ? item.itemId === input.itemId && inView(item) : item.position > after && item.position < before && inView(item),
     );
-    const page = remaining.slice(0, limit);
+    const page = newestFirst ? remaining.slice(-limit) : remaining.slice(0, limit);
     const maxChars = Math.min(input.maxCharsPerItem ?? 4000, this.budgetThreadReads ? 20000 : 50000);
     const offset = input.itemId != null ? (input.textOffset ?? 0) : 0;
     const active = this.#activeRun(thread);
     const result = {
       thread: {
-        ...this.#summary(thread, input.afterPosition === undefined && input.itemId === undefined),
+        ...this.#summary(thread, input.afterPosition == null && input.itemId == null && input.beforePosition == null),
         projectId: thread.projectId,
         activeRunId: active?.runId ?? null,
         titleRegeneration: null,
@@ -1173,15 +1191,21 @@ export class FakeT3 {
         nextTextOffset: item.text.length > offset + maxChars ? offset + maxChars : null,
       })),
       nextPosition: page.at(-1)?.position ?? null,
-      hasMore: remaining.length > page.length,
+      hasMore: !newestFirst && remaining.length > page.length,
     };
     if (this.budgetThreadReads) {
-      // New T3 budgets the serialized result and keeps at least one item, even when it alone is large.
-      while (result.items.length > 1 && Buffer.byteLength(JSON.stringify(result)) > 30000) result.items.pop();
+      // New T3 budgets the serialized result and keeps at least one item, even when it alone is large,
+      // dropping items from the end it pages away from.
+      while (result.items.length > 1 && Buffer.byteLength(JSON.stringify(result)) > 30000) {
+        if (newestFirst) result.items.shift(); else result.items.pop();
+      }
       result.nextPosition = result.items.at(-1)?.position ?? null;
-      result.hasMore = remaining.length > result.items.length;
+      result.hasMore = !newestFirst && remaining.length > result.items.length;
     }
-    return result;
+    if (this.threadReadCursor === 'legacy') return result;
+    const first = result.items[0]?.position;
+    const earlier = newestFirst && first !== undefined && remaining.some((item) => item.position < first);
+    return { ...result, earlierPosition: earlier ? first : null };
   }
 }
 
