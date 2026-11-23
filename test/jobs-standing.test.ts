@@ -496,7 +496,7 @@ describe('standing jobs: a coordinator that delegates', () => {
     assert.deepEqual([job.readPosition, job.activityPosition], [end, end], 'both views start at the end');
     assert.deepEqual(
       fake.reads.slice(before).filter((read) => read.view === 'activity').map((read) => read.afterPosition ?? null),
-      [end, end - 100, end - 200, end - 300, null],
+      [end, end - 100, end - 200, end - 300, -1],
       'the activity tail after the last message, then back 100 positions per read',
     );
 

@@ -27,6 +27,17 @@ export const pullRequestSchema = z.object({
   } catch { return false; }
 });
 export type PullRequest = z.infer<typeof pullRequestSchema>;
+
+/**
+ * The thread read's inline PR links when they are the whole list, otherwise undefined (use the list tool).
+ * Older T3 inlines every link with no count. v0.1.10 and later inline only open links, and only on a read
+ * with no cursor, beside a count of all links: only an exact count proves that list complete.
+ */
+export function completeInlinePullRequests(thread: Record<string, unknown>): unknown[] | undefined {
+  const inline = thread.pullRequests;
+  if (!Array.isArray(inline)) return undefined;
+  return !Object.hasOwn(thread, 'pullRequestCount') || thread.pullRequestCount === inline.length ? inline : undefined;
+}
 /** One PR is one key, whatever the case of its host and repository. */
 export const prKey = (pr: PullRequest): string => `${pr.host}/${pr.repository}#${pr.number}`.toLowerCase();
 const byKey = (a: PullRequest, b: PullRequest): number => prKey(a).localeCompare(prKey(b));

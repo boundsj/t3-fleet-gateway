@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  displayPullRequests, MAX_PULL_REQUESTS, MAX_TRACKED_PULL_REQUESTS, prKey, pullRequestEvents, pullRequestListSchema, readPullRequests,
+  completeInlinePullRequests, displayPullRequests, MAX_PULL_REQUESTS, MAX_TRACKED_PULL_REQUESTS, prKey, pullRequestEvents, pullRequestListSchema, readPullRequests,
 } from '../src/jobs/pullRequests.ts';
 import type { JobDetailView, JobView } from '../src/mcp/workTools.ts';
 import { DEFAULT_WEBHOOK_EVENTS } from '../src/webhooks/config.ts';
@@ -61,7 +61,7 @@ for (const inline of [true, false]) {
 }
 
 for (const baseline of [null, [pr(), pr('merged', 22), pr('closed', 23)]]) {
-  test(`open-only first pages keep historical PRs without replaying merges (${baseline ? 'cached' : 'unknown'} baseline)`, async (t) => {
+  test(`open-only hosts send a count without links on forward reads; the full list keeps history without replaying merges (${baseline ? 'cached' : 'unknown'} baseline)`, async (t) => {
     const { fake, gw, agent, tick, tickAfter } = await startJobHarness(t);
     fake.inlinePullRequests = 'open-only';
     const job = await startJob(agent);
@@ -74,15 +74,15 @@ for (const baseline of [null, [pr(), pr('merged', 22), pr('closed', 23)]]) {
     const calls = () => fake.calls.filter((c) => c === 'list_thread_pull_requests').length;
     await tickAfter(60_001);
     assert.deepEqual(gw.services.jobs.store.require(job.jobId).pullRequests, all);
-    assert.equal(calls(), 1, 'a partial inline list needs the full list tool');
+    assert.equal(calls(), 1, 'a count without a complete inline list needs the full list tool');
     assert.equal(merges().length, 0, 'historical merges are not new events');
-    // The next read is a later page: T3 sends the count but no inline list.
+    // Every watcher read has a cursor (-1 from the start), so T3 sends the count but no inline list.
     assert.notEqual(gw.services.jobs.store.require(job.jobId).readPosition, null);
     await tickAfter(60_001);
     assert.equal(calls(), 2);
     assert.deepEqual(gw.services.jobs.store.require(job.jobId).pullRequests, all);
-    assert.equal(merges().length, 0, 'history does not reappear as a new merge on a later page');
-    // A followed PR can merge between two first-page observations too.
+    assert.equal(merges().length, 0, 'history does not reappear as a new merge on the next read');
+    // A followed PR can merge between two reads from the start too.
     fake.pullRequests.set(threadId, [pr('merged'), pr('merged', 22), pr('closed', 23)]);
     gw.services.jobs.store.update(job.jobId, { readPosition: null });
     await tickAfter(60_001);
@@ -95,7 +95,7 @@ for (const baseline of [null, [pr(), pr('merged', 22), pr('closed', 23)]]) {
   });
 }
 
-test('complete new inline lists avoid lookup and discard watch metadata', async (t) => {
+test('a read from the start is not a first page: only the count comes inline, and the full list is looked up', async (t) => {
   const { fake, gw, agent, tick, tickAfter } = await startJobHarness(t);
   fake.inlinePullRequests = 'open-only';
   const job = await startJob(agent);
@@ -104,10 +104,29 @@ test('complete new inline lists avoid lookup and discard watch metadata', async 
   for (const all of [[], [pr()]]) {
     fake.pullRequests.set(threadId, all);
     gw.services.jobs.store.update(job.jobId, { readPosition: null });
+    const lookups = fake.calls.filter((name) => name === 'list_thread_pull_requests').length;
     await tickAfter(60_001);
+    // T3 inlines links only on a read with no cursor; the watcher's first read sends afterPosition -1.
+    assert.equal(fake.reads.filter((read) => read.view === 'messages').at(-1)?.afterPosition, -1);
+    assert.equal(fake.calls.filter((name) => name === 'list_thread_pull_requests').length, lookups + 1);
     assert.deepEqual(gw.services.jobs.store.require(job.jobId).pullRequests, all);
   }
-  assert.equal(fake.calls.includes('list_thread_pull_requests'), false);
+});
+
+test('an inline list is used only when it is the whole list: every link, or open links with an exact count', () => {
+  const all = [pr(), pr('merged', 22), pr('closed', 23)];
+  // Older T3: every link inline, with no count.
+  assert.deepEqual(completeInlinePullRequests({ pullRequests: all }), all);
+  assert.deepEqual(completeInlinePullRequests({ pullRequests: [] }), []);
+  // v0.1.10 and later, first page (a read with no cursor): open links inline beside a count of all links.
+  assert.deepEqual(completeInlinePullRequests({ pullRequests: [pr()], pullRequestCount: 1 }), [pr()], 'exact count: complete');
+  assert.equal(completeInlinePullRequests({ pullRequests: [pr()], pullRequestCount: 3 }), undefined, 'partial: look up the full list');
+  assert.equal(completeInlinePullRequests({ pullRequests: [], pullRequestCount: 2 }), undefined, 'only closed links: look up');
+  assert.equal(completeInlinePullRequests({ pullRequests: [pr()], pullRequestCount: 3, openPullRequestCount: 1 }), undefined, 'five-link preview');
+  // Any other read: the count alone, or nothing.
+  assert.equal(completeInlinePullRequests({ pullRequestCount: 0 }), undefined);
+  assert.equal(completeInlinePullRequests({}), undefined);
+  assert.equal(completeInlinePullRequests({ pullRequests: 'not a list', pullRequestCount: 0 }), undefined);
 });
 
 test('failed full-list lookup never replaces history with an open-only list', async (t) => {
